@@ -75,6 +75,8 @@ export interface OrchestratorApi {
   patchProject?(projectId: string, patch: PatchProjectReq): Promise<Project>;
   createMember?(projectId: string, req: CreateMemberReq): Promise<Member>;
   runtimeInfo?(): Promise<RuntimeInfo>;
+  /** 0.2.8: 앱에서 CLI 로그인이 끝났다(server/cli-login.ts). 떠 있는 팀장에게 새 계정을 적용한다(Orchestrator.cliLoggedIn). */
+  cliLoggedIn?(cli: "claude" | "codex", after: string | null, before: string | null): Promise<{ changed: boolean | null; reopenedNow: number; atNextTurn: number }>;
   /** 실행 엔진(herdr-core) 상태. 아직 모르거나 엔진이 없으면 null. */
   engineStatus?(): import("../shared/types.ts").EngineStatus | null;
   /** 운영 안내(예: Tailscale 꺼짐)를 Mac 알림으로 띄운다. 결재 알림 설정과 무관하다. 실제로 띄웠으면 true. */

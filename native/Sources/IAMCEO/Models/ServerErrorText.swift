@@ -444,5 +444,17 @@ enum ServerErrorText {
         "interrupt_no_turn": (ko: "멈출 턴이 없습니다. CLI가 쉬는 중이라 멈춤 키를 보내지 않았습니다", en: "There is no turn to stop. The CLI is idle, so no stop key was sent"),
         "interrupt_background_program": (ko: "멈출 턴이 없습니다. 턴은 끝났고 Codex가 띄운 백그라운드 프로그램만 돌고 있어 멈춤 키를 보내지 않았습니다. 그 프로그램은 터미널에서 /ps 로 보고 /stop 으로 닫을 수 있습니다", en: "There is no turn to stop. The turn ended and only background programs that Codex started are running, so no stop key was sent. In the terminal, /ps lists them and /stop closes them"),
         "last_error_compact_draft": (ko: "압축을 멈춘 뒤 입력칸에 글이 남아 전달을 기다립니다. IAMCEO가 넣은 압축 명령이면 터미널에서 지워 주세요", en: "Deliveries wait because text was left in the input box after the compaction was stopped. If it is the compaction command IAMCEO typed, clear it in the terminal"),
+        "cli_login_not_found": (ko: "이 로그인을 찾을 수 없습니다. 처음부터 다시 시작하세요", en: "This sign-in wasn't found. Start again"),
+        "cli_login_not_waiting": (ko: "지금은 코드를 받을 수 없습니다. 로그인 상태를 다시 확인하세요", en: "This sign-in can't take a code right now. Check its status again"),
+        "cli_login_code_unsupported": (ko: "이 로그인은 코드를 붙여넣지 않습니다. 열린 페이지에 일회용 코드를 넣으면 끝납니다", en: "This sign-in doesn't take a pasted code. Enter the one-time code on the page and it finishes"),
+        "cli_login_code_invalid": (ko: "코드 모양이 맞지 않습니다. 로그인한 뒤 나온 코드를 그대로 붙여넣으세요", en: "That doesn't look like the code. Paste the code shown after you sign in, exactly as shown"),
+        "cli_login_code_other": (ko: "이 로그인에서 받은 코드가 아닙니다. 방금 연 주소에서 로그인한 뒤 나온 코드를 붙여넣으세요", en: "That code is from a different sign-in. Paste the code shown after signing in at the address you just opened"),
+        "cli_login_code_rejected": (ko: "CLI가 코드를 받지 않았습니다. 코드가 잘렸거나 이미 쓴 코드입니다. 다시 로그인해 새 코드를 붙여넣으세요", en: "The CLI didn't accept the code. It was cut off or already used. Sign in again and paste the new code"),
+        "cli_login_failed": (ko: "로그인하지 못했습니다", en: "Sign-in failed"),
+        "cli_login_start_failed": (ko: "로그인을 시작하지 못했습니다. 잠시 뒤 다시 해 보세요", en: "Couldn't start the sign-in. Try again in a moment"),
+        "cli_login_cli_missing": (ko: "이 Mac에 그 CLI가 설치되어 있지 않습니다", en: "That CLI isn't installed on this Mac"),
+        "cli_login_expired": (ko: "로그인 시간이 지났습니다. 처음부터 다시 시작하세요", en: "The sign-in timed out. Start again"),
+        "cli_login_device_disabled": (ko: "이 계정(또는 조직)은 기기 코드 로그인이 꺼져 있습니다. ChatGPT 설정에서 Codex 기기 코드 로그인을 켜거나, Mac 터미널에서 codex login 으로 로그인하세요", en: "Device code sign-in is off for this account (or workspace). Turn on device code sign-in for Codex in ChatGPT settings, or run codex login in a terminal on the Mac"),
+        "cli_account_unreadable": (ko: "계정 정보를 읽지 못했습니다", en: "Couldn't read the account"),
     ]
 }

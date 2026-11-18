@@ -160,6 +160,11 @@ export interface AppliedConfig {
   effort: Effort | null;
   staffModel: string | null;
   staffEffort: Effort | null;
+  /**
+   * 0.2.8: 이 세션을 띄울 때의 CLI 계정 세대(orchestrator 의 CliAccountEpoch). 앱에서 다른 계정으로 로그인한 적이 없으면 없다(0).
+   * 세대가 다르면 쉴 때 같은 대화를 새 계정으로 다시 연다.
+   */
+  account?: number;
 }
 
 export interface NewDecision {

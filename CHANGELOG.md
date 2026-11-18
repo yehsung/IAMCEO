@@ -7,6 +7,10 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 아직 내지 않은 것
+
+- **폰에서도 AI 계정을 바꾸거나 다시 로그인합니다.** 설정 › AI 모델의 'AI 계정'에 이 Mac의 Claude Code·Codex가 쓰는 계정(메일·요금제)이 보이고, '다른 계정으로 로그인'을 누르면 Mac 터미널 없이 지금 쓰는 기기에서 로그인합니다. Claude Code는 열린 페이지에서 로그인한 뒤 나오는 코드를 복사해 붙여넣으면 끝나고(서버가 도는 Mac에서는 브라우저에서 허용만 누르면 끝납니다), Codex는 페이지에 앱이 보여 주는 일회용 코드를 넣으면 끝납니다. 사용 한도 카드에도 같은 단추가 있습니다. 다른 계정으로 바꾸면 한도로 멈춘 팀장은 곧바로 같은 대화를 새 계정으로 이어 열어 멈춘 일을 이어 가고, 다른 팀장은 하던 일을 마치는 대로(쉬고 있으면 곧바로) 같은 대화를 새 계정으로 다시 엽니다. 로그인 오류로 멈춘 팀장은 같은 계정으로 다시 로그인해도 곧바로 이어 갑니다. 로그인 코드와 토큰은 서버 기록에 남지 않습니다.
+
 ### 0.2.7 — 2026-11-16
 
 - **하위 폴더에서 일하던 팀장의 압축이 '결과 모름'으로 멈추지 않습니다.** Claude 팀장이 작업 폴더 안의 하위 폴더로 들어가 일하던 중에 문맥을 압축하면, 압축은 끝났는데 서버가 그 끝을 알아보지 못해 그 팀장에게 가는 글이 모두 멈춰 있었습니다. 이제 세션 기록의 압축 표시를 폴더와 상관없이 알아보고, 기록에서 찾지 못해도 Claude가 직접 남기는 '압축 끝' 알림과 쉬는 CLI로 끝을 확인합니다. 이미 이렇게 멈춰 있던 팀장도 새 서버가 뜨면 곧바로 풀려 기다리던 글이 나갑니다. 같은 까닭으로 그런 팀장이 받은 글을 '전달됐는지 확인하는 중'으로 오래 두거나 보관을 막던 것도 고쳤습니다.
@@ -165,6 +169,10 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### Unreleased
+
+- **Switch or renew AI accounts from your phone.** Settings › AI models › AI accounts shows the account (email, plan) that Claude Code and Codex on this Mac use, and "Sign in with another account" signs in from the device you're holding, with no Mac terminal. For Claude Code, sign in on the page that opens, then copy and paste the code it shows (on the server's own Mac, allowing access in the browser is enough). For Codex, enter the one-time code the app shows on the page. Usage limit cards have the same button. After switching to another account, staff stopped at the limit reopen the same conversation with the new account right away and continue, and other staff reopen with the new account as soon as they finish their current work (right away if idle). Staff stopped by a sign-in error continue right away even if you sign in again with the same account. Sign-in codes and tokens are never written to the server logs.
 
 ### 0.2.7 — 2026-11-16
 

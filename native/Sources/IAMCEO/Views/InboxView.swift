@@ -1090,7 +1090,11 @@ private struct DecisionCard: View {
                     }
                     if !decision.images.isEmpty { ImageStrip(images: decision.images) }
                     if let fileID = (latest ?? decision).fileId { FileChip(title: fileTitle) { onOpenFile(fileID) } }
-                    if decision.kind == "usage_limit" { usageLimitArea } else { answerArea }
+                    if decision.kind == "usage_limit" {
+                        usageLimitArea
+                            // 0.2.8: 서버가 AI 계정 로그인을 아는지(단추를 보일지) 읽는다. 서버는 계정을 1분 동안 기억한다.
+                            .task(id: store.api.map { ObjectIdentifier($0) }) { if !store.isDemo { await store.cliAccounts.attach(store.api) } }
+                    } else { answerArea }
                 } else {
                     // The person reviewed the latest version and it is no longer open.
                     AnsweredBody(decision: decision, asker: asker)
@@ -1220,6 +1224,21 @@ private struct DecisionCard: View {
                 // Same 8pt gap as the approval card's option list.
                 ChipFlow(spacing: 8) {
                     ForEach(buttons, id: \.choice) { button in usageLimitButton(button) }
+                }
+            }
+            // 0.2.8: 이 기기에서 바로 다른 계정으로 로그인한다. 서버가 그 CLI 의 한도로 멈춘 팀장을 새 계정으로 다시 열어 이어 가게 한다.
+            // 옛 서버(로그인을 모른다)·샘플·보관함에는 보이지 않는다.
+            if let cli = decision.usageLimit?.cli, ["claude", "codex"].contains(cli), store.cliAccounts.supported, !store.isDemo, !store.isArchive {
+                VStack(alignment: .leading, spacing: 6) {
+                    Button { store.cliAccounts.requestedLogin = CLILoginTarget(cli: cli) } label: {
+                        Label(String(localized: "다른 계정으로 로그인"), systemImage: "person.crop.circle.badge.checkmark")
+                    }
+                    .ceSecondaryButton()
+                    // 로그인은 결재 답과 따로다: 실행 엔진 연결 문제로 카드가 잠겨도 서버에 닿으면 로그인한다(다시 여는 것은 서버가 연결된 뒤에 한다).
+                    .disabled(store.connectionStatus != .connected)
+                    Text(String(localized: "로그인하면 한도로 멈춘 팀장을 새 계정으로 같은 대화에서 이어 갑니다."))
+                        .font(CEFont.meta).foregroundStyle(CE.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if busy { ProgressView().controlSize(.small) }

@@ -1748,6 +1748,11 @@ export class CoreRunner implements FullRunner {
     if (track && this.claudeLingers(track, terminal)) return false;
     const state = this.stateOf(track, terminal);
     if (["idle", "done"].includes(state || "")) return true;
+    // 0.2.8: 로그인(계정) 오류로 턴을 끝낸 Claude(claudeQuiet 의 login). core 는 working 을 알리지만(11-16 실측: 99분) Claude 는 기록으로 턴을 끝내고
+    // 빈 입력칸에서 기다린다. 다시 로그인한 뒤 같은 대화를 이어 열려면 끝내야 한다. 뒤 작업이 남았으면 위에서 이미 거절했다.
+    // 화면에 뒤 작업 표시(label)가 있으면 끝내면 그 작업이 죽는다: 로그인 오류로 끝난 턴이어도 거절한다(리뷰 지적 — 판정이 login 이면 claudeLingers 는 거짓이다).
+    const quiet = track && track.terminal.address === terminal.address ? this.claudeQuietOn(track, terminal) : null;
+    if (quiet?.kind === "login" && !quiet.label) return true;
     return state === "error" && !!track && track.terminal.address === terminal.address && (terminal.turn ?? 0) <= track.endedTurn;
   }
   async stop(member: RunnerMember, opts: { whileWorking?: boolean } = {}): Promise<void> {

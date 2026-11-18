@@ -1039,3 +1039,58 @@ export interface UsageReport {
   daily: UsageDayRow[];
   limits: UsageLimitWindow[];
 }
+
+// ---- 0.2.8: AI 계정 로그인 — 폰에서도 Claude Code·Codex 계정을 바꾸거나 다시 로그인한다(GET /api/cli-accounts, /api/cli-login) ----
+/** 로그인을 다루는 CLI. 팀장의 cli 값과 같다. */
+export type CliAccountCli = "claude" | "codex";
+/**
+ * 이 Mac 의 CLI 가 지금 쓰는 계정. 서버가 CLI 의 기록(claude auth status, ~/.codex/auth.json)으로 읽는다.
+ * loggedIn null: 읽지 못했다(problem 에 까닭). 메일·조직·요금제는 CLI 가 알려 준 그대로다(없으면 null).
+ */
+export interface CliAccount {
+  cli: CliAccountCli;
+  installed: boolean;
+  loggedIn: boolean | null;
+  email: string | null;
+  organization: string | null;
+  /** 요금제 이름(예: max, pro, prolite). CLI 가 준 값 그대로. */
+  plan: string | null;
+  /** 로그인 방식(예: claude.ai, api_key, chatgpt). */
+  method: string | null;
+  checkedAt: string;
+  /** 읽지 못한 까닭(오류 코드). */
+  problem?: string | null;
+}
+/**
+ * starting: CLI 를 띄우는 중 · waiting: 주소(·코드)가 나와 대표의 로그인을 기다린다 · verifying: 붙여넣은 코드를 CLI 가 확인하는 중 ·
+ * succeeded·failed·cancelled·expired: 끝났다(서버는 끝난 로그인을 10분 동안 보인다).
+ */
+export type CliLoginPhase = "starting" | "waiting" | "verifying" | "succeeded" | "failed" | "cancelled" | "expired";
+/** 로그인 뒤 떠 있는 팀장에게 새 계정을 적용한 것: 바로 다시 연 팀장 수, 다음 일을 받기 전에 다시 열 팀장 수. */
+export interface CliLoginApplied { reopenedNow: number; atNextTurn: number }
+export interface CliLogin {
+  id: string;
+  cli: CliAccountCli;
+  /** paste_code: 주소에서 로그인한 뒤 나온 코드를 붙여넣는다(Claude) · device_code: 열린 페이지에 userCode 를 넣는다(Codex). */
+  flow: "paste_code" | "device_code";
+  phase: CliLoginPhase;
+  startedAt: string;
+  expiresAt: string;
+  endedAt: string | null;
+  /** 어느 기기에서나 여는 로그인 페이지. */
+  url: string | null;
+  /** Claude: 서버가 도는 Mac 의 브라우저에서 열면 코드 없이 끝나는 주소(localhost 로 돌아온다). 다른 기기에서는 쓸 수 없다. */
+  localUrl: string | null;
+  /** Codex: 로그인 페이지에 넣는 일회용 코드. */
+  userCode: string | null;
+  error: { code: string; message: string } | null;
+  /** 성공한 뒤 다시 읽은 계정. */
+  account: CliAccount | null;
+  /** 로그인 전과 다른 계정인가. 전 계정을 몰랐으면 null. */
+  accountChanged: boolean | null;
+  applied: CliLoginApplied | null;
+}
+export interface CliAccountsResponse { accounts: CliAccount[]; logins: CliLogin[] }
+export interface StartCliLoginReq { cli: CliAccountCli; restart?: boolean }
+export interface CliLoginCodeReq { code: string }
+// ---- 끝 ----

@@ -2,7 +2,7 @@ import { configuredSecretRoots } from "./secret-paths.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { ModelCatalogReader } from "./models.ts";
 import { CONTROL_UNKNOWN_NOTE, CORE_RECONNECT_HELD_NOTE, HOLD_NOTES, REOPEN_RETRY_NOTE, startingUnknownNote, stopCheckHeldNote } from "./hold-codes.ts";
-import { ApiRecovery, classifyTurnError, limitedModelName, modelCreditLimit, NoTerminalError, USAGE_MODEL_PREFIX, usageModelResumeText, withRo, type ApiRecoveryOptions } from "./api-outage.ts";
+import { ApiRecovery, classifyTurnError, limitedModelName, LOGIN_RESUME_TEXT, modelCreditLimit, NoTerminalError, USAGE_ACCOUNT_RESUME_TEXT, USAGE_MODEL_PREFIX, usageModelResumeText, withRo, type ApiRecoveryOptions } from "./api-outage.ts";
 import { DeliveryRecovery, type RecoveryRunner } from "./delivery-recovery.ts";
 import { verdictRejudged, type PumpVerdictCode } from "./pump-verdict.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
@@ -73,7 +73,7 @@ import { defaultClaudeHome, findSessionFile, isMissingSessionError } from "./run
 import { providerLaunch } from "./runner/providers.ts";
 import { CoreRunner, codexBackgroundTerminals, ensureCoreServer, eofLogBaseline, type CoreCompactState, type CoreRunnerDeps, type CoreRunnerOptions } from "./runner/core.ts";
 import { approvalSummary } from "./runner/core-approval.ts";
-import { CLAUDE_BACKGROUND_REASON } from "./runner/claude-turn.ts";
+import { CLAUDE_BACKGROUND_REASON, CLAUDE_LOGIN_ERRORS, CLAUDE_LOGIN_REASON } from "./runner/claude-turn.ts";
 import { ToolPermissions, type ToolPermissionPoll, type ToolPermissionRequest } from "./tool-permission.ts";
 import { exactSource, measureContext } from "./runner/context.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity, RunnerReattachResult, DeliveryRepair } from "./runner/types.ts";
@@ -129,6 +129,8 @@ export interface OrchestratorTimings extends RestartWakePacing {
   quickExitRetryMs: number;
   /** 새 설정으로 다시 여는 데 실패한 꺼진 직원을 다시 열어 보기까지. 두 번째 실패부터는 5배. */
   configRetryMs: number;
+  /** 0.2.8: 로그인 뒤 멈춘 팀장을 그 자리에서 다시 열지 못했을 때 다시 해 보는 간격. 없으면 30초. */
+  accountReopenRetryMs?: number;
   /** 전송 호출이 끝난 뒤 이만큼 지나면 그 쓰기에서 더 올 것이 없다고 본다. 전송 제한(20초)보다 길어야 한다. */
   writeSettleMs: number;
   /** 실행 엔진(herdr-core)이 이만큼 이어서 답하지 않으면 화면에 '응답 없음'으로 알린다. */
@@ -244,6 +246,18 @@ interface UsageStop { runId: string | null }
  * opened: resumed 같은 세션을 새 설정으로 이어 열었다 · fresh 새 세션으로 열었다 · later 지금은 열지 않았다(잠듦·꺼짐, 또는 다시 여는 데 실패해 곧 다시 연다).
  */
 interface ConfigOutcome { usage: boolean; continued: boolean; opened: "resumed" | "fresh" | "later" | null }
+
+/**
+ * 0.2.8: CLI 마다 계정 세대. 앱에서 다른 계정으로 로그인하면 1 오른다. 팀장의 세션에 들어간 세대(AppliedConfig.account)가 이보다 작으면
+ * 그 세션은 이전 계정의 토큰을 들고 있다(Claude 는 토큰이 만료될 때까지, Codex 는 다른 계정이 로그인한 뒤 토큰을 갱신하지 못한다).
+ * 쉬는 때에 같은 대화를 새 계정으로 다시 연다(설정 적용과 같은 길). identity: 마지막으로 본 계정의 지문(server/cli-login.ts).
+ */
+interface CliAccountEpoch { epoch: number; identity: string | null }
+type CliAccountEpochs = Record<"claude" | "codex", CliAccountEpoch>;
+/** 한도·로그인 오류로 멈춘 팀장을 새 계정으로 다시 여는 까닭. */
+type AccountReopen = "usage" | "login";
+/** 그 자리에서 다시 열기를 해 보는 횟수(간격 timings.accountReopenRetryMs, 기본 30초). */
+const ACCOUNT_REOPEN_TRIES = 6;
 
 interface Turn {
   kind: "work" | "compact" | "control";
@@ -531,6 +545,10 @@ export class Orchestrator implements OrchestratorApi {
   private readonly configWrites = new Set<string>();
   /** 사용 한도 카드마다 지금 도는 답(고른 것과 그 결과). 다른 답이 앞 답의 결과를 받아 가지 않게 한다(answerDecision). */
   private readonly usageAnswers = new Map<string, { choice: string; task: Promise<Decision> }>();
+  /** 0.2.8: CLI 별 계정 세대(api_recovery_state 의 cli_accounts). 처음 쓸 때 읽는다. */
+  private accountEpochs: CliAccountEpochs | null = null;
+  /** 0.2.8: 로그인 뒤 멈춘 팀장을 다시 여는 일(시험이 기다린다). */
+  accountReopening: Promise<void> = Promise.resolve();
   /** K(E2): 도구 승인 카드와 그 답을 기다리는 훅(server/tool-permission.ts). */
   readonly toolPermissions: ToolPermissions;
   private settingsWriting = false;
@@ -2258,11 +2276,15 @@ export class Orchestrator implements OrchestratorApi {
    * 보류를 푼 뒤에 새 터미널 기동만 실패하면(같은 CLI) 던지지 않는다: 설정은 미뤄 두었고 펌프가 곧 새 설정으로 다시 연다(outcome.opened "later").
    * outcome: 실제로 한 일을 부른 쪽에 알린다(총괄의 team_model 답).
    */
-  private async switchProvider(member: Member, patch: PatchMemberReq, fromPump = false, freshSession = false, usage: UsageStop | null = null, outcome?: ConfigOutcome): Promise<Member> {
+  private async switchProvider(member: Member, patch: PatchMemberReq, fromPump = false, freshSession = false, usage: UsageStop | null = null, outcome?: ConfigOutcome, account?: AccountReopen): Promise<Member> {
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
     const rt = this.runtime(member.id);
-    const handling = rt.closing || rt.starting || (!fromPump && rt.pumping) || rt.reopening || !!rt.turn || member.status === "working" || (member.status === "blocked" && !usage);
+    // 0.2.8: 로그인 오류로 끝난 턴의 막힘(blocked, 설정 막힘 login_required)은 일하는 중이 아니다. 다시 로그인한 뒤 같은 대화로 다시 연다.
+    const loginStopped = account === "login" && member.blockedCode === "login_required";
+    // 멈출 때 하던 실행은 세대를 바꾸기 전에 찾는다(바꾼 뒤에는 새 세대의 기록만 보인다).
+    const loginRunId = loginStopped ? this.loginStopRun(member) : null;
+    const handling = rt.closing || rt.starting || (!fromPump && rt.pumping) || rt.reopening || !!rt.turn || member.status === "working" || (member.status === "blocked" && !usage && !loginStopped);
     if (!handling && this.isBusy(member) && this.lingering(member) !== null) throw new ApiError(409, ERROR_CODES.cli_switch_background_program.ko, "cli_switch_busy", "cli_switch_background_program");
     if (!handling && this.claudeLingering(member)) throw new ApiError(409, ERROR_CODES.cli_switch_background_task.ko, "cli_switch_busy", "cli_switch_background_task");
     if (handling || this.isBusy(member)) {
@@ -2302,6 +2324,8 @@ export class Orchestrator implements OrchestratorApi {
       }
       changedSession = true;
       const sameProvider = patch.cli === member.cli;
+      // 0.2.8: 다른 계정으로 로그인한 뒤 계정만 바뀐 세션을 같은 대화로 다시 여는 것(설정은 그대로)이면 인계 글 없이 활동 한 줄만 남긴다.
+      const accountOnly = !freshSession && sameProvider && !usage && !account && this.accountOnlyPending(member);
       let continued = false;
       this.store.transaction(() => {
         this.endExecution(member, "interrupted", textRef(freshSession ? "why.fresh_session" : "why.settings_changed"));
@@ -2313,7 +2337,8 @@ export class Orchestrator implements OrchestratorApi {
         this.store.archiveAndRotateSession(member.id, patch.cli!, freshSession ? "fresh_session" : sameProvider ? "settings_change" : "provider_switch");
         carryStop();
         // 옛 터미널은 끝났다. 새 터미널을 띄우기 전에 보류를 풀고 이어가기 글을 줄에 세운다: 띄우기가 실패해도 다음 기동이 그 글부터 넣는다.
-        if (usage) continued = this.resumeAfterUsageStop(member, usage, resumable, sameProvider ? { kind: "model", label: this.modelLabel(target) } : { kind: "cli", label: patch.cli === "codex" ? "Codex" : "Claude" });
+        if (usage) continued = this.resumeAfterUsageStop(member, usage, resumable, account === "usage" ? { kind: "account", label: "" } : sameProvider ? { kind: "model", label: this.modelLabel(target) } : { kind: "cli", label: patch.cli === "codex" ? "Codex" : "Claude" });
+        if (loginStopped) this.resumeAfterLoginStop(member, loginRunId, resumable && sameProvider);
       });
       if (usage) { usageReleased = true; if (outcome) { outcome.usage = true; outcome.continued = continued; } }
       if (resumable) this.store.patchMember(member.id, { sessionId: member.sessionId });
@@ -2326,7 +2351,8 @@ export class Orchestrator implements OrchestratorApi {
       ].join("\n");
       // 사용 한도로 멈춘 팀장의 모델만 바꿔 같은 대화를 이어 열었다: 이어가기 글(하던 일이 없었으면 활동 한 줄)이 모델을 바꿨다고 이미 알린다.
       // 같은 대화라 역할·상황도 그대로다. 인계 글을 다음 턴에 붙이지 않는다(일반 설정 변경과 새 세션·다른 CLI 는 지금처럼 넣는다).
-      const handoffNeeded = !(usage && sameProvider && resumable);
+      const handoffNeeded = !((usage || loginStopped || accountOnly) && sameProvider && resumable);
+      if (accountOnly && resumable) this.store.appendActivity(member.id, "system", textRef("activity.account_reopen"));
       if (handoffNeeded) this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: formatSystem(handoff), wake: false });
       const fresh = this.store.requireMember(member.id);
       this.openRunner(fresh);
@@ -2520,10 +2546,12 @@ export class Orchestrator implements OrchestratorApi {
    * 같은 대화를 이어 열지 못하면(세션 기록 없음, 다른 CLI) 이어가기 글 대신 예전처럼 총괄을 깨워 중단을 알린다.
    * 이어가기 글을 넣었으면 true(총괄의 team_model 답이 이것으로 '이어서 한다'를 말한다).
    */
-  private resumeAfterUsageStop(member: Member, stop: UsageStop, continued: boolean, change: { kind: "model" | "cli"; label: string }): boolean {
+  private resumeAfterUsageStop(member: Member, stop: UsageStop, continued: boolean, change: { kind: "model" | "cli" | "account"; label: string }): boolean {
     const model = change.label;
     this.apiRecovery.releaseMember(member.id);
-    this.store.appendActivity(member.id, "system", change.kind === "model"
+    this.store.appendActivity(member.id, "system", change.kind === "account"
+      ? textRef(continued ? "activity.usage_reopen_account_continue" : "activity.usage_reopen_account_new")
+      : change.kind === "model"
       ? textRef(continued ? "activity.usage_reopen_model_continue" : "activity.usage_reopen_model_new", { model })
       : textRef(continued ? "activity.usage_reopen_cli_continue" : "activity.usage_reopen_cli_new", { cli: model }));
     const run = stop.runId ? this.store.getExecutionJournal(stop.runId) : null;
@@ -2533,13 +2561,20 @@ export class Orchestrator implements OrchestratorApi {
     this.store.claimExecutionNotice(run.runId, "interruption", () => {
       const conductor = this.store.getConductor(member.projectId);
       const lead = conductor && conductor.id !== member.id ? conductor : null;
-      if (!continued || change.kind !== "model") {
-        this.noticeInterrupted(member, run, change.kind === "model" ? textRef("why.usage_model_new_session", { model })
+      if (!continued || change.kind === "cli") {
+        this.noticeInterrupted(member, run, change.kind === "account" ? textRef("why.usage_account_new_session") : change.kind === "model" ? textRef("why.usage_model_new_session", { model })
           : textRef("why.usage_cli_new_session", { cli: model }));
         wakeConductor = lead?.id ?? null;
         return;
       }
       resumed = true;
+      if (change.kind === "account") {
+        this.apiRecovery.continueAfter(member, USAGE_ACCOUNT_RESUME_TEXT);
+        this.systemMessage(member.projectId, textRef("chat.usage_account_resumed", { name: member.name, run: run.runId }));
+        if (lead) this.store.enqueue({ projectId: member.projectId, memberId: lead.id, kind: "system", wake: false,
+          text: formatSystem(`${member.name}의 일(실행 ${run.runId})이 사용 한도로 멈춰, 대표가 다른 계정으로 로그인한 뒤 같은 대화를 이어 열고 멈춘 곳부터 이어서 하게 했습니다. 같은 일을 다시 지시하거나 다른 직원을 새로 띄워 넘기지 마세요. 결과는 ${member.name}의 보고로 옵니다. 전달 ${run.deliveryIds.join(", ")}.`) });
+        return;
+      }
       this.apiRecovery.continueAfter(member, usageModelResumeText(model));
       this.systemMessage(member.projectId, textRef("chat.usage_model_resumed", { name: member.name, run: run.runId, model }));
       // 총괄이 같은 일을 또 맡기거나 새 직원에게 넘겨 두 번 하게 되지 않도록, 깨우지 않는 소식으로만 알린다.
@@ -4452,17 +4487,137 @@ export class Orchestrator implements OrchestratorApi {
   private desiredConfig(member: Member): AppliedConfig {
     const { ranks, codexRanks } = this.store.getSettings();
     const { model, effort } = memberConfig(member, ranks, codexRanks);
-    return { model, effort, staffModel: (member.cli === "codex" ? codexRanks : ranks).staff.model, staffEffort: member.cli === "codex" ? null : ranks.staff.effort };
+    // 0.2.8: 앱에서 다른 계정으로 로그인한 뒤면 그 세대. 한 번도 없었으면 칸을 두지 않는다(예전 세션의 적용 기록과 글자까지 같다).
+    const account = this.accountEpoch(member.cli);
+    return { model, effort, staffModel: (member.cli === "codex" ? codexRanks : ranks).staff.model, staffEffort: member.cli === "codex" ? null : ranks.staff.effort, ...(account ? { account } : {}) };
   }
+
+  // ---- 0.2.8: AI 계정 로그인 뒤 새 계정 적용 ----
+  private epochs(): CliAccountEpochs {
+    if (!this.accountEpochs) {
+      let saved: Partial<CliAccountEpochs> | null = null;
+      try { saved = this.store.loadApiRecovery<Partial<CliAccountEpochs>>("cli_accounts"); } catch { saved = null; }
+      const one = (v: unknown): CliAccountEpoch => {
+        const e = v as Partial<CliAccountEpoch> | undefined;
+        return { epoch: Number.isInteger(e?.epoch) && (e!.epoch as number) > 0 ? e!.epoch as number : 0, identity: typeof e?.identity === "string" ? e.identity : null };
+      };
+      this.accountEpochs = { claude: one(saved?.claude), codex: one(saved?.codex) };
+    }
+    return this.accountEpochs;
+  }
+  private accountEpoch(cli: Member["cli"]): number { return this.epochs()[cli === "codex" ? "codex" : "claude"].epoch; }
+  /** 이 세션이 지금 계정이 아닌 세대로 떠 있다(설정의 나머지는 같다). */
+  private accountOnlyPending(member: Member): boolean {
+    const want = this.desiredConfig(member), have = this.store.getAppliedConfig(member.id);
+    if (!have || (want.account ?? 0) === (have.account ?? 0)) return false;
+    return want.model === (have.model ?? null) && want.effort === (have.effort ?? null) && want.staffModel === (have.staffModel ?? null) && want.staffEffort === (have.staffEffort ?? null);
+  }
+
+  /**
+   * 앱에서 CLI 로그인이 끝났다(server/cli-login.ts). after·before: 로그인 뒤·전 계정의 지문(모르면 null).
+   * - 다른 계정이면 그 CLI 의 계정 세대를 올린다: 떠 있는 팀장은 쉬는 때에(일하는 중이면 그 턴이 끝난 뒤) 같은 대화를 새 계정으로 다시 연다(설정 적용과 같은 길).
+   * - 사용 한도로 멈춘 팀장(다른 계정일 때)과 로그인 오류로 멈춘 팀장(같은 계정이어도)은 지금 다시 열고 멈춘 일을 이어 가게 한다.
+   * 다시 여는 일은 기다리지 않는다(accountReopening). 답은 그 수만 센다.
+   */
+  async cliLoggedIn(cli: "claude" | "codex", after: string | null, before: string | null): Promise<{ changed: boolean | null; reopenedNow: number; atNextTurn: number }> {
+    const state = this.epochs()[cli];
+    // 기준은 마지막으로 적용한 계정(팀장들이 그 세대로 맞춰진 계정)이 먼저다. 로그인 직전 계정만 보면, 앞 로그인의 적용이 빠졌을 때(B 로 바꿨는데
+    // 세대를 못 올렸다) B 로 다시 로그인해도 B↔B 로 같다고 보아 팀장들이 영영 옛 계정 A 에 남는다(리뷰 지적). 처음이면 로그인 직전 계정.
+    const baseline = state.identity ?? before;
+    const changed = after && baseline ? after !== baseline : null;
+    if (changed) state.epoch += 1;
+    if (after) state.identity = after;
+    try { this.store.saveApiRecovery("cli_accounts", this.epochs()); } catch (e) { console.warn("계정 세대를 저장하지 못했습니다:", (e as Error).message); }
+    const live = this.store.listAllMembers().filter(m => m.cli === cli && m.origin === "runner" && this.backendOf(m) === "core" && !this.store.requireProject(m.projectId).archived);
+    const now: Array<{ member: Member; why: AccountReopen }> = [];
+    for (const m of live) {
+      // 잠든 팀장은 깨우지 않는다(재우기는 대표·총괄의 뜻이다). 한도 카드에 남아 깨울 때 새 계정으로 뜬다.
+      if (m.status === "asleep") continue;
+      if (m.blockedCode === "login_required") now.push({ member: m, why: "login" });
+      else if (changed && this.apiRecovery.usageLimited(m.id) && m.sessionId) now.push({ member: m, why: "usage" });
+    }
+    const soon = new Set(now.map(n => n.member.id));
+    const atNextTurn = live.filter(m => !soon.has(m.id) && this.configPending(m)).length;
+    // 펌프가 막 돌거나 입력칸에 글이 있거나 엔진이 잠깐 끊겨 못 열면 간격을 두고 다시 해 본다(그 사이 풀렸으면 reopenForAccount 가 그냥 지나간다).
+    const reopen = async (member: Member, why: AccountReopen) => {
+      for (let attempt = 0; attempt < ACCOUNT_REOPEN_TRIES && !this.closed; attempt++) {
+        try { await this.reopenForAccount(member.id, why); return; }
+        catch (e) {
+          const retryable = (e instanceof ApiError && e.status === 409) || (e instanceof CoreError && ["timeout", "down", "closed", "unavailable", "busy", "input_busy"].includes(e.kind));
+          console.warn(`${member.name}: 새 계정으로 다시 열지 못했습니다(${why}, ${attempt + 1}번째):`, (e as Error).message);
+          if (!retryable) return;
+          await Bun.sleep(this.timings.accountReopenRetryMs ?? 30_000);
+        }
+      }
+    };
+    const run = async () => {
+      await Promise.all(now.map(({ member, why }) => reopen(member, why)));
+      // 쉬는 팀장은 다음 틱을 기다리지 않고 곧바로 맞춘다(일하는 팀장은 턴이 끝나면 펌프가 맞춘다).
+      for (const m of live) if (!soon.has(m.id) && this.configPending(this.store.getMember(m.id) ?? m)) void this.pump(m.id);
+    };
+    this.accountReopening = this.accountReopening.then(run, run);
+    return { changed, reopenedNow: now.length, atNextTurn };
+  }
+
+  /** 한도·로그인 오류로 멈춘 팀장을 같은 대화로 다시 연다(새로 로그인한 계정을 읽는다). 멈춘 일이 있었으면 이어가기 글을 넣는다. */
+  private async reopenForAccount(memberId: string, why: AccountReopen): Promise<void> {
+    const member = this.store.getMember(memberId);
+    if (!member || member.origin !== "runner") return;
+    if (why === "login" && member.blockedCode !== "login_required") return;
+    const usage = why === "usage" ? this.usageStop(member) : null;
+    if (why === "usage" && !usage) return;
+    await this.switchProvider(member, { cli: member.cli }, false, false, usage, undefined, why);
+  }
+
+  /**
+   * 로그인 오류로 멈춘 팀장을 다시 열 때: 멈출 때 하던 실행(이 세대에서 입력이 들어간 마지막 실행이 로그인 오류로 끝났고 아직 통지하지 않은 것)이 있으면
+   * 이어가기 글을 한 번 넣는다(사용 한도 이어가기와 같은 장치). 같은 대화를 이어 열지 못하면 총괄을 깨워 중단을 알린다.
+   */
+  private loginStopRun(member: Member): string | null {
+    const run = this.store.lastWrittenExecution(member.id, this.store.memberRevisions(member.id).sessionGeneration);
+    // 실행의 사유는 오류 분류값과 글(`authentication_failed: Please run /login · …`) 또는 사유 코드(claude_login_required)다.
+    const loginReason = (reason: string | null | undefined) => !!reason && (reason === CLAUDE_LOGIN_REASON || CLAUDE_LOGIN_ERRORS.has(reason.split(":")[0]!.trim()));
+    return run && run.memberId === member.id && run.phase === "ended" && run.result === "error" && loginReason(run.reason) && !run.interruptionNotifiedAt ? run.runId : null;
+  }
+  private resumeAfterLoginStop(member: Member, runId: string | null, continued: boolean): void {
+    this.store.appendActivity(member.id, "system", textRef(continued ? "activity.login_reopen_continue" : "activity.login_reopen_new"));
+    const run = runId ? this.store.getExecutionJournal(runId) : null;
+    if (!run || run.memberId !== member.id || run.interruptionNotifiedAt) return;
+    let wakeConductor: string | null = null;
+    this.store.claimExecutionNotice(run.runId, "interruption", () => {
+      const conductor = this.store.getConductor(member.projectId);
+      const lead = conductor && conductor.id !== member.id ? conductor : null;
+      if (!continued) {
+        this.noticeInterrupted(member, run, textRef("why.login_new_session"));
+        wakeConductor = lead?.id ?? null;
+        return;
+      }
+      this.apiRecovery.continueAfter(member, LOGIN_RESUME_TEXT);
+      this.systemMessage(member.projectId, textRef("chat.login_resumed", { name: member.name, run: run.runId }));
+      if (lead) this.store.enqueue({ projectId: member.projectId, memberId: lead.id, kind: "system", wake: false,
+        text: formatSystem(`${member.name}의 일(실행 ${run.runId})이 로그인 오류로 멈춰, 대표가 다시 로그인한 뒤 같은 대화를 이어 열고 멈춘 곳부터 이어서 하게 했습니다. 같은 일을 다시 지시하거나 다른 직원을 새로 띄워 넘기지 마세요. 결과는 ${member.name}의 보고로 옵니다. 전달 ${run.deliveryIds.join(", ")}.`) });
+    });
+    this.store.afterCommit(() => { if (wakeConductor && !this.closed && !this.recovering) void this.pump(wakeConductor); });
+  }
+  // ---- 끝 ----
 
   /** 서버가 띄운 세션이 지금 설정과 다른가. 넘겨받은 세션은 대표가 쓰던 칸이라 스스로 닫지 않는다(깨울 때 맞춰진다). 잠든 세션은 깨울 때 맞춰진다. */
   private configPending(member: Member): boolean {
     if (member.origin !== "runner" || (!member.sessionId && !member.paneId) || member.status === "asleep" || member.status === "offline") return false;
     if (!this.runners.get(this.backendOf(member))?.applyConfig) return false;
     const want = this.desiredConfig(member);
-    if (this.runtime(member.id).configGaveUp === JSON.stringify(want) || this.store.deferredMemberConfig(member.id)?.signature === JSON.stringify(want)) return false;
+    const deferred = this.store.deferredMemberConfig(member.id);
+    if (this.runtime(member.id).configGaveUp === JSON.stringify(want) || deferred?.signature === JSON.stringify(want)) {
+      // 0.2.8: 계정만 바뀐 세션은 다시 열기를 영영 포기하지 않는다(입력칸 글·펌프 경합으로 실패했어도). 옛 계정으로 남으면 Codex 는 토큰을 갱신하지
+      // 못하고, Claude 는 대표가 바꾼 계정을 쓰지 않는다. 실패한 설정의 재시도와 같은 간격(configRetryMs, 두 번째부터 5배)이 지나면 다시 해 본다.
+      if (!(deferred?.failed && deferred.signature === JSON.stringify(want) && this.accountOnlyPending(member))) return false;
+      const retryAt = (Date.parse(deferred.failedAt ?? "") || 0) + this.timings.configRetryMs * ((deferred.attempts ?? 1) > 1 ? 5 : 1);
+      if (Date.now() < retryAt) return false;
+    }
     const have = this.store.getAppliedConfig(member.id);
-    return want.model !== (have?.model ?? null) || want.effort !== (have?.effort ?? null) || want.staffModel !== (have?.staffModel ?? null) || want.staffEffort !== (have?.staffEffort ?? null);
+    return want.model !== (have?.model ?? null) || want.effort !== (have?.effort ?? null) || want.staffModel !== (have?.staffModel ?? null) || want.staffEffort !== (have?.staffEffort ?? null)
+      // 0.2.8: 앱에서 다른 계정으로 로그인했다. 이 세션은 이전 계정으로 떠 있다.
+      || (want.account ?? 0) !== (have?.account ?? 0);
   }
 
   /** 쉬는 세션을 새 설정으로 다시 연다(같은 대화를 이어 띄운다). 이번 전달을 그대로 이어가도 되면 true. */

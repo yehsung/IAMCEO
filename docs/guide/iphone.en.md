@@ -53,6 +53,17 @@ By default Tailscale encrypts the link between the iPhone and the Mac, and the a
 
 A notification carries a fixed sentence and identifiers only, never conversation content. Tapping it never answers, approves or types anything for you. The fixed sentence is in that iPhone's app language, Korean or English (from 0.2.6). The server learns the language from the app's requests, and when it uses the notification relay it passes along that one language value (`ko` or `en`).
 
+## Switching or renewing AI accounts (0.2.8 and later)
+
+When a usage limit hits or a sign-in expires, switch accounts from your iPhone without a Mac terminal. The Mac server must be 0.2.8 or later too.
+
+1. In **Settings → AI models → AI accounts**, tap **Sign in with another account** for Claude Code or Codex. Usage limit cards have the same button.
+2. **Open sign-in page** opens Safari. Sign in with the account you want (if another account is already signed in, switch accounts on that page).
+3. - **Claude Code:** after you sign in, the page shows a long code. Tap its copy button, come back to IAMCEO and tap the paste button, and you're done.
+   - **Codex:** enter the one-time code the app shows (it's copied when you tap the button) on the page, and the app sees the sign-in finish by itself. The code works for 15 minutes. If the page says device code sign-in is off, turn on device code sign-in for Codex in ChatGPT settings, or run `codex login` in a terminal on the Mac.
+
+After you sign in, every staff member using that CLI on that Mac uses the new account. Staff stopped at the limit reopen the same conversation with the new account right away and continue, and other staff reopen with the new account as soon as they finish their current work (right away if idle). Staff stopped by a sign-in error continue right away even if you sign in again with the same account. If you close the sign-in sheet, **Continue sign-in** brings you back within 15 minutes.
+
 ## When it does not connect
 
 Check these in order.

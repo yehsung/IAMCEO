@@ -1545,6 +1545,8 @@ struct SettingsView: View {
 
     private var aiSection: some View {
         VStack(alignment: .leading, spacing: 22) {
+            // 0.2.8: 이 Mac 의 CLI 가 쓰는 계정과 로그인(Views/CLIAccountsView.swift). 대표가 손을 대는 묶음이라 점검표보다 위. 옛 서버면 그리지 않는다.
+            CLIAccountsGroup()
             runtimeGroup
                 .id("runtime")
                 .overlay { if highlightRuntime { RoundedRectangle(cornerRadius: CERadius.control).stroke(CE.accent, lineWidth: 2) } }

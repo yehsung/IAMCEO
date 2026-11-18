@@ -313,6 +313,8 @@ final class AppStore: ProjectManagementStore {
     @ObservationIgnored var foreground = true
     let drafts: DraftStore
     let composerUploads = ComposerAttachmentUploads()
+    /// 0.2.8: AI 계정(설정의 'AI 계정' 묶음과 사용 한도 카드의 로그인 단추가 함께 쓴다).
+    let cliAccounts = CLIAccountsPanel()
     let submissions: SubmissionStore?
     /// F1(4차 S): 마지막으로 본 상태와 연결되면 보낼 글(AppStore+Offline.swift, OfflineState.swift).
     let offline: OfflineStateStore

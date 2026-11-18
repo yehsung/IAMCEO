@@ -15,8 +15,8 @@ IAMCEO checks its own setup and shows, for each item, its state and a one-line f
 |---|---|---|
 | Server | Whether the IAMCEO server on this Mac answers | Open the IAMCEO app and press 이 Mac에서 시작 (Start on this Mac). |
 | Engine (herdr-core) | Whether the engine that holds the staff terminals is there and answers | If it stays that way, restart the Mac. If the engine is missing, reinstall the app (`brew reinstall --cask yehsung/tap/iamceo`). Homebrew stops the server and removes the login item when it reinstalls, so afterwards press 이 Mac에서 시작 (Start on this Mac) in the app once (staff sessions continue). |
-| Claude Code | Installed, and signed in | Install it, then run `claude` in Terminal and sign in. |
-| Codex | Installed, and signed in (fine if you do not use it) | Run `codex` in Terminal and sign in. |
+| Claude Code | Installed, and signed in | Install it, then run `claude` in Terminal and sign in. From 0.2.8 you can also sign in from **Settings → AI models → AI accounts** in the app. |
+| Codex | Installed, and signed in (fine if you do not use it) | Run `codex` in Terminal and sign in. From 0.2.8 you can also sign in from **Settings → AI models → AI accounts** in the app. |
 | CLI versions | Whether IAMCEO has been tested against the installed CLI versions | See "Unverified CLI version" below. |
 | Tailscale | Whether there is a Tailscale address the iPhone can reach | Turn on Tailscale from the menu bar. |
 | Start at login | Whether the server is registered as a login item | Press 이 Mac에서 시작 in the app again. |
@@ -29,7 +29,7 @@ The sign-in check looks for the sign-in record a CLI leaves, so it can say "not 
 
 ### A staff member stops right after starting
 
-- **Check the sign-in.** Run `claude` (or `codex`) in Terminal; if it asks you to sign in, do so.
+- **Check the sign-in.** See the account in **Settings → AI models → AI accounts** in the app and sign in there if needed (0.2.8 and later, also from your phone). Running `claude` (or `codex`) in Terminal and signing in works too.
 - **Check for settings that only work in your terminal.** The server does not get the environment variables and PATH from your shell settings (`~/.zshrc`). An MCP server or hook that relies on a variable such as `${GITHUB_TOKEN}`, or on a command installed through pyenv or mise, fails here. Put values in the `env` of the CLI's settings file and write commands as absolute paths.
 - **Open that staff member's terminal from 팀 (Team).** See what is really on screen, and type into it if needed.
 

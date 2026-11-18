@@ -35,7 +35,7 @@ import { TailnetHttps, type TailnetHttpsDeps } from "./tailnet-https.ts";
 import { doctorReport, serverDoctorFacts, type DoctorLang, type DoctorProbes } from "./doctor.ts";
 import { createDiagnostics, type DiagnoseInput } from "./diagnose.ts";
 import { readVitals } from "./vitals.ts";
-import type { DiagnoseResult } from "../shared/types.ts";
+import type { CliAccountsResponse, CliLogin, DiagnoseResult } from "../shared/types.ts";
 import { compatFields, readAppClient, SeenApps } from "./app-version.ts";
 import { serverIdentity } from "./server-identity.ts";
 import { CliVersionMonitor, type CliVersionInfo, type CliVersionSource } from "./cli-version.ts";
@@ -47,6 +47,7 @@ import { ERROR_CODES } from "../shared/error-codes.ts";
 import { USAGE_MAX_DAYS } from "../shared/types.ts";
 import { UsageCollector, usageReport, type UsageSource } from "./usage.ts";
 import { projectRules } from "./project-rules.ts";
+import { CLI_LOGIN_CLIS, CliLoginError, CliLogins } from "./cli-login.ts";
 export { safeEqual };
 
 export interface ServerContext {
@@ -77,6 +78,8 @@ export interface ServerContext {
   tailnetHttps?: Partial<Pick<TailnetHttpsDeps, "run" | "now" | "log">>;
   /** T(F6): 사용량 모으기. 없으면 서버가 만들어 1분마다 모은다. 시험(IAMCEO_TEST)에서는 넣은 것만 쓴다(진짜 Codex 기록을 읽지 않는다). */
   usage?: UsageSource;
+  /** 0.2.8: AI 계정 로그인(server/cli-login.ts). 없으면 서버가 만든다. 시험(IAMCEO_TEST)에서는 넣은 것만 쓴다: 진짜 CLI 로 로그인하지 않는다. */
+  cliLogins?: CliLogins;
 }
 
 export interface HostBinding {
@@ -654,6 +657,15 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     return started;
   };
 
+  // 0.2.8: AI 계정 로그인. 로그인 서비스의 거절은 같은 코드의 ApiError 로 바꾼다.
+  const requireLogins = (): CliLogins => {
+    if (!ctx.cliLogins) throw new ApiError(501, "AI 계정 로그인을 지원하지 않습니다", "not_found");
+    return ctx.cliLogins;
+  };
+  const loginResponse = async (run: () => Promise<CliLogin>): Promise<Response> => {
+    try { return Response.json(await run(), { headers: { "Cache-Control": "no-store" } }); }
+    catch (e) { if (e instanceof CliLoginError) throw new ApiError(e.status, e.message, e.code); throw e; }
+  };
   const route = (method: string, path: string, handler: Handler): Route => ({
     method,
     pattern: new RegExp(`^${path.replace(/:[a-z]+/g, "([^/]+)")}$`),
@@ -826,6 +838,31 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     route("GET", "/api/models", (_req, url) => {
       strictQuery(url, []);
       return Response.json(models.read());
+    }),
+    // ---- 0.2.8: AI 계정 로그인. 새 경로라 옛 앱은 부르지 않고, 옛 서버는 404 를 준다(앱은 그 묶음을 숨긴다) ----
+    route("GET", "/api/cli-accounts", async (_req, url) => {
+      strictQuery(url, ["refresh"]);
+      const logins = requireLogins();
+      const body: CliAccountsResponse = { accounts: await logins.accounts(url.searchParams.get("refresh") === "1"), logins: logins.list() };
+      return Response.json(body, { headers: { "Cache-Control": "no-store" } });
+    }),
+    route("POST", "/api/cli-login", async (req, url) => {
+      strictQuery(url, []);
+      const body = await parseBody(req, z.strictObject({ cli: z.enum(CLI_LOGIN_CLIS as unknown as ["claude", "codex"]), restart: z.boolean().optional() }));
+      return loginResponse(() => requireLogins().start(body.cli, body.restart === true));
+    }),
+    route("GET", "/api/cli-login/:id", (_req, url, [id]) => {
+      strictQuery(url, []);
+      return loginResponse(async () => requireLogins().get(id!));
+    }),
+    route("POST", "/api/cli-login/:id/code", async (req, url, [id]) => {
+      strictQuery(url, []);
+      const body = await parseBody(req, z.strictObject({ code: z.string().min(1).max(4096) }));
+      return loginResponse(() => requireLogins().submitCode(id!, body.code));
+    }),
+    route("DELETE", "/api/cli-login/:id", (_req, url, [id]) => {
+      strictQuery(url, []);
+      return loginResponse(() => requireLogins().cancel(id!));
     }),
     // T(F6): 팀장·프로젝트·날짜별 사용량(CLI 가 보고한 값 그대로). 새 경로라 옛 앱은 부르지 않고, 옛 서버는 404 를 준다(앱은 그 묶음을 숨긴다).
     route("GET", "/api/usage", (_req, url) => {
@@ -1493,6 +1530,12 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const cliVersions = ctx.cliVersions;
   // T(F6): 상태줄 기록과 Codex 세션 기록에서 CLI 가 보고한 사용량을 1분마다 모은다. 멈출 때 이 서버가 만든 것만 멈춘다.
   let ownUsage: UsageCollector | null = null;
+  let ownLogins: CliLogins | null = null;
+  if (!ctx.cliLogins && process.env.IAMCEO_TEST !== "1") {
+    ownLogins = new CliLogins({ claudeBin: config.claudeBin, codexBin: config.codexBin, claudeHome: config.claudeHome, codexHome: config.codexHome,
+      runDir: join(config.home, "run"), onLoggedIn: (cli, after, before) => ctx.orch.cliLoggedIn?.(cli, after, before) ?? Promise.resolve(null) });
+    ctx.cliLogins = ownLogins;
+  }
   if (!ctx.usage && process.env.IAMCEO_TEST !== "1") {
     ownUsage = new UsageCollector({ db: store.db, home: config.home, wrap: (name, work) => monitor.run(name, work) });
     ctx.usage = ownUsage;
@@ -2035,6 +2078,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         clearInterval(pingTimer);
         clearInterval(accessLogTimer);
         if (ownUsage) { ownUsage.stop(); if (ctx.usage === ownUsage) ctx.usage = undefined; }
+        if (ownLogins) { await ownLogins.close().catch(() => undefined); if (ctx.cliLogins === ownLogins) ctx.cliLogins = undefined; }
         unsubscribe();
         // Queue notice before the close frame, including legacy and lite realtime sockets.
         closedEpochSockets ||= sockets.size > 0;

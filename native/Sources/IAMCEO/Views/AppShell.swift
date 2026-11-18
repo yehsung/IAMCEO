@@ -122,6 +122,10 @@ struct AppShell: View {
         #else
         .sheet(isPresented: $router.showSettings) { SettingsView().ceStatusStrips() }
         #endif
+        // 0.2.8: 사용 한도 카드의 '다른 계정으로 로그인'. 카드가 닫혀도(로그인에 성공해 팀장이 풀렸다) 시트가 남게 바탕에서 띄운다.
+        .sheet(item: Binding(get: { store.cliAccounts.requestedLogin }, set: { store.cliAccounts.requestedLogin = $0 })) { target in
+            CLILoginSheet(cli: target.cli)
+        }
         #if DEBUG && os(iOS)
         // Development hook (simulator has no camera and cannot tap the system "open in IAMCEO?" prompt):
         // `--pair <iamceo://pair?…>` runs the same pairing path as a scanned QR.

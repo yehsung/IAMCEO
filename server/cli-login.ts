@@ -391,10 +391,13 @@ export class CliLogins {
 
   private async kill(s: Session): Promise<void> {
     const proc = s.proc;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    try { proc.kill("SIGTERM"); } catch { /* 이미 끝났다 */ }
-    const ended = await Promise.race([proc.exited.then(() => true), Bun.sleep(KILL_GRACE_MS).then(() => false)]);
-    if (!ended) { try { proc.kill("SIGKILL"); } catch { /* 이미 끝났다 */ } await proc.exited.catch(() => undefined); }
+    if (proc && proc.exitCode === null && proc.signalCode === null) {
+      try { proc.kill("SIGTERM"); } catch { /* 이미 끝났다 */ }
+      const ended = await Promise.race([proc.exited.then(() => true), Bun.sleep(KILL_GRACE_MS).then(() => false)]);
+      if (!ended) { try { proc.kill("SIGKILL"); } catch { /* 이미 끝났다 */ } await proc.exited.catch(() => undefined); }
+    }
+    // CLI 가 끝난 뒤에 한 번 더 지운다: 시작하자마자 그만두면 finish 가 지운 뒤에 BROWSER 스크립트가 주소를 적어 파일이 남았다(라이브 확인).
+    if (s.urlFile) { try { rmSync(s.urlFile, { force: true }); } catch { /* 다음 로그인이 덮는다 */ } }
   }
 
   private finish(s: Session, phase: CliLoginPhase, error: CliLogin["error"]): void {

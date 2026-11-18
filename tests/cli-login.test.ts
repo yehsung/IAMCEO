@@ -210,6 +210,8 @@ describe("Claude 로그인(붙여넣기 코드)", () => {
     await until("주소", () => t.logins.get(second.id).phase === "waiting");
     const cancelled = await t.logins.cancel(second.id);
     expect(cancelled.phase).toBe("cancelled");
+    // 그만둔 뒤에는 자동 주소 파일이 남지 않는다.
+    expect(existsSync(join(t.dir, "run", `cli-login-${second.id}.url`))).toBe(false);
     const third = await t.logins.start("claude");
     await until("시간 초과", () => t.logins.get(third.id).phase === "expired", 6_000);
     expect(t.logins.get(third.id).error?.code).toBe("cli_login_expired");

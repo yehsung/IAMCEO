@@ -73,14 +73,9 @@ AI agent,coding agent,AI team,developer,remote,approval,inbox,CLI,terminal,autom
 
 ## whatsNew
 
-What's New in 0.2.7 (up to 4,000 characters). The new features need a Mac server on 0.2.7 or later, so each item says so.
+What's New in 0.2.8 (up to 4,000 characters). The new features need a Mac server on 0.2.8 or later, so each item says so.
 
 ```text
-• Attach photos and files when you answer a decision. When a staff member revises a decision card and asks again, the new card replaces the old one and keeps the note and attachments you had started. Requires the IAMCEO server 0.2.7 or later on your Mac.
-• When you close a to-do, choose Done, Not needed or Hand to staff. Requires Mac server 0.2.7 or later.
-• When a file is uploaded again as a revision, only the latest shows, with "Version N", and older ones open from "Earlier versions". Requires Mac server 0.2.7 or later.
-• A lead waiting on its sub-agents shows as "Sub-agents working" instead of Idle. Requires Mac server 0.2.7 or later.
-• Fixed "Blocked report" and "A to-do for you" notifications never reaching iPhones paired earlier (kinds you turned off stay off). Update the Mac server to 0.2.7 or later.
-• If Tailscale on your Mac stays off for more than 3 minutes, your iPhone is notified too. Requires Mac server 0.2.7 or later, including through the notification relay.
-• Polished buttons and hints that were cut off on narrow and English screens.
+• Switch or renew AI accounts from your phone. Settings › AI models › AI accounts shows the account Claude Code and Codex use, and "Switch account" signs in from the device you're holding so your staff on the Mac use the new account. Requires the IAMCEO server 0.2.8 or later on your Mac.
+• When a usage limit hits, sign in with another account right from the limit card. Stopped staff continue the same conversation with the new account, and staff stopped by a sign-in error continue once you sign in again. Requires Mac server 0.2.8 or later.
 ```

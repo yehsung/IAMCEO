@@ -23,7 +23,7 @@ The iPhone app's App Store listing, one file per language. The release owner upl
 
 - 지원 URL·개인정보 처리방침 URL은 한국어 지역에 등록된 주소를 영어 지역에도 그대로 씁니다(처리방침 [PRIVACY.md](../../PRIVACY.md)는 한·영이 한 문서에 있습니다). Use the same Support URL and Privacy Policy URL as the Korean locale; PRIVACY.md has both languages in one document.
 - `tests/appstore-listing.test.ts`가 두 파일의 칸이 모두 있는지, 한도를 넘지 않는지, 영어 파일에 한글이 없는지, 키워드에 상표·앱 이름이 없는지, 새로운 기능에서 iPhone 알림을 말하는 줄이 Mac 서버 판 조건(예: 0.2.6 이상)을 밝히는지, 설명이 알림 중계를 밝히는지를 확인합니다. The test checks that every field is present and within its limit, that the English file has no Korean, that keywords carry no trademarks, and that any mention of iPhone notifications states the Mac server version it needs (for example 0.2.6 or later), and that the description mentions the notification relay.
-- 새 버전마다 `whatsNew`를 고칩니다. 0.2.7의 글은 결재 답 첨부·고친 결재 카드, 할 일 닫기 세 갈래, 자료의 판, 서브에이전트 일하는 중, 알림 두 종류 고침, Tailscale 알림, 좁은 화면 다듬기이고, 서버가 필요한 줄마다 Mac 서버 0.2.7 이상이라고 적습니다. Update `whatsNew` for every version.
+- 새 버전마다 `whatsNew`를 고칩니다. 0.2.8의 글은 폰에서 AI 계정 바꾸기·다시 로그인과 한도 카드의 다른 계정 로그인이고, 서버가 필요한 줄마다 Mac 서버 0.2.8 이상이라고 적습니다. Update `whatsNew` for every version.
 
 ## 영어 스크린샷 · English screenshots
 
@@ -42,6 +42,9 @@ On the first screen, below the "or" divider, tap "Explore the sample". The sampl
 
 NOTIFICATIONS
 Notifications are sent by the user's Mac server (version 0.2.5 or later), so they cannot be tried from the sample. If the user's Mac has its own Apple push key it sends to Apple directly. Otherwise it sends the request to a small relay run by the developer on Google Cloud Functions, which forwards it to the Apple Push Notification service. The relay receives only the device token, the kind of notification, an item ID and the language of the text (Korean or English), never message content; it uses fixed notification text for each kind and stores nothing it receives. The iPhone app itself never contacts the relay.
+
+AI COMMAND-LINE TOOL SIGN-IN (new in 0.2.8)
+With a connected Mac server 0.2.8 or later, Settings > AI models > AI accounts shows which account the Claude Code / Codex command-line tools on the user's Mac are signed in to, and lets the user sign those tools in to another of the user's own accounts. The app only opens the provider's own sign-in page (claude.com or auth.openai.com) in Safari and, for Claude Code, sends the one-time code that page shows back to the user's Mac; the command-line tool on the Mac completes the sign-in and keeps its own credentials. The app never sees or stores passwords or tokens, and IAMCEO itself still has no accounts. This is not available in the sample.
 
 CONNECTING TO A REAL SERVER (optional for review)
 Requirements: an Apple silicon Mac on macOS 14+ with IAMCEO installed (brew install --cask yehsung/tap/iamceo), Claude Code installed and signed in on that Mac, and Tailscale (a free private-network/VPN app) signed in to the same account on both the Mac and the iPhone, as with other self-hosted remote tools. Then open IAMCEO on the Mac, go to Settings > Connect iPhone, and scan the QR code with this app. On a device without Tailscale, the first screen shows "Turn on Tailscale" and the QR button stays off. This is expected and only concerns real pairing; the sample works without it. No login or account is required; pairing uses a one-time code.

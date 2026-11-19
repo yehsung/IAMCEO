@@ -7,7 +7,7 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
-### 아직 내지 않은 것
+### 0.2.8 — 2026-11-19
 
 - **폰에서도 AI 계정을 바꾸거나 다시 로그인합니다.** 설정 › AI 모델의 'AI 계정'에 이 Mac의 Claude Code·Codex가 쓰는 계정(메일·요금제)이 보이고, '다른 계정으로 로그인'을 누르면 Mac 터미널 없이 지금 쓰는 기기에서 로그인합니다. Claude Code는 열린 페이지에서 로그인한 뒤 나오는 코드를 복사해 붙여넣으면 끝나고(서버가 도는 Mac에서는 브라우저에서 허용만 누르면 끝납니다), Codex는 페이지에 앱이 보여 주는 일회용 코드를 넣으면 끝납니다. 사용 한도 카드에도 같은 단추가 있습니다. 다른 계정으로 바꾸면 한도로 멈춘 팀장은 곧바로 같은 대화를 새 계정으로 이어 열어 멈춘 일을 이어 가고, 다른 팀장은 하던 일을 마치는 대로(쉬고 있으면 곧바로) 같은 대화를 새 계정으로 다시 엽니다. 로그인 오류로 멈춘 팀장은 같은 계정으로 다시 로그인해도 곧바로 이어 갑니다. 로그인 코드와 토큰은 서버 기록에 남지 않습니다.
 
@@ -170,7 +170,7 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 
 ## English
 
-### Unreleased
+### 0.2.8 — 2026-11-19
 
 - **Switch or renew AI accounts from your phone.** Settings › AI models › AI accounts shows the account (email, plan) that Claude Code and Codex on this Mac use, and "Sign in with another account" signs in from the device you're holding, with no Mac terminal. For Claude Code, sign in on the page that opens, then copy and paste the code it shows (on the server's own Mac, allowing access in the browser is enough). For Codex, enter the one-time code the app shows on the page. Usage limit cards have the same button. After switching to another account, staff stopped at the limit reopen the same conversation with the new account right away and continue, and other staff reopen with the new account as soon as they finish their current work (right away if idle). Staff stopped by a sign-in error continue right away even if you sign in again with the same account. Sign-in codes and tokens are never written to the server logs.
 

@@ -440,15 +440,15 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   team_add: tool(
     "직원을 새로 띄운다. 역할이 맞는 직원이 없을 때만. 잠든 직원의 역할이 맞으면 team_resume 을 쓴다. 사용 한도로 멈춘 직원의 일을 넘기려고 새로 띄우지 않는다. 한도가 풀리면 서버가 그 직원을 이어 가게 하니 기다리고, 대표가 모델을 바꾸라고 하면 team_model 로 그 직원의 모델을 바꾼다.",
     z.strictObject({
-      name: oneLine(40).describe("화면 이름: 맡은 일(예: 결제 연동). 사람 이름은 쓰지 않는다. 한국어, 프로젝트 안에서 유일, 한 줄. 같은 역할이 더 필요하면 뒤에 2, 3"),
+      name: oneLine(40).describe("화면 이름: 맡은 일(예: 결제 연동). 사람 이름도 직급·호칭(팀장, 사원 등)도 쓰지 않는다. 한국어, 프로젝트 안에서 유일, 한 줄. 같은 역할이 더 필요하면 뒤에 2, 3"),
       role: oneLine(300).describe("맡을 역할(한 줄). 모델 이름은 적지 않는다(실제 모델은 roster 에 보인다)"),
-      cli: z.enum(["claude", "codex"]).optional().describe("직원이 쓸 CLI, 기본 claude"),
+      cli: z.enum(["claude", "codex"]).optional().describe("직원이 쓸 CLI. 대표가 CLI 를 말했을 때만 넣는다. 생략하면 너와 같은 CLI"),
       model: z.string().nullable().optional().describe("대표가 바로 이 직원(이 일)의 모델을 말했을 때만 넣는다(서버 모델 목록의 값). 앞 일에 준 모델 지시나 다른 직원의 모델을 이어 쓰지 않는다. 생략하거나 null이면 설정의 직급 기본값"),
       handle: z.string().optional().describe("영문 소문자 핸들"),
       cwd: z.string().optional().describe("작업 폴더. 기본은 프로젝트 폴더. 프로젝트 폴더 안이어야 한다. 밖이 꼭 필요하면 ask 로 묻고, 대표가 그 경로를 쓴 글을 user_quote 에 싣는다"),
       first_instruction: z.string().optional().describe("첫 지시. 끝났다고 볼 기준 포함"),
       user_quote: userQuote,
-      parallel: z.boolean().optional().describe("병렬(ultracode)로 시작"),
+      parallel: z.boolean().optional().describe("병렬(ultracode)로 시작. 대표가 서브에이전트·병렬을 말했으면 true(서브에이전트는 이 직원의 세션 안에서 돈다)"),
     }),
     async (orch, member, a) => {
       const { member: added, assigned } = await orch.addMember(member.projectId, {
@@ -604,7 +604,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       cwd: text.describe("이미 있는 프로젝트 폴더"),
       goal: z.string().optional().describe("프로젝트 목표. 대표의 말 그대로"),
       start_conductor: z.boolean().optional().describe("총괄을 바로 띄운다"),
-      chief_cli: z.enum(["claude", "codex"]).optional(),
+      chief_cli: z.enum(["claude", "codex"]).optional().describe("총괄이 쓸 CLI. 대표가 CLI 를 말했을 때만 넣는다. 생략하면 너와 같은 CLI"),
     }),
     async (orch, member, a) => {
       const cwd = expandPath(a.cwd, member.cwd);
@@ -612,7 +612,8 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       // 총괄 띄우기가 실패해도 프로젝트는 남는다. 다시 불렀을 때 둘이 되지 않게 한다.
       const same = orch.store.listProjects().find((p) => p.name === a.name && p.cwd === cwd);
       if (same) throw new ApiError(409, `같은 이름·폴더의 프로젝트가 이미 있습니다 #${same.id}`, "project_exists");
-      const project = await orch.createProject({ name: a.name, cwd, goal: a.goal, startConductor: a.start_conductor, chiefCli: a.chief_cli });
+      // 0.2.9: 총괄의 CLI 를 정하지 않으면 본사 AI 와 같은 CLI 로 띄운다(예전에는 늘 claude).
+      const project = await orch.createProject({ name: a.name, cwd, goal: a.goal, startConductor: a.start_conductor, chiefCli: a.chief_cli ?? member.cli });
       return reply(`프로젝트를 만들었습니다 #${project.id} '${project.name}' (${project.cwd})${a.start_conductor ? ", 총괄을 띄웠습니다" : ""}`);
     },
   ),

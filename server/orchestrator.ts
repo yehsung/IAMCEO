@@ -1255,12 +1255,13 @@ export class Orchestrator implements OrchestratorApi {
    * restartLost: 재시작으로 터미널을 잃었고 서버가 그 팀장을 스스로 다시 연다(noteRestartLoss 가 참). 그때 끊긴 실행은 여기서 알리지 않고
    * 표식에 적어 둔다. 다시 열면 이어가기 글을 넣고, 못 열면 그때 예전처럼 총괄에게 알린다(settleRestartWake). 어느 쪽이든 실행마다 한 번이다.
    */
-  private endExecution(member: Member, result: "success" | "error" | "interrupted", why: string | ServerTextRef | null, exitCode: number | null = null, turn?: number | null, restartLost = false): void {
+  private endExecution(member: Member, result: "success" | "error" | "interrupted", why: string | ServerTextRef | null, exitCode: number | null = null, turn?: number | null, restartLost = false, except?: ReadonlySet<string>): void {
     const at = new Date().toISOString();
     // 0.2.6 Y 리뷰: 서버가 정한 사유는 코드로 받는다. 실행 기록(journal)과 판정에는 지금처럼 한국어 문장을, 대화의 중단 글에는 코드를 쓴다.
     const reason = why === null || typeof why === "string" ? why : mustRender(why, "ko");
     this.store.transaction(() => {
       for (const run of this.store.listPendingExecutions().filter(r => r.memberId === member.id && r.identity.sessionGeneration === this.store.memberRevisions(member.id).sessionGeneration)) {
+        if (except?.has(run.runId)) continue;
         const reported = this.completedReportSince(member, run.createdAt);
         const outcome = result === "interrupted" && reported ? "success" : result;
         this.store.saveExecutionJournal({ ...run, turn: turn ?? run.turn, phase: outcome === "interrupted" ? "interrupted" : "ended", result: outcome, reason, exitCode, endedAt: at, updatedAt: at });
@@ -1817,6 +1818,14 @@ export class Orchestrator implements OrchestratorApi {
 
   /** 전송 호출이 아직 끝나지 않은 봉투. 단계 제한으로 펌프가 먼저 풀려도 호출이 끝날 때까지 남는다. */
   private readonly liveWrites = new Set<string>();
+  /**
+   * 0.2.9: 봉투를 넣는 사이(쓰기가 아직 끝나지 않았고 수신도 확인되지 않음)에 그 팀장의 턴 끝이 관측된 실행과 그 끝. 그 턴이 이 봉투로 시작한 것인지는
+   * 쓰기 결과가 나와야 안다: 쓰지 못했으면 이 실행의 끝이 아니고(Codex 가 뜨면서 스스로 도는 첫 턴 등), 썼으면 턴 번호로 가린다(executeDispatch).
+   * 예전에는 바로 '성공으로 끝남'으로 적어, 넣지도 못한 첫 지시에 보고 보완을 물었다(11-20 실제 Codex: 팀장이 일을 하지 않고 막힘으로 보고).
+   */
+  private readonly deferredEnds = new Map<string, { event: Extract<RunnerEvent, { type: "turn_end" }>; memberHandled: boolean }>();
+  /** 쓰기 결과를 아직 기다리는 봉투(executeDispatch 가 답을 받아 deferredEnds 를 정리할 것이 확실한 동안만). 단계 제한으로 먼저 돌아온 뒤에는 빠진다. */
+  private readonly awaitedWrites = new Set<string>();
 
   private readonly startedAt = Date.now();
 
@@ -1867,7 +1876,7 @@ export class Orchestrator implements OrchestratorApi {
       const run = this.store.getExecutionJournal(dispatch.dispatchId);
       if (run && run.phase === "unknown") this.store.saveExecutionJournal({ ...run, ...(late.ok
         ? { phase: late.started ? "running" as const : "received" as const, inputReceivedAt: at, startedAt: late.started ? at : null, turn: late.turn ?? run.turn }
-        : { phase: "ended" as const, result: "error" as const, reason: late.detail ?? late.reason, endedAt: at }), updatedAt: at });
+        : { phase: "ended" as const, result: "error" as const, reason: late.detail ?? late.reason, endedAt: at, startedAt: null, lastProgressAt: null, turn: null }), updatedAt: at });
       this.store.appendActivity(memberId, "system", textRef(late.ok ? "activity.late_receipt" : "activity.late_not_written"), `late-result:${dispatch.dispatchId}`);
     } catch (e) { console.warn("늦은 전송 결과 처리 실패:", memberId, (e as Error).message); return; }
     void this.pump(memberId);
@@ -3193,7 +3202,15 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   async addMember(projectId: string, input: NewMemberInput, assignedBy?: Member): Promise<{ member: Member; assigned: AssignResult | null }> {
-    this.models.requireModel(input.cli ?? "claude", input.modelOverride);
+    // 0.2.9: CLI 를 정하지 않으면 띄우는 쪽(총괄)의 CLI 를, 화면에서 만들면 이 프로젝트 총괄의 CLI 를 따른다.
+    // 예전에는 늘 claude 였다: Codex 만 쓰는 사람의 총괄이 띄운 팀장이 Claude 로 떠 로그인에서 멈췄다.
+    let cli = input.cli ?? assignedBy?.cli ?? this.store.chiefCli(projectId);
+    // CLI 없이 모델만 정했고 그 모델이 다른 CLI 의 것이면 그 CLI 로 띄운다(Codex 총괄에게 "Sonnet 으로 띄워"라고 한 경우. 예전 기본값 claude 에서는 됐다).
+    if (!input.cli && input.modelOverride != null && !this.models.listed(cli, input.modelOverride)) {
+      const other: CliProvider = cli === "codex" ? "claude" : "codex";
+      if (this.models.listed(other, input.modelOverride)) cli = other;
+    }
+    this.models.requireModel(cli, input.modelOverride);
     const project = this.store.requireProject(projectId);
     if (!project.runnerEnabled) throw new ApiError(409, "이 프로젝트는 실행이 꺼져 있습니다", "runner_disabled");
     const name = input.name.trim();
@@ -3206,7 +3223,7 @@ export class Orchestrator implements OrchestratorApi {
         handle: input.handle ?? this.deriveHandle(projectId, name),
         name,
         role: input.role ?? "",
-        cli: input.cli ?? "claude",
+        cli,
         modelOverride: input.modelOverride,
         cwd: input.cwd ? this.resolveCwd(project, input.cwd) : undefined,
       }), ({ member }) => {
@@ -4708,9 +4725,34 @@ export class Orchestrator implements OrchestratorApi {
       void call.then(() => {}, () => {}).finally(() => this.liveWrites.delete(dispatch.dispatchId));
       return call;
     };
-    let result = await this.safeSend(() => this.pumpWait(member.id, this.runtime(member.id).pumpStage?.startsWith("send_urgent") ? "send_urgent" : "send", tracked, this.runnerOf(member)));
+    this.awaitedWrites.add(run.runId);
+    let result: SendResult;
+    try { result = await this.safeSend(() => this.pumpWait(member.id, this.runtime(member.id).pumpStage?.startsWith("send_urgent") ? "send_urgent" : "send", tracked, this.runnerOf(member))); }
+    finally { this.awaitedWrites.delete(run.runId); }
     if (!original) this.liveWrites.delete(dispatch.dispatchId);
     const first = result;
+    // 아래에서 무엇이 던져도 미뤄 둔 턴 끝은 버리지 않는다(예전처럼 그 끝으로 닫는다). 제대로 정리했으면 비어 있다.
+    try {
+      return this.settleDispatch(member, dispatch, run, result, first, original);
+    } finally {
+      const left = this.deferredEnds.get(run.runId);
+      if (left) {
+        this.deferredEnds.delete(run.runId);
+        try { this.applyDeferredEnd(member, left); } catch { /* 실행 기록은 다음 관측·재시작 복구가 다시 본다 */ }
+      }
+    }
+  }
+
+  /** 미뤄 둔 턴 끝을 지금 적용한다: 그 실행을 닫고, 팀장 단위의 턴 끝 처리를 아직 하지 않았으면 한다(펌프 안에서 부르므로 기다리지 않는다). */
+  private applyDeferredEnd(member: Member, deferred: { event: Extract<RunnerEvent, { type: "turn_end" }>; memberHandled: boolean }): void {
+    const e = deferred.event, now = this.store.getMember(member.id) ?? member;
+    this.endExecution(now, e.isError ? "error" : "success", e.errorText ?? e.reason ?? null, e.exitCode ?? null, e.turn);
+    if (!deferred.memberHandled) void this.onTurnEnd(now, e).catch(error => console.error("미뤄 둔 턴 끝 처리 오류:", member.id, error instanceof Error ? error.message : "unknown"));
+  }
+
+  /** 쓰기 결과를 실행 기록·전달 복구에 적고, 넣는 사이 미뤄 둔 턴 끝(deferredEnds)을 정한다. */
+  private settleDispatch(member: Member, dispatch: DeliveryDispatch, run: ExecutionJournal, sent: SendResult, first: SendResult, original: Promise<SendResult> | null): SendResult {
+    let result = sent;
     if (result.ok && result.receipt && result.receipt.dispatchId !== dispatch.dispatchId) result = { ok: false, reason: "error", retryable: false, deliveryEffect: "unknown", detail: "다른 봉투의 수신 영수증입니다" };
     // The existing Runner.send success contract guarantees received input,
     // including core started:false. Bind legacy ACKs to the submitted envelope;
@@ -4723,10 +4765,19 @@ export class Orchestrator implements OrchestratorApi {
     if (!result.ok && !["not_written", "rejected"].includes(result.deliveryEffect ?? "unknown") && pending) void pending.then(late => { if (late !== first) this.lateSendResult(member.id, dispatch, late); }, () => {});
     this.ownerFlows.reconcileTodoCorrections();
     const current = this.store.getExecutionJournal(run.runId)!;
+    const neverWritten = !result.ok && (result.deliveryEffect === "not_written" || result.deliveryEffect === "rejected");
     if (!["ended", "interrupted"].includes(current.phase)) {
       const updatedAt = new Date().toISOString();
-      this.store.saveExecutionJournal({ ...current, ...(result.ok ? { phase: current.startedAt || result.started ? "running" as const : "received" as const, inputReceivedAt: result.receipt?.receivedAt ?? updatedAt, startedAt: current.startedAt ?? (result.started ? updatedAt : null), turn: result.turn ?? current.turn } : result.deliveryEffect === "not_written" || result.deliveryEffect === "rejected" ? { phase: "ended" as const, result: "error" as const, reason: result.detail ?? result.reason, endedAt: updatedAt } : { phase: "unknown" as const, reason: result.detail ?? result.reason }), updatedAt });
+      // 쓰지 못한 봉투는 시작한 적이 없다. 넣는 사이 관측된 '일하는 중'(Codex 가 뜨며 스스로 도는 턴 등)이 남긴 시작 시각·턴 번호를 지운다.
+      this.store.saveExecutionJournal({ ...current, ...(result.ok ? { phase: current.startedAt || result.started ? "running" as const : "received" as const, inputReceivedAt: result.receipt?.receivedAt ?? updatedAt, startedAt: current.startedAt ?? (result.started ? updatedAt : null), turn: result.turn ?? current.turn } : neverWritten ? { phase: "ended" as const, result: "error" as const, reason: result.detail ?? result.reason, endedAt: updatedAt, startedAt: null, lastProgressAt: null, turn: null } : { phase: "unknown" as const, reason: result.detail ?? result.reason }), updatedAt });
     }
+    // 0.2.9: 넣는 사이 관측된 턴 끝(deferredEnds). 쓰지 못했으면 이 실행의 끝이 아니다. 썼으면(또는 썼는지 모르면) 그 턴이 이 봉투 뒤의 턴일 때만 닫는다:
+    // core 의 턴 번호는 턴이 끝날 때 오르므로, 쓴 순간의 번호(result.turn)보다 큰 번호의 끝만 이 봉투가 연 턴이다.
+    const deferred = this.deferredEnds.get(run.runId);
+    this.deferredEnds.delete(run.runId);
+    const writtenAtTurn = result.ok ? result.turn ?? null : null;
+    const endedTurn = deferred?.event.turn ?? null;
+    if (deferred && !neverWritten && (endedTurn === null || writtenAtTurn === null || endedTurn > writtenAtTurn)) this.applyDeferredEnd(member, deferred);
     return result;
   }
 
@@ -5186,8 +5237,12 @@ export class Orchestrator implements OrchestratorApi {
     }
     const pending = this.store.listPendingExecutions().filter(r => r.memberId === member.id && r.identity.sessionGeneration === generation && (!e.terminalId || !r.identity.terminalId || e.terminalId === r.identity.terminalId));
     const at = e.observedAt ?? new Date().toISOString();
+    // 0.2.9: 아직 넣는 중인 봉투(쓰기 결과도 수신 확인도 없음)의 실행. 그 사이의 관측(Codex 가 뜨며 스스로 도는 턴 등)은 이 봉투가 한 일이 아닐 수 있어,
+    // 쓰기 결과가 나올 때까지 이 실행의 시작·턴 번호·끝으로 적지 않는다(settleDispatch 가 정한다).
+    const writing = new Set(pending.filter(run => this.awaitedWrites.has(run.runId) && !run.inputReceivedAt).map(run => run.runId));
     // 실행기가 남기는 알림 줄(notice)은 CLI 가 일한 근거가 아니다. 마지막 진전 시각을 바꾸면 멈춘 업무의 '진전 없음' 표시가 지워진다.
     if ((e.type === "activity" && !e.notice) || (e.type === "status" && e.status === "working" && (!e.observation || e.observation.freshness === "fresh"))) for (const run of pending) {
+      if (writing.has(run.runId)) continue;
       this.store.saveExecutionJournal({ ...run, turn: e.turn ?? run.turn, phase: "running", startedAt: run.startedAt ?? at, lastProgressAt: at, updatedAt: at });
     }
     switch (e.type) {
@@ -5205,8 +5260,8 @@ export class Orchestrator implements OrchestratorApi {
         // 알림이 방금 남긴 줄을 지웠다). CLI 가 일하기 시작하면(대표가 그 글을 보냈거나 지운 뒤 전달이 들어감) 지운다.
         if (["idle", "working"].includes(e.status) && (!e.observation || e.observation.freshness === "fresh") && member.lastError && member.fenceCode !== "control_unknown" && !this.keepsUsageNote(member) && !this.keepsDraftNote(member, e.status === "working")) this.store.patchMember(member.id, { lastError: null });
         if (e.status === "working" || e.observation?.freshness === "stale") this.invalidateCoreMeasurement(member);
-        if (e.status === "idle" && e.turn !== undefined && e.turn !== null && pending.some(run => run.turn !== null && e.turn! > run.turn)) {
-          this.endExecution(member, "success", "서버 부재 중 더 뒤의 종결 turn을 확인했습니다");
+        if (e.status === "idle" && e.turn !== undefined && e.turn !== null && pending.some(run => !writing.has(run.runId) && run.turn !== null && e.turn! > run.turn)) {
+          this.endExecution(member, "success", "서버 부재 중 더 뒤의 종결 turn을 확인했습니다", null, undefined, false, writing);
           this.runtime(member.id).turn = null;
           this.releaseSlots();
         }
@@ -5249,7 +5304,17 @@ export class Orchestrator implements OrchestratorApi {
           const due = new Date(Date.now() + this.timings.turnErrorRetryMs).toISOString();
           for (const run of pending) for (const id of run.deliveryIds) this.store.patchDeliveryRetry(id, { nextAttemptAt: due, retryScope: `member:${member.id}`, retryReason: reason });
         }
-        this.endExecution(member, e.isError ? "error" : "success", e.errorText ?? e.reason ?? null, e.exitCode ?? null, e.turn);
+        {
+          // 0.2.9: 아직 넣는 중인 봉투의 실행은 이 턴 끝으로 닫지 않는다. 쓰기 결과가 나오면 정한다(deferredEnds → settleDispatch).
+          // 그 턴이 이 팀장의 다른 실행의 것이 아니면(기다리는 실행이 넣는 중인 것뿐이면) 팀장 단위의 턴 끝 처리(onTurnEnd: 턴 문맥·위임 확인·보고 대기 해제)도
+          // 그때로 미룬다. 지금 하면 뜨면서 돈 턴의 끝이 곧 들어갈 진짜 턴의 문맥을 지운다.
+          // 오류로 끝난 턴은 미루지 않는다(예전 그대로): 오류 끝은 보고 보완을 묻지 않고, 한도·로그인·장애 처리는 곧바로 해야 한다.
+          const held: ReadonlySet<string> = e.isError ? new Set() : writing;
+          const memberHandled = pending.length > held.size;
+          for (const runId of held) this.deferredEnds.set(runId, { event: e, memberHandled });
+          this.endExecution(member, e.isError ? "error" : "success", e.errorText ?? e.reason ?? null, e.exitCode ?? null, e.turn, false, held);
+          if (held.size && !memberHandled) return;
+        }
         if (e.isError && !pending.length && member.status === "error" && member.lastError === (e.errorText ?? "오류")) return;
         return this.onTurnEnd(member, e);
       case "activity":

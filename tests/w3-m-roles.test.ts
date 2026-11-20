@@ -162,6 +162,8 @@ const LATER_PARTS: string[] = [
   "mac-shared", "owner-rules", "owner-rules-worker", "owner-away", "owner-away-hq", "model-choice",
   // 묶음 5 검토: 급한 지시로 멈춘 턴을 받은 팀장이 할 일(묶음 1 의 시스템 글)
   "urgent-worker",
+  // 0.2.9: 일을 나누는 기준 보강(Codex 총괄 시험 11-20: 독립된 일을 미룸, 직급 흉내, 서브에이전트 요청에 병렬을 안 켬)
+  "staffing",
 ];
 
 function multiset(items: string[]): Map<string, number> {

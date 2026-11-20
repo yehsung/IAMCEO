@@ -2405,6 +2405,7 @@ struct NewProjectView: View {
     @State private var clonedRepository: String?
     @State private var legacyFolderInput = false
     @State private var provider = "claude"
+    @State private var providerDefaulted = false
     /// "이 폴더를 신뢰하고…": on to begin with. The server then answers the CLI's own folder-trust window itself.
     @State private var trustFolder = true
     @State private var working = false
@@ -2476,6 +2477,10 @@ struct NewProjectView: View {
                 clonedRepository = repositoryName
                 if settingsTrim(name).isEmpty { name = repositoryName }
             }
+        }
+        .onAppear {
+            // 0.2.9: 처음 뜰 때 한 번만 지금 프로젝트의 총괄(본사는 본사 AI)이 쓰는 CLI 로 맞춘다.
+            if !providerDefaulted { providerDefaulted = true; provider = DefaultProvider.choice(in: store) }
         }
         .task {
             if let browser = try? await store.folderBrowser(), case .legacy = browser { legacyFolderInput = true }

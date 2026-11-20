@@ -549,6 +549,31 @@ private struct ChatTypingDots: View {
 
 // MARK: - Thread
 
+/// 0.2.9: 대화의 첫 쪽을 받기 전에 프로젝트 상태의 최근 글을 먼저 보일지.
+/// - 최근 글이 하나도 없으면 보일 것이 없다('불러오는 중'으로 기다린다).
+/// - 특정 글의 앞뒤를 보는 중, 보관한 대화, 마지막으로 본 상태, 최근 글만 주는 옛 서버는 저마다 정해진 글이 있다.
+/// - 첫 쪽을 이미 받았거나, 서버 기록이 바뀌었거나, 끊긴 사이의 글을 이어 받는 중이면 그 기록이 화면의 주인이다.
+enum ChatPreview {
+    static func shows(recentCount: Int, showingContext: Bool, archive: Bool, lastSeen: Bool, pagingUnsupported: Bool,
+                      historyInitialized: Bool, storeChanged: Bool, bridging: Bool) -> Bool {
+        guard recentCount > 0, !showingContext, !archive, !lastSeen, !pagingUnsupported else { return false }
+        return !historyInitialized && !storeChanged && !bridging
+    }
+}
+
+/// 보일 글이 아직 없을 때의 '불러오는 중'. 빈 대화로 읽히지 않게 화면 위쪽 가운데에 크게 둔다(예전에는 맨 위의 작은 한 줄이었다).
+private struct ChatLoadingNotice: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView().controlSize(.regular)
+            Text("대화를 불러오는 중…").font(CEFont.secondary).foregroundStyle(CE.ink2)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 88).padding(.bottom, 24)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 private struct ChatThread: View {
     @Environment(AppStore.self) private var store
     @Environment(Router.self) private var router
@@ -591,6 +616,8 @@ private struct ChatConversation: View {
     @State private var followID: String?
     @State private var positionError = false
     @State private var scrollRevision = UUID()
+    /// 0.2.9: 지금 화면의 글이 프로젝트 상태의 최근 글(미리 보기)에서 왔다. 이 대화의 첫 쪽이 오면 내린다.
+    @State private var presentedPreview = false
     private static let bottomID = "chat-thread-bottom"
 
     init(scopeID: String, targetMemberID: String?, projectID: String?, namespace: String) {
@@ -624,7 +651,31 @@ private struct ChatConversation: View {
         if notificationAnchor != nil { return store.historyMessages }
         // F1: 마지막으로 본 상태에는 그 상태에 든 최근 글만 있다.
         if store.lastSeen != nil || (!store.isArchive && store.pagingSupport == .unsupported) { return scope.messages }
+        if previewing { return previewItems }
         return history?.items ?? []
+    }
+    /// 미리 보기의 글: 프로젝트 상태의 최근 글에, 첫 쪽을 받기 전 이 대화에 이미 놓인 글(방금 보낸 글 등)을 더한다.
+    /// 더하지 않으면 미리 보기 동안 보낸 글이 첫 쪽이 올 때까지 보이지 않는다.
+    private var previewItems: [Message] {
+        let recent = scope.messages
+        guard let history, let first = recent.first else { return recent }
+        // 최근 글보다 앞선 글의 갱신(옛 글의 전달 상태 등)은 더하지 않는다. 앞뒤 없이 옛 글 하나만 끼어든다.
+        let placed = (history.items + history.arrivals).filter { !ChatHistory.ordered($0, first) }
+        guard !placed.isEmpty else { return recent }
+        var rows = Dictionary(recent.map { (Data($0.id.utf8), $0) }, uniquingKeysWith: { _, new in new })
+        for row in placed { rows[Data(row.id.utf8)] = row }
+        return rows.values.sorted(by: ChatHistory.ordered)
+    }
+    /// 0.2.9: 이 대화의 첫 쪽을 아직 받지 못한 동안에는 프로젝트 상태에 든 최근 글을 먼저 보인다. 프로젝트를 열거나 앱을 다시 열 때
+    /// 첫 쪽이 올 때까지 대화가 빈 화면이던 것을 없앤다(멀리서 붙은 폰은 그 시간이 몇 초다). 첫 쪽이 오면 그 기록으로 바꾼다.
+    private var previewing: Bool {
+        // 이 화면이 이미 대화 기록을 보이고 있으면 미리 보기로 돌아가지 않는다(다른 창이 다른 대화를 열어 이 대화의 기록이 잠시 비는 때에
+        // 읽던 자리를 잃지 않게, 예전처럼 그대로 둔다).
+        guard !started || presentedPreview else { return false }
+        return ChatPreview.shows(recentCount: scope.messages.count, showingContext: showingContext, archive: store.isArchive,
+                          lastSeen: store.lastSeen != nil, pagingUnsupported: store.pagingSupport == .unsupported,
+                          historyInitialized: history?.initialized == true, storeChanged: history?.storeChanged == true,
+                          bridging: history?.isBridging == true)
     }
     private var items: [Message] {
         guard let context = focus.context else { return baseItems }
@@ -633,7 +684,7 @@ private struct ChatConversation: View {
     }
     private var showingContext: Bool { focus.context != nil || notificationAnchor != nil }
     private var loaded: Bool { store.lastSeen != nil || (!store.isArchive && store.pagingSupport == .unsupported)
-        || history?.initialized == true || showingContext }
+        || history?.initialized == true || showingContext || previewing }
     private var canPage: Bool {
         store.connectionStatus == .connected && !showingContext && !focus.loading
             && history?.hasOlder == true && history?.loading == nil && history?.isBridging == false
@@ -724,6 +775,10 @@ private struct ChatConversation: View {
             .onChange(of: loaded) { _, value in
                 if value { present(items, proxy: proxy) }
             }
+            .onChange(of: previewing) { _, value in
+                // 첫 쪽이 와 미리 보기가 끝났다. 글이 같아 목록이 바뀌지 않아도 표시는 내려야 한다.
+                if !value { present(items, proxy: proxy) }
+            }
             .onChange(of: anchor.isPreservingPosition) { _, preserving in
                 if !preserving, let queued { self.queued = nil; present(queued, proxy: proxy) }
             }
@@ -786,11 +841,17 @@ private struct ChatConversation: View {
                 }
             } else if store.pagingSupport == .unsupported && !store.isArchive {
                 Text("이 서버는 최근 대화만 보여줍니다").foregroundStyle(CE.ink3)
+            } else if previewing {
+                // 최근 글은 이미 보인다. 이 대화의 첫 쪽(이전 글 포함)을 받는 중이다.
+                if history?.error != nil {
+                    Text("대화를 불러오지 못했습니다").foregroundStyle(CE.danger)
+                    Button("다시 불러오기") { Task { await store.refreshHistory() } }.ceSecondaryButton()
+                } else { ProgressView("이전 글을 불러오는 중…").controlSize(.small) }
             } else if !loaded {
                 if history?.error != nil {
                     Text("대화를 불러오지 못했습니다").foregroundStyle(CE.danger)
                     Button("다시 불러오기") { Task { await store.refreshHistory() } }.ceSecondaryButton()
-                } else { ProgressView("대화를 불러오는 중…").controlSize(.small) }
+                } else { ChatLoadingNotice() }
             } else if history?.loading?.kind == .older {
                 ProgressView("이전 글을 불러오는 중…").controlSize(.small)
             } else if history?.error != nil {
@@ -902,12 +963,17 @@ private struct ChatConversation: View {
     private func present(_ incoming: [Message], proxy: ScrollViewProxy) {
         guard loaded else { return }
         guard !focus.loading else { return }
+        // 0.2.9: 최근 글을 먼저 보이다가 이 대화의 첫 쪽이 왔다.
+        let handoff = presentedPreview && !previewing
+        if !previewing { presentedPreview = false }
         // An explicit destination owns the first layout even when the normal history arrives first.
         if !started, router.chatMessageID != nil, focus.messageID == nil, focus.error == nil {
             displayed = incoming
             return
         }
         if !started {
+            // started 를 켜기 전에 읽는다: 이미 기록을 보이는 화면은 미리 보기로 돌아가지 않으므로(previewing), 켠 뒤에 읽으면 늘 거짓이다.
+            presentedPreview = previewing
             started = true; displayed = incoming
             if let id = notificationAnchor {
                 pinned = false; restoring = ChatHistoryAnchor(messageID: chatMessageRowID(id), offset: 0)
@@ -924,6 +990,17 @@ private struct ChatConversation: View {
             return
         }
         guard ChatThreadContent(items: displayed) != ChatThreadContent(items: incoming) else { return }
+        // 맨 아래에 머문 채 첫 쪽을 받으면 자리 보존 없이 그대로 바꾼다. 미리 보기의 첫 배치가 아직 자리를 잡는 중일 수 있어,
+        // 앞쪽에 글이 늘어도 '읽던 자리'를 따지지 않는다(읽던 자리는 맨 아래다).
+        if handoff, pinned, !anchor.isPreservingPosition {
+            displayed = incoming; queued = nil
+            let revision = scrollRevision
+            Task { @MainActor in
+                await Task.yield()
+                if isVisible, scrollRevision == revision { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+            }
+            return
+        }
         queued = incoming
         guard !anchor.isPreservingPosition else { return }
         let hasPrepend = displayed.first.flatMap { first in incoming.first.map { ChatHistory.ordered($0, first) } } ?? false
@@ -987,7 +1064,8 @@ private struct ChatConversation: View {
     }
 
     private func savePosition() {
-        guard !showingContext, !focus.loading, history != nil, restoring == nil else { return }
+        // 미리 보기 동안의 자리는 남기지 않는다(아직 이 대화의 기록이 아니다).
+        guard !showingContext, !focus.loading, history != nil, restoring == nil, !previewing else { return }
         let value = reading.map { ChatHistoryAnchor(messageID: $0.messageID, offset: Double($0.top)) }
         if history?.anchor != value || history?.pinnedToBottom != pinned {
             store.setHistoryReadingPosition(value, pinned: pinned)

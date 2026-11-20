@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { constants, closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ApprovalPrompt, Backend } from "../../shared/types.ts";
+import type { ApprovalPrompt, Backend, MemberKind } from "../../shared/types.ts";
 import { claudeFolderTrust, codexFolderTrust, looksLikeFolderTrust } from "./core-approval.ts";
 import { cleanText, clipUtf16 } from "../text.ts";
 import { childEnv } from "./env.ts";
@@ -253,6 +253,19 @@ interface ClaudeWatch {
  * path: 찾아 둔 Claude 주 대화 기록. key: 마지막으로 낸 값(quality:count).
  */
 interface SubagentWatch { claude: ClaudeSubagentCursor | null; codex: CodexSubagentState | null; path: string | null; key: string | null }
+
+/**
+ * Codex 입력 앞에 붙이는 실행 선호 한 줄. Codex 는 자기 서브에이전트(features.multi_agent)를 스스로 띄울 수 있어, 병렬을 켜지 않은 세션에는
+ * 띄우지 말라고 알린다.
+ * 0.2.9: 총괄·본사 AI 에게는 '이 일을 순서대로 하라'고 하지 않는다. 그 줄을 읽은 Codex 총괄이 팀장에게 일을 나누는 것까지 순서대로 했다
+ * (서로 상관없는 일을 앞 일이 끝날 때까지 미루고, 팀장 지시에도 '병렬 금지'를 적었다. 11-20 Codex 총괄 시험). 총괄에게는 자기 서브에이전트만
+ * 막고, 팀장에게 일을 나누는 것은 이 줄과 상관없다고 적는다.
+ */
+export function codexExecutionPreference(kind: MemberKind, parallel: boolean): string {
+  if (parallel) return "IAMCEO execution preference: Use native subagents for independent work in parallel when useful; retain your normal approvals and tool access.\n\n";
+  if (kind !== "worker") return "IAMCEO execution preference: Do not spawn native subagents yourself. This is only about your own subagents: it does not limit how you hand out work with the IAMCEO team tools, and independent work still goes to team members right away so they run at the same time.\n\n";
+  return "IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.\n\n";
+}
 
 /** Terminals belong to core's holders. IAMCEO shutdown only detaches. */
 export class CoreRunner implements FullRunner {
@@ -935,8 +948,7 @@ export class CoreRunner implements FullRunner {
       const quietInput = this.claudeTakesInput(track, terminal);
       if (quietInput && !this.stillClaudeQuiet(track, screen.text)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: "Claude started a turn of its own; waiting for it to end" };
       const preference = this.parallelPreferences.get(member.id) ?? member.parallel;
-      const prefix = providerFor(member) === "codex" && preference !== undefined
-        ? (preference ? "IAMCEO execution preference: Use native subagents for independent work in parallel when useful; retain your normal approvals and tool access.\n\n" : "IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.\n\n") : "";
+      const prefix = providerFor(member) === "codex" && preference !== undefined ? codexExecutionPreference(member.kind, preference) : "";
       const binding = providerFor(member) === "codex" && !track.sessionId && track.nonce ? codexBindingMarker(track.nonce) + "\n\n" : "";
       const cleaned = cleanText(binding + prefix + text);
       if (!cleaned.trim()) return unsupported("Message is empty");

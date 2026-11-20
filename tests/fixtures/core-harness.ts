@@ -126,6 +126,7 @@ export async function startFakeCore(options: FakeCoreOptions) {
   const keys: { terminal: string; keys: string[] }[] = [];
   const state = { version: options.version ?? CORE_VERSION, directives: options.directives ?? "", script: options.script ?? [] as FakeScriptRule[], onTurn: options.onTurn ?? null, down: false };
   let interceptor: ((call: FakeCoreCall) => FakeCoreReply) | null = null;
+  const dropped = new Map<string | number, Socket>();
   let onKeys: ((terminal: CoreTerminal, pressed: string[]) => void) | null = null;
   let counter = 0, stopping = false;
 
@@ -324,6 +325,8 @@ export async function startFakeCore(options: FakeCoreOptions) {
         let reply: FakeCoreReply;
         try { reply = interceptor?.(call) ?? apply(call); }
         catch (error) { reply = { error: { kind: "fixture", message: String(error) } }; }
+        // "drop" 한 요청은 시험이 answer() 로 나중에 답할 수 있게 소켓을 기억한다(쓰는 사이에 상태가 바뀌는 경우를 만든다).
+        if (reply === "drop") dropped.set(call.id, socket);
         if (reply === "drop" || reply === undefined || socket.destroyed || stopping) continue;
         // 답은 이 순간의 모습으로 굳힌다. 뒤에 바뀐 터미널 상태가 앞선 답에 섞이지 않는다.
         socket.write(`${JSON.stringify("result" in reply ? { jsonrpc: "2.0", id: call.id, result: reply.result } : { jsonrpc: "2.0", id: call.id, error: { code: -32000, message: reply.error.message, data: { kind: reply.error.kind } } })}\n`);
@@ -395,6 +398,14 @@ export async function startFakeCore(options: FakeCoreOptions) {
     typeDirectly(memberId: string, prompt: string) { begin(need(memberId), prompt); },
     /** RPC 를 가로챈다. undefined 를 돌려주면 평소대로 처리한다. "drop" 은 답하지 않는다(제한 시간까지 기다리게 됨). */
     intercept(fn: ((call: FakeCoreCall) => FakeCoreReply) | null) { interceptor = fn; },
+    /** intercept 가 "drop" 한 요청에 뒤늦게 답한다. 그 요청이 없거나 연결이 끊겼으면 false. */
+    answer(call: FakeCoreCall, reply: Exclude<FakeCoreReply, "drop" | undefined>): boolean {
+      const socket = dropped.get(call.id);
+      dropped.delete(call.id);
+      if (!socket || socket.destroyed) return false;
+      socket.write(`${JSON.stringify("result" in reply ? { jsonrpc: "2.0", id: call.id, result: reply.result } : { jsonrpc: "2.0", id: call.id, error: { code: -32000, message: reply.error.message, data: { kind: reply.error.kind } } })}\n`);
+      return true;
+    },
     onKeys(fn: typeof onKeys) { onKeys = fn; },
     /**
      * 연결은 받고, 요청을 읽은 뒤 답 없이 끊는다(엔진이 요청을 받은 직후 죽은 모양). false 로 되돌리면 터미널은 그대로 남아 있다.

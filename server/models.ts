@@ -76,11 +76,15 @@ export class ModelCatalogReader {
 
   read(): ModelCatalog { return { claude: this.readList("claude"), codex: this.readList("codex") }; }
 
-  requireModel(cli: CliProvider, value: string | null | undefined): void {
-    if (value == null) return;
+  /** 그 CLI 의 모델 목록에 있는 값인가. */
+  listed(cli: CliProvider, value: string): boolean {
     const list = this.read()[cli].models;
-    if (list.some(model => model.value === value) ||
-        (cli === "claude" && value === "fable" && list.some(model => model.label.toLowerCase() === "fable"))) return;
+    return list.some(model => model.value === value) ||
+      (cli === "claude" && value === "fable" && list.some(model => model.label.toLowerCase() === "fable"));
+  }
+
+  requireModel(cli: CliProvider, value: string | null | undefined): void {
+    if (value == null || this.listed(cli, value)) return;
     throw new ApiError(400, "목록에 없는 모델입니다", "model_unknown");
   }
 

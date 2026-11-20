@@ -72,6 +72,33 @@ test("chief provider persists before startup and member providers stay independe
   expect(f.runner.starts.map((m) => m.cli)).toEqual(["codex", "claude"]);
 });
 
+// 0.2.9: CLI 를 정하지 않고 띄운 팀장은 띄우는 총괄의 CLI 를 따른다(예전에는 늘 claude 여서 Codex 만 쓰는 사람의 팀장이 Claude 로 떴다).
+test("a member added without a provider follows the lead that adds it, or the project's chief provider", async () => {
+  const f = fixture();
+  const p = await f.orch.createProject({ name: "Codex 프로젝트", cwd: f.config.home, chiefCli: "codex" });
+  const chief = await f.orch.ensureConductor(p.id);
+  // 총괄의 team_add(CLI 생략): 총괄과 같은 CLI.
+  const byLead = (await f.orch.addMember(p.id, { name: "결제 연동", role: "결제" }, chief)).member;
+  expect(byLead.cli).toBe("codex");
+  // 화면의 팀장 추가(CLI 생략): 이 프로젝트 총괄의 CLI.
+  expect((await f.orch.createMember(p.id, { name: "화면 문구" })).cli).toBe("codex");
+  // 정한 CLI 는 그대로.
+  expect((await f.orch.addMember(p.id, { name: "조사", cli: "claude" }, chief)).member.cli).toBe("claude");
+  // Claude 총괄의 프로젝트는 예전 그대로 claude.
+  const claudeChief = await f.orch.ensureConductor(f.project.id);
+  expect(claudeChief.cli).toBe("claude");
+  expect((await f.orch.addMember(f.project.id, { name: "결제 연동" }, claudeChief)).member.cli).toBe("claude");
+  expect((await f.orch.createMember(f.project.id, { name: "화면 문구" })).cli).toBe("claude");
+  // 총괄의 CLI 를 나중에 바꿨으면(팀장 설정) 그 뒤 띄우는 팀장은 지금 총괄의 CLI 를 따른다.
+  const switched = { ...claudeChief, cli: "codex" as const };
+  expect((await f.orch.addMember(f.project.id, { name: "배송 조사" }, switched)).member.cli).toBe("codex");
+  // CLI 없이 다른 CLI 의 모델만 정하면 그 모델의 CLI 로 띄운다. 어느 목록에도 없는 모델은 지금처럼 거절한다.
+  expect((await f.orch.addMember(p.id, { name: "문서 검토", modelOverride: "sonnet" }, chief)).member).toMatchObject({ cli: "claude", modelOverride: "sonnet" });
+  expect((await f.orch.addMember(f.project.id, { name: "코드 검토", modelOverride: "gpt-6-luna" }, claudeChief)).member).toMatchObject({ cli: "codex", modelOverride: "gpt-6-luna" });
+  await expect(f.orch.addMember(p.id, { name: "없는 모델", modelOverride: "no-such-model" }, chief)).rejects.toMatchObject({ status: 400, code: "model_unknown" });
+  expect(f.runner.starts.map((m) => m.cli)).toEqual(["codex", "codex", "codex", "claude", "claude", "claude", "claude", "codex", "claude", "codex"]);
+});
+
 test("provider switch preserves member identity, archives old session and rotates credentials", async () => {
   const f = fixture();
   const member = await f.orch.createMember(f.project.id, { name: "개발자", role: "개발" });

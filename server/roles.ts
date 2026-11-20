@@ -22,6 +22,8 @@ import ownerAwayHq from "./roles/parts/owner-away-hq.md" with { type: "text" };
 import ownerRules from "./roles/parts/owner-rules.md" with { type: "text" };
 import ownerRulesWorker from "./roles/parts/owner-rules-worker.md" with { type: "text" };
 import reportWording from "./roles/parts/report-wording.md" with { type: "text" };
+// 0.2.9: 일을 나누는 기준 보강(독립된 일은 바로 맡김, 직급 흉내 금지, 서브에이전트는 parallel). Codex 총괄 시험(11-20)에서 나온 것.
+import staffing from "./roles/parts/staffing.md" with { type: "text" };
 import todoEdit from "./roles/parts/todo-edit.md" with { type: "text" };
 import urgent from "./roles/parts/urgent.md" with { type: "text" };
 import urgentWorker from "./roles/parts/urgent-worker.md" with { type: "text" };
@@ -111,6 +113,8 @@ export const ROLE_PARTS: Readonly<Record<string, string>> = {
   "owner-rules": ownerRules,
   "owner-rules-worker": ownerRulesWorker,
   "report-wording": reportWording,
+  // 0.2.9
+  staffing,
   "todo-edit": todoEdit,
   urgent,
   "urgent-worker": urgentWorker,

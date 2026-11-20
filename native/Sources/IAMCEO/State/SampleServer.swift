@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// 샘플 모드의 가짜 서버(F8). '샘플로 둘러보기'(iPhone)와 `--demo`(Mac)의 AppStore 는 실제 서버에 붙을 때와 같은 길로
 /// 연결·동기화·대화 페이지·쓰기를 하고, 그 요청을 이 서버가 기기 안에서 받는다. 화면 코드는 샘플인지 모르고 그대로 돈다.
@@ -47,6 +48,8 @@ final class SampleServer: @unchecked Sendable {
     /// Z(0.2.6): 그 사이에는 '답 쓰는 중' 말풍선(reply working)이 보인다.
     var deliveryDelay: Duration = .milliseconds(700)
     var replyDelay: Duration = .milliseconds(3200)
+    /// 대화 한 쪽(messages/page)의 답을 늦춘다. 시험이 멀리서 붙은 폰처럼 첫 쪽이 늦게 오는 경우를 만든다(기본은 바로).
+    var historyDelay: Duration = .zero
     /// 아직 나가지 않은 답(글 ID → 낼 일). 간격이 지나거나 시험이 acknowledgeNow 를 부르면 한 번만 나간다.
     private var pendingAcknowledgements: [String: (SampleServer) -> Void] = [:]
     /// 실시간 연결의 심장 박동 간격(서버와 같다).
@@ -816,6 +819,16 @@ final class SampleURLProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }
+        let delay = url.path.hasSuffix("/messages/page") ? server.historyDelay : .zero
+        guard delay > .zero else { finish(server: server, url: url); return }
+        let seconds = Double(delay.components.seconds) + Double(delay.components.attoseconds) / 1e18
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
+            guard !stopped.withLock({ $0 }) else { return }
+            finish(server: server, url: url)
+        }
+    }
+    private let stopped = OSAllocatedUnfairLock(initialState: false)
+    private func finish(server: SampleServer, url: URL) {
         let reply = server.reply(to: request, body: Self.body(of: request))
         guard let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers) else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
@@ -825,7 +838,7 @@ final class SampleURLProtocol: URLProtocol, @unchecked Sendable {
         if request.httpMethod != "HEAD" { client?.urlProtocol(self, didLoad: reply.body) }
         client?.urlProtocolDidFinishLoading(self)
     }
-    override func stopLoading() {}
+    override func stopLoading() { stopped.withLock { $0 = true } }
 
     /// URLSession 은 본문을 httpBody 대신 스트림으로 넘기기도 한다(올리기 포함).
     private static func body(of request: URLRequest) -> Data? {

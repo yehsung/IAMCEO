@@ -7,6 +7,14 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 0.2.9 — 2026-11-20
+
+- **Codex 총괄이 서로 상관없는 일을 미루지 않고 바로 나눠 맡깁니다.** 서버가 Codex 세션에 넣는 글 앞에 붙이던 '이 일은 순서대로 하고 서브에이전트를 띄우지 말라'는 줄이 총괄에게도 붙어, Codex 총괄이 팀장에게 일을 나누는 것까지 순서대로 했습니다. 다른 성격의 일을 시켜도 앞 일이 끝날 때까지 새 팀장을 띄우지 않고 예정에만 올려 두었고, 팀장에게 주는 지시에도 '병렬 금지'를 적었습니다. 이제 총괄에게는 자기 서브에이전트만 띄우지 말라고 알립니다. 총괄 지침에도 나누는 기준을 더했습니다: 서로 결과를 기다릴 필요가 없는 일은 지금 맞는 팀장에게 맡기거나 새로 띄워 함께 돌리고('그리고'·'이것도'는 순서를 정한 말이 아닙니다), 한 가지 일에 '팀장·사원'처럼 위아래를 따로 띄우지 않으며(이름에 직급을 붙이지 않습니다), 대표가 서브에이전트·병렬을 말하면 팀장을 더 띄우는 대신 그 팀장의 병렬을 켭니다. 총괄이 대표에게 쓰는 글에서도 화면과 같이 '팀장'이라고 부릅니다(예전에는 '직원'). 바뀐 지침은 새로 여는 세션부터 실립니다.
+- **새로 띄운 Codex 팀장이 첫 지시를 하지 않고 '막힘'으로 보고하던 것을 고쳤습니다.** Codex는 뜨는 동안 스스로 한 번 '일하는 중 → 끝'을 알립니다. 서버가 그것을 아직 넣지도 못한 첫 지시의 결과로 읽어 '결과만 보고하고 일은 다시 하지 말라'는 글을 첫 지시와 한 묶음으로 넣었고, 팀장은 그 글을 따라 일을 하지 않았습니다. 이제 넣는 중인 지시는 그 알림으로 닫지 않고, 넣기가 끝난 뒤에 그 글로 시작한 턴인지 가려 닫습니다.
+- **총괄이 띄우는 팀장은 총괄과 같은 CLI로 뜹니다.** 예전에는 CLI를 따로 말하지 않으면 늘 Claude Code로 떠서, Codex만 쓰는 사람의 팀장이 로그인하지 않은 Claude로 떴습니다. 앱의 '팀장 추가'와 '새 프로젝트' 화면도 지금 보는 프로젝트의 총괄이 쓰는 CLI를 먼저 고르고(Codex만 설치한 Mac은 Codex), 본사 AI가 만드는 프로젝트의 총괄은 본사 AI와 같은 CLI로 뜹니다. 대표가 CLI를 말하거나 고르면 그대로 따릅니다.
+- **대화창이 빈 화면으로 기다리지 않습니다.** 프로젝트를 열거나 앱을 다시 열면 대화의 첫 쪽을 받을 때까지 화면이 비어 있어 대화가 없는 것처럼 보였습니다(멀리서 붙은 iPhone은 몇 초). 이제 프로젝트를 열 때 함께 받은 최근 글을 먼저 보이고, 첫 쪽이 오면 이전 글까지 이어 붙입니다. 보일 글이 아직 없을 때는 '대화를 불러오는 중'을 화면 위쪽 가운데에 크게 보입니다.
+- **멀리서 붙은 기기가 받는 양이 3분의 1로 줄었습니다.** 서버가 큰 응답(프로젝트 상태, 대화 한 쪽)을 압축해 보냅니다. 오래 쓴 프로젝트는 열 때마다 1.2MB를 받던 것이 0.34MB가 됩니다. 이미 설치한 앱도 Mac의 서버만 올리면 그대로 빨라집니다. 이 Mac 안에서 쓰는 앱은 지금처럼 압축 없이 받습니다.
+
 ### 0.2.8 — 2026-11-19
 
 - **폰에서도 AI 계정을 바꾸거나 다시 로그인합니다.** 설정 › AI 모델의 'AI 계정'에 이 Mac의 Claude Code·Codex가 쓰는 계정(메일·요금제)이 보이고, '다른 계정으로 로그인'을 누르면 Mac 터미널 없이 지금 쓰는 기기에서 로그인합니다. Claude Code는 열린 페이지에서 로그인한 뒤 나오는 코드를 복사해 붙여넣으면 끝나고(서버가 도는 Mac에서는 브라우저에서 허용만 누르면 끝납니다), Codex는 페이지에 앱이 보여 주는 일회용 코드를 넣으면 끝납니다. 사용 한도 카드에도 같은 단추가 있습니다. 다른 계정으로 바꾸면 한도로 멈춘 팀장은 곧바로 같은 대화를 새 계정으로 이어 열어 멈춘 일을 이어 가고, 다른 팀장은 하던 일을 마치는 대로(쉬고 있으면 곧바로) 같은 대화를 새 계정으로 다시 엽니다. 로그인 오류로 멈춘 팀장은 같은 계정으로 다시 로그인해도 곧바로 이어 갑니다. 로그인 코드와 토큰은 서버 기록에 남지 않습니다.
@@ -169,6 +177,14 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### 0.2.9 — 2026-11-20
+
+- **A Codex lead hands out unrelated work right away instead of queueing it.** The line the server puts in front of text for Codex sessions ("work sequentially for this task; do not spawn subagents") also went to the lead, so a Codex lead handed out work sequentially too: a task of a different kind stayed on the "next" list until the earlier one finished, with no new team lead, and its instructions told team leads not to run in parallel. The lead is now told only not to spawn its own subagents. The lead's rules also gained criteria for dividing work: tasks that do not need each other's results go to the right team lead now, or to a new one, and run together ("and" or "this too" does not set an order); one task never gets a separate "lead and junior" pair (no ranks in names); and when you ask for subagents or parallel work the lead turns on parallel for that team lead instead of starting more sessions. In what it writes to you, the lead now uses the same word the app does for them. Changed rules apply to sessions opened from now on.
+- **A newly started Codex team lead no longer skips its first instruction and reports "blocked".** While it starts, Codex reports one "working, then done" of its own. The server read that as the result of a first instruction it had not even delivered yet and sent "only report the result, do not run the task again" bundled with that instruction, and the team lead obeyed. An instruction that is still being delivered is no longer closed by that report; once delivery finishes the server checks whether the turn was started by that text.
+- **A team lead started by the lead uses the same CLI as the lead.** Unless a CLI was named it always started on Claude Code, so someone using only Codex got team leads on a Claude that was not signed in. "Add team lead" and "New project" in the app also start on the CLI the current project's lead uses (Codex on a Mac with only Codex installed), and a lead created by the head-office AI uses the head-office AI's CLI. A CLI you name or pick is still used as is.
+- **The conversation no longer waits on an empty screen.** After opening a project or reopening the app, the conversation stayed empty until its first page arrived, which looked like there was nothing there (several seconds on an iPhone connecting from far away). The recent messages that come with the project are now shown first, and the first page is joined on when it arrives. When there is nothing to show yet, "Loading the conversation" is shown large near the top center.
+- **A device connecting from far away downloads a third as much.** The server now compresses large responses (project state, a page of conversation). A long-used project went from 1.2 MB per open to 0.34 MB. Apps that are already installed get faster as soon as the server on the Mac is updated. An app on the same Mac receives responses uncompressed as before.
 
 ### 0.2.8 — 2026-11-19
 

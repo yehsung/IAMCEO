@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { detectTailscaleIp, generateAccessCode, isTailscaleV4, isTailscaleV6, updateConfigFile } from "./config.ts";
+import { JsonCompressor } from "./compress.ts";
 import { MIGRATIONS } from "./db.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
@@ -1888,6 +1889,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     return Response.json(result);
   };
 
+  const compressor = new JsonCompressor();
   const handleRequest = async (req: Request, server: Server<SocketData>): Promise<Response | undefined> => {
     const url = new URL(req.url);
     // 인증 실패와 검증 오류도 사용자 데이터처럼 캐시에 남기지 않는다.
@@ -1899,7 +1901,10 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     if (!isHostAllowed(req.headers.get("host"), config.hosts)) return noStore(fail(403, "허용되지 않은 주소입니다", "address_not_allowed"));
     if (!originMatchesHost(req)) return noStore(fail(403, "허용되지 않은 출처입니다", "origin_not_allowed"));
     try {
-      return noStore(await route(req, url, server));
+      const response = await route(req, url, server);
+      // 0.2.9: 큰 JSON 답은 gzip 으로 보낸다(server/compress.ts). 이 Mac 안에서 온 요청은 줄여도 얻는 것이 없어 그대로 둔다.
+      if (response && url.pathname.startsWith("/api/") && !fromLoopback(req, server)) return noStore(await compressor.apply(req, response));
+      return noStore(response);
     } catch (e) {
       if (e instanceof ApiError) return noStore(fail(e.status, e.message, e.code, e.reason));
       // 디스크 가득·읽기 쓰기 오류는 앱이 알아볼 수 있게 분류해 답한다. SQLite 원문은 로그에만 남긴다.

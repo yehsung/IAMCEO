@@ -1933,6 +1933,8 @@ struct NewMemberView: View {
     @State private var name = ""
     @State private var role = ""
     @State private var selection = NewMemberModelSelection()
+    /// 처음 뜰 때 한 번만 총괄의 CLI 로 맞춘다. 그 뒤 고른 값은 건드리지 않는다.
+    @State private var providerDefaulted = false
     @State private var failure: String?
     @State private var submitted = false
     @State private var presented = false
@@ -1965,7 +1967,10 @@ struct NewMemberView: View {
         .scrollDismissesKeyboard(.interactively)
         .task { await store.refreshModels() }
         .overlay(alignment: .top) { MemberCreationBanner(onOpen: { dismiss() }).padding() }
-        .onAppear { presented = true }
+        .onAppear {
+            presented = true
+            if !providerDefaulted { providerDefaulted = true; selection.provider = DefaultProvider.choice(in: store) }
+        }
         .onDisappear {
             presented = false
             if submitted, busy, router.navigationNotice == nil,
@@ -2383,6 +2388,22 @@ struct TeamMemberStatusBadge: View {
 enum UXTeamTerminal {
     static func openDecision(for memberID: String, in decisions: [Decision]) -> Decision? {
         decisions.first { $0.memberId == memberID && $0.status == "open" }
+    }
+}
+
+/// 0.2.9: 새 팀장·새 프로젝트 화면이 처음 고르는 CLI. 지금 보는 프로젝트의 총괄(본사는 본사 AI)이 쓰는 CLI 를 따른다. 총괄이 없으면
+/// 설치된 쪽을 고른다(Codex 만 설치한 Mac 은 Codex). 둘 다 있거나 아직 모르면 Claude Code 다. 예전에는 늘 Claude Code 였다.
+enum DefaultProvider {
+    static func choice(lead: String?, installed: [String: Bool]) -> String {
+        if let lead, lead == "claude" || lead == "codex" { return lead }
+        if installed["claude"] == false, installed["codex"] == true { return "codex" }
+        return "claude"
+    }
+    @MainActor static func choice(in store: AppStore) -> String {
+        let lead = store.members.first { $0.kind == "conductor" || $0.kind == "root" }?.cli
+        var installed: [String: Bool] = [:]
+        for cli in ["claude", "codex"] { if let known = store.runtime?.providers[cli]?.installed { installed[cli] = known } }
+        return choice(lead: lead, installed: installed)
     }
 }
 

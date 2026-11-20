@@ -120,6 +120,8 @@ struct ChatHistory: Sendable {
     private var bridge: Bridge?
 
     var isBridging: Bool { bridge != nil }
+    /// 0.2.9: 아직 대화 기록의 자리에 놓이지 않은 채 실시간으로 받은 글(첫 쪽을 받는 중에 보낸 글 등). 대화창 미리 보기가 최근 글에 더해 보인다.
+    var arrivals: [Message] { Array(overlay.values) }
     var items: [Message] {
         sorted.value {
             var rows = confirmed

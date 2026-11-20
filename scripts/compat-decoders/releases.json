@@ -293,6 +293,87 @@
           ]
         }
       ]
+    },
+    {
+      "tag": "v0.2.8",
+      "appHeaders": { "version": "0.2.8", "platform": "ios", "apiLevel": 1 },
+      "defines": ["COMPAT_SINCE_0_2_4", "COMPAT_SINCE_0_2_5", "COMPAT_SINCE_0_2_6"],
+      "files": [
+        "native/Sources/IAMCEO/Models/Models.swift",
+        "native/Sources/IAMCEO/Models/RealtimeModels.swift",
+        "native/Sources/IAMCEO/Models/PushModels.swift",
+        "native/Sources/IAMCEO/Models/CLIApproval.swift",
+        "native/Sources/IAMCEO/Models/FileSearch.swift",
+        "native/Sources/IAMCEO/Models/ModelCatalog.swift",
+        "native/Sources/IAMCEO/State/RankSettings.swift",
+        "native/Sources/IAMCEO/Services/AppVersion.swift",
+        "native/Sources/IAMCEO/Models/ServerErrorText.swift",
+        "native/Sources/IAMCEO/Services/ServerErrorDisplay.swift",
+        "native/Sources/IAMCEO/Services/ServerText.swift",
+        "native/Sources/IAMCEO/Models/ServerTextCatalog.swift",
+        {
+          "path": "native/Sources/IAMCEO/Services/AppLanguage.swift",
+          "from": "enum AppLanguage",
+          "to": "// MARK: - 날짜",
+          "imports": ["Foundation", "os"]
+        },
+        {
+          "path": "native/Sources/IAMCEO/Design/Components.swift",
+          "from": "/// 날짜 문자열 파싱과 포매터 생성은",
+          "to": "/// 한국어 로케일의 고정 형식 날짜 글자.",
+          "imports": ["Foundation"]
+        },
+        {
+          "path": "native/Sources/IAMCEO/Design/ReplyPresentation.swift",
+          "from": "/// 대표 글 하나의 답 상태.",
+          "to": "/// 대화 맨 아래 한 줄: 그 팀장이 내 글에 어떻게 하고 있는가.",
+          "imports": ["Foundation"],
+          "mirrored": [
+            "static let open: Set<String> = [\"queued\", \"behind\", \"waking\", \"checking\", \"blocked\", \"delivered\", \"working\"]",
+            "static let settled: Set<String> = [\"replied\", \"no_reply\", \"stopped\"]"
+          ]
+        },
+        {
+          "path": "native/Sources/IAMCEO/Services/APIClient.swift",
+          "from": "struct APIError",
+          "to": "struct ServerEndpoint",
+          "imports": ["Foundation"],
+          "mirrored": [
+            "let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]",
+            "let message = object?[\"error\"] as? String ?? object?[\"message\"] as? String ?? \"Request failed (\\(http.statusCode)).\"",
+            "throw APIError(status: http.statusCode, message: message, code: object?[\"code\"] as? String, reason: object?[\"reason\"] as? String)"
+          ]
+        },
+        {
+          "path": "native/Sources/IAMCEO/Views/ConnectedDevicesView.swift",
+          "from": "/// QR 로 연결한 기기 하나.",
+          "to": "/// 화면 글자.",
+          "imports": ["Foundation"],
+          "mirrored": [
+            "} catch let failure as APIError where failure.code == \"device_not_found\" {",
+            "} catch let failure as APIError where failure.code == \"device_revoke_local_only\" {",
+            "revokeError = Self.message(failure, fallback: ConnectedDevicesText.othersOnServerMac)",
+            "if let failure = error as? APIError, !failure.message.isEmpty { return failure.localizedDescription }",
+            "if list.canRevoke(device) {"
+          ]
+        },
+        {
+          "path": "native/Sources/IAMCEO/State/OfflineState.swift",
+          "from": "enum ServerIdentity",
+          "to": "/// 대기열에서 나가 서버로 간 글.",
+          "imports": ["Foundation"]
+        },
+        {
+          "path": "native/Sources/IAMCEO/State/AppStore+Offline.swift",
+          "mirrorOnly": true,
+          "mirrored": [
+            "var currentServerID: String? { ServerVersionInfo.normalizedID(bootstrap?.server?.id) }",
+            "var currentServerHome: String? { bootstrap.flatMap { $0.home.isEmpty ? nil : $0.home } }",
+            "ServerIdentity.same(id: attempt.serverID, home: attempt.serverHome, as: currentServerID, home: currentServerHome) != false",
+            "if let known = ServerIdentity.same(id: item.serverID, home: item.owner?.home, as: serverID, home: home) { mine = known }"
+          ]
+        }
+      ]
     }
   ]
 }

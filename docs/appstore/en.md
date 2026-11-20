@@ -73,9 +73,11 @@ AI agent,coding agent,AI team,developer,remote,approval,inbox,CLI,terminal,autom
 
 ## whatsNew
 
-What's New in 0.2.8 (up to 4,000 characters). The new features need a Mac server on 0.2.8 or later, so each item says so.
+What's New in 0.2.9 (up to 4,000 characters). Fixes made on the server need a Mac server on 0.2.9 or later, so each item says so.
 
 ```text
-• Switch or renew AI accounts from your phone. Settings › AI models › AI accounts shows the account Claude Code and Codex use, and "Switch account" signs in from the device you're holding so your staff on the Mac use the new account. Requires the IAMCEO server 0.2.8 or later on your Mac.
-• When a usage limit hits, sign in with another account right from the limit card. Stopped staff continue the same conversation with the new account, and staff stopped by a sign-in error continue once you sign in again. Requires Mac server 0.2.8 or later.
+• The conversation no longer waits on an empty screen. Recent messages show as soon as a project opens, and earlier ones load after.
+• Opens faster when you connect from far away. The Mac server now compresses large responses, so the app downloads about a third as much. Requires the IAMCEO server 0.2.9 or later on your Mac.
+• A lead running on Codex now hands unrelated work to staff right away instead of queueing it, and a newly started Codex staff member no longer skips its first instruction. Fixed by updating the Mac server to 0.2.9 or later.
+• "Add staff member" and "New project" start on the AI tool your lead uses (Claude Code or Codex).
 ```

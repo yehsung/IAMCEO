@@ -202,11 +202,13 @@ describe("역할 지침의 보고 언어 줄", () => {
     expect(out).toBe(`승인 없이 커밋하지 않는다. {{PROJECT}}\n\n${ENGLISH_REPORT_RULE}\n`);
   });
 
-  test("영어 줄은 한 줄짜리 규칙 두 개다(지침 길이를 크게 늘리지 않는다)", () => {
+  test("영어 줄은 한 줄짜리 규칙 세 개다(지침 길이를 크게 늘리지 않는다)", () => {
     const lines = ENGLISH_REPORT_RULE.split("\n");
     expect(lines[0]).toBe("## Report language");
     expect(lines.slice(1).every(line => line.startsWith("- "))).toBe(true);
-    expect(lines.length).toBe(3);
+    // 0.2.9: 셋째 줄은 영어 화면의 낱말(lead·staff member·sub-agent). 총괄 지침이 대표에게 '팀장'이라고 쓰라고 하므로, 영어에서는 화면의 낱말로 쓰게 한다.
+    expect(lines.length).toBe(4);
+    expect(lines[3]).toContain('"staff member"');
     expect(ENGLISH_REPORT_RULE.length).toBeLessThan(1400);
   });
 

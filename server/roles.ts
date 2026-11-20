@@ -87,7 +87,8 @@ export function ownerRulesSection(rules: readonly OwnerRuleLine[], language?: Re
  */
 export const ENGLISH_REPORT_RULE = `## Report language
 - Write everything the owner (대표) reads in English: \`post\` reports, \`ask\` cards (title, background, options, recommendation), \`todo\` items, \`status\` lines, file titles and replies. This replaces any rule above that asks for Korean or for a Korean translation of English text. Keep code, commands, paths and quoted text as they are.
-- The source labels the server puts on your input stay in Korean because they are protocol markers, not a language hint: \`[대표]\` the owner, \`[대표 직접]\` the owner writing to you directly, \`[대표 답(원문) ...]\` the owner's verbatim answer to a card, \`[총괄] <name>에게\` an instruction from the lead, \`[보고 <name>]\` a report from a staff session, \`[시스템]\` the server; \`사용자 요청(원문, 서버 확인)\` is an owner quote the server verified, \`총괄 인용(미확인)\` a quote it could not verify.`;
+- The source labels the server puts on your input stay in Korean because they are protocol markers, not a language hint: \`[대표]\` the owner, \`[대표 직접]\` the owner writing to you directly, \`[대표 답(원문) ...]\` the owner's verbatim answer to a card, \`[총괄] <name>에게\` an instruction from the lead, \`[보고 <name>]\` a report from a staff session, \`[시스템]\` the server; \`사용자 요청(원문, 서버 확인)\` is an owner quote the server verified, \`총괄 인용(미확인)\` a quote it could not verify.
+- Use the words the English app shows: the conductor (총괄) is "the lead", a session the lead manages (직원, shown as 팀장 in Korean) is a "staff member", and what a staff member runs inside its own session is a "sub-agent". Where a rule above says to write 팀장, write "staff member".`;
 
 // ---- E10: 조각 조립 ----
 // 역할 템플릿(server/roles/<kind>.md)의 `{{> 이름}}` 한 줄은 server/roles/parts/<이름>.md 로 바뀐다.

@@ -594,6 +594,9 @@ struct Settings: Codable, Sendable, Equatable {
     var permissionMode: String = "default"
     var ranks: [String: RankConfig] = [:]
     var codexRanks: [String: RankConfig] = [:]
+    /// Gemini(Antigravity CLI)의 직급표. 이 칸을 보내지 않는 서버(0.2.9 까지)에서는 nil 이다. nil 을 그대로 두어야, 설정을 통째로
+    /// 되돌려 보내는 옛 서버의 저장(PUT)에 그 서버가 모르는 칸이 실리지 않는다. 읽고 쓸 때는 geminiRankTable 을 쓴다.
+    var geminiRanks: [String: RankConfig]? = nil
     var maxConcurrentTurns: Int = 4
     var compactAtPct: Int = 70
     var maxAwakeWorkers: Int = 8
@@ -615,6 +618,7 @@ extension Settings {
         permissionMode = try c.decodeIfPresent(String.self, forKey: ModelKey("permissionMode")) ?? "default"
         ranks = try c.decodeIfPresent([String: RankConfig].self, forKey: ModelKey("ranks")) ?? [:]
         codexRanks = try c.decodeIfPresent([String: RankConfig].self, forKey: ModelKey("codexRanks")) ?? [:]
+        geminiRanks = c.lenient([String: RankConfig].self, forKey: ModelKey("geminiRanks"))
         maxConcurrentTurns = try c.decodeIfPresent(Int.self, forKey: ModelKey("maxConcurrentTurns")) ?? 4
         compactAtPct = try c.decodeIfPresent(Int.self, forKey: ModelKey("compactAtPct")) ?? 70
         maxAwakeWorkers = try c.decodeIfPresent(Int.self, forKey: ModelKey("maxAwakeWorkers")) ?? 8
@@ -625,6 +629,13 @@ extension Settings {
         contextWindows = try c.decodeIfPresent([String: Int].self, forKey: ModelKey("contextWindows"))
         permissionAcknowledged = c.lenient(Bool.self, forKey: ModelKey("permissionAcknowledged"))
         reportLanguage = c.lenient(String.self, forKey: ModelKey("reportLanguage"))
+    }
+
+    /// Gemini 직급표를 다른 CLI 의 표와 같은 모양으로(RankSettingsCLI.ranksKeyPath). 없으면 빈 표(전부 CLI 기본값)로 읽는다.
+    /// 서버가 이 칸을 모르면(geminiRanks 가 nil) 써도 남지 않는다: 그 서버에 보낼 수 없는 값이다.
+    var geminiRankTable: [String: RankConfig] {
+        get { geminiRanks ?? [:] }
+        set { if geminiRanks != nil { geminiRanks = newValue } }
     }
 }
 

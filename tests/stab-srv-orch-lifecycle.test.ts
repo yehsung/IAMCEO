@@ -54,7 +54,7 @@ class FakeCore implements Runner {
 
 function fixture(timings: Partial<OrchestratorTimings> = {}, prepare?: (store: Store, worker: () => Member) => void) {
   const runtime = createIsolatedRuntime();
-  const config = loadConfig({ IAMCEO_HOME: runtime.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: runtime.socketPath, IAMCEO_CORE_BIN: runtime.bins.coreBin, IAMCEO_CLAUDE_BIN: runtime.bins.claudeBin, IAMCEO_CODEX_BIN: runtime.bins.codexBin });
+  const config = loadConfig({ IAMCEO_HOME: runtime.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: runtime.socketPath, IAMCEO_CORE_BIN: runtime.bins.coreBin, IAMCEO_CLAUDE_BIN: runtime.bins.claudeBin, IAMCEO_CODEX_BIN: runtime.bins.codexBin, IAMCEO_GEMINI_BIN: runtime.bins.geminiBin });
   const db = openDb(config.dbPath), store = new Store(db, new Bus());
   store.patchSettings({ boardTidyHours: 0 });
   const fake = new FakeCore();

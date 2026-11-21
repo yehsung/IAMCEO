@@ -106,6 +106,53 @@ enum SampleWorkspaceData {
      ]
     }
    ]
+  },
+  "gemini": {
+   "source": "default",
+   "models": [
+    {
+     "value": "gemini-4-neon",
+     "label": "Gemini 4 Neon",
+     "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+     ],
+     "defaultEffort": "medium"
+    },
+    {
+     "value": "gemini-4-argon",
+     "label": "Gemini 4 Argon",
+     "efforts": [
+      "low",
+      "medium",
+      "high"
+     ],
+     "defaultEffort": "medium"
+    },
+    {
+     "value": "gemini-4-hydrogen",
+     "label": "Gemini 4 Hydrogen",
+     "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+     ],
+     "defaultEffort": "medium"
+    },
+    {
+     "value": "gemini-3.8-flash",
+     "label": "Gemini 3.8 Flash",
+     "efforts": [
+      "low",
+      "medium",
+      "high"
+     ],
+     "defaultEffort": "medium"
+    }
+   ]
   }
  },
  "runtime": {
@@ -121,6 +168,9 @@ enum SampleWorkspaceData {
     "installed": true
    },
    "codex": {
+    "installed": true
+   },
+   "gemini": {
     "installed": true
    }
   }
@@ -141,6 +191,9 @@ enum SampleWorkspaceData {
      "installed": true
     },
     "codex": {
+     "installed": true
+    },
+    "gemini": {
      "installed": true
     }
    }
@@ -163,6 +216,20 @@ enum SampleWorkspaceData {
     }
    },
    "codexRanks": {
+    "manager": {
+     "model": null,
+     "effort": null
+    },
+    "lead": {
+     "model": null,
+     "effort": null
+    },
+    "staff": {
+     "model": null,
+     "effort": null
+    }
+   },
+   "geminiRanks": {
     "manager": {
      "model": null,
      "effort": null
@@ -4182,6 +4249,53 @@ enum SampleWorkspaceData {
      ]
     }
    ]
+  },
+  "gemini": {
+   "source": "default",
+   "models": [
+    {
+     "value": "gemini-4-neon",
+     "label": "Gemini 4 Neon",
+     "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+     ],
+     "defaultEffort": "medium"
+    },
+    {
+     "value": "gemini-4-argon",
+     "label": "Gemini 4 Argon",
+     "efforts": [
+      "low",
+      "medium",
+      "high"
+     ],
+     "defaultEffort": "medium"
+    },
+    {
+     "value": "gemini-4-hydrogen",
+     "label": "Gemini 4 Hydrogen",
+     "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+     ],
+     "defaultEffort": "medium"
+    },
+    {
+     "value": "gemini-3.8-flash",
+     "label": "Gemini 3.8 Flash",
+     "efforts": [
+      "low",
+      "medium",
+      "high"
+     ],
+     "defaultEffort": "medium"
+    }
+   ]
   }
  },
  "runtime": {
@@ -4197,6 +4311,9 @@ enum SampleWorkspaceData {
     "installed": true
    },
    "codex": {
+    "installed": true
+   },
+   "gemini": {
     "installed": true
    }
   }
@@ -4217,6 +4334,9 @@ enum SampleWorkspaceData {
      "installed": true
     },
     "codex": {
+     "installed": true
+    },
+    "gemini": {
      "installed": true
     }
    }
@@ -4239,6 +4359,20 @@ enum SampleWorkspaceData {
     }
    },
    "codexRanks": {
+    "manager": {
+     "model": null,
+     "effort": null
+    },
+    "lead": {
+     "model": null,
+     "effort": null
+    },
+    "staff": {
+     "model": null,
+     "effort": null
+    }
+   },
+   "geminiRanks": {
     "manager": {
      "model": null,
      "effort": null

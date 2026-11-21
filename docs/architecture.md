@@ -1,6 +1,6 @@
 # 아키텍처
 
-Bun 서버가 데이터와 AI 세션으로의 전달을 맡고, SwiftUI macOS·iOS 앱이 API를 쓴다. 현재 소스는 `herdr-core`와 공식 대화형 Claude Code·Codex CLI를 연결한다.
+Bun 서버가 데이터와 AI 세션으로의 전달을 맡고, SwiftUI macOS·iOS 앱이 API를 쓴다. 현재 소스는 `herdr-core`와 공식 대화형 Claude Code·Codex·Antigravity CLI(Gemini, 0.2.10부터)를 연결한다.
 
 IAMCEO는 소스 공개형(Sustainable Use License 1.0 + IAMCEO 추가 허락)이며 [LICENSE](../LICENSE)와 [라이선스 설명](LICENSING.ko.md)을 따른다. 2026-11-10 웹 버전을 제거했다. Mac·iPhone 네이티브 앱과 배포된 앱의 v1/v2 API 호환을 유지한다.
 
@@ -14,7 +14,7 @@ SwiftUI macOS / iOS ── REST sync + WS v2 ─┐
                                              │ CoreRunner / Unix JSON-RPC
                                        herdr-core daemon
                                              │ holder / PTY
-                                    공식 Claude Code / Codex CLI
+                                    공식 Claude Code / Codex / Antigravity CLI
 ```
 
 - 상태의 원본은 Bun 서버와 SQLite다. 앱은 서버에서 상태를 읽고 사용자 요청을 보낸다.
@@ -54,7 +54,7 @@ SwiftUI macOS / iOS ── REST sync + WS v2 ─┐
 
 core는 `terminal.run`에 셸 문자열 대신 인자 배열을 보낸다. 부모가 종료돼도 CLI는 유지하고, 종료된 명령을 자동 재실행하는 옵션은 켜지 않는다. 서버가 다시 시작되면 프로젝트·멤버·CLI 라벨과 고정 이름으로 기존 터미널을 찾는다. 소유권이 겹치거나 제공자·알려진 세션이 다르면 오류로 처리한다. 소켓 연결이 끊겼다는 이유만으로 새 CLI를 띄우지 않는다.
 
-Claude의 세션 UUID와 core 터미널 주소는 서로 다르다. 새 Codex는 native 세션 ID를 미리 지정할 수 없어 처음에는 `sessionId=null`이다. 실제 사용자 입력의 고유 표식이 유일한 주 세션의 기록과 맞을 때 연결한다. 폴더나 최신 파일만 보고 세션을 고르지 않는다. 기존 터미널을 잃었고 native ID도 모르면 자동으로 새 대화를 만들지 않는다.
+Claude의 세션 UUID와 core 터미널 주소는 서로 다르다. 새 Codex는 native 세션 ID를 미리 지정할 수 없어 처음에는 `sessionId=null`이다. 실제 사용자 입력의 고유 표식이 유일한 주 세션의 기록과 맞을 때 연결한다. 폴더나 최신 파일만 보고 세션을 고르지 않는다. 기존 터미널을 잃었고 native ID도 모르면 자동으로 새 대화를 만들지 않는다. Gemini(Antigravity CLI, `agy`)도 대화 ID를 스스로 정하는데, 첫 글을 받을 때 만든다. 서버는 그 세션에만 넣은 상태줄 기록과 훅 기록으로 ID를 알아내고, 대화가 있었을 수 없는 터미널(턴이 한 번도 돌지 않음)은 새로 띄워도 잃는 것이 없다고 본다.
 
 옛 실행기 둘(`herdr`·`headless`)은 지웠다. 실행기는 core 하나이고, 서버는 herdr 소켓을 열지 않는다. 남긴 것은 데이터와 API 모양뿐이다: 옛 `backend` 값이 적힌 팀장 행은 그대로 두고, 세션이 남아 있으면 `legacy_session`으로 보류한다. 예전 세션을 core 세션으로 해석하거나 자동 변환하지 않는다. 출시된 앱이 읽는 `backend` 값 목록과 `bootstrap.herdr` 칸은 고정값으로 내려가고, 편입·herdr 목록 주소는 `410`과 안내로 답한다.
 

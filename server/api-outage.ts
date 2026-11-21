@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ApiOutageState, CliProvider, Decision, DecisionOption, Delivery, Member } from "../shared/types.ts";
+import { CLI_INFO, type ApiOutageState, type CliProvider, type Decision, type DecisionOption, type Delivery, type Member } from "../shared/types.ts";
 import { ApiError, type Store } from "./store.ts";
 import { API_OUTAGE_NOTE, USAGE_WAIT_NOTE } from "./hold-codes.ts";
 import { textRef, type ServerTextRef } from "../shared/server-text.ts";
@@ -155,6 +155,18 @@ const USAGE_RETRY_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
 /** 초기화 시각을 모르거나, 이어갔는데 다시 한도에 걸렸을 때 다시 이어 보는 간격. */
 const USAGE_PROBE_MS = [60 * 60_000, 120 * 60_000, 240 * 60_000, 360 * 60_000];
 const step = (table: number[], index: number) => table[Math.min(Math.max(index, 0), table.length - 1)]!;
+
+/**
+ * 한도 카드 글에 넣는 CLI 이름(Claude·Codex·Gemini). 예전에는 claude 가 아니면 모두 'Codex' 였다: 타입 밖의 값(저장된 옛 상태)만 그대로 'Codex' 다.
+ */
+function usageCliName(cli: CliProvider): string {
+  switch (cli) {
+    case "claude": return CLI_INFO.claude.short;
+    case "codex": return CLI_INFO.codex.short;
+    case "gemini": return CLI_INFO.gemini.short;
+    default: { const unlisted: never = cli; void unlisted; return CLI_INFO.codex.short; }
+  }
+}
 
 /** 잠들었거나 사라진 세션이라 읽을 화면이 없다. 한도 창도 그 프로세스와 함께 없어졌다. */
 export class NoTerminalError extends Error {
@@ -496,7 +508,7 @@ export class ApiRecovery {
     const options = [...models.map(({ model: _model, ...option }) => option), USAGE_RESUME_OPTION];
     const optionTexts: Record<string, { label: ServerTextRef }> = { [USAGE_RESUME_OPTION.k]: { label: textRef("card.usage_limit.option_resume") } };
     for (const option of models) if (option.model) optionTexts[option.k] = { label: textRef("card.usage_limit.option_model", { model: option.model }) };
-    const text = textRef(raw ? "card.usage_limit" : "card.usage_limit.short", { lead: first, names, ...(raw ? { raw } : {}), cli: group.cli === "claude" ? "Claude" : "Codex", count: String(waiting.length) });
+    const text = textRef(raw ? "card.usage_limit" : "card.usage_limit.short", { lead: first, names, ...(raw ? { raw } : {}), cli: usageCliName(group.cli), count: String(waiting.length) });
     this.options.store.updateUsageDecision(card.id, usage, card.title, card.detail, open, options, { text, options: optionTexts });
   }
   /**
@@ -722,6 +734,9 @@ export class ApiRecovery {
       o.lastProbeAt = new Date(this.now()).toISOString();
       this.save();
       const configured = this.options.urls ?? process.env.IAMCEO_API_PROBE_URLS?.split(",").map(s => s.trim()).filter(Boolean);
+      // Gemini(Antigravity CLI) 팀장이 있어도 탐침 주소를 더하지 않는다: 그 CLI 가 닿는 주소를 확인한 적이 없어 지어내지 않는다.
+      // Gemini 쪽 서비스의 장애는 여기서 알 수 없다(모름). 그래서 Gemini 팀장의 턴 오류는 장애로 가르지 않고 일반 오류로 알린다
+      // (Orchestrator.turnErrorKind): 이 장애의 영향 목록에 들어오지 않고, 아래 주소의 답으로 Gemini 가 돌아왔다고 말하지도 않는다.
       const urls = configured?.length ? configured : ["https://api.anthropic.com", ...(this.options.store.listAllMembers().some(m => m.cli === "codex") ? ["https://api.openai.com"] : [])];
       const revision = o.revision;
       const results = await Promise.all(urls.map(async url => {

@@ -134,6 +134,8 @@ export function parseCodexSessionMeta(value: unknown): CodexSessionMeta | null {
 export interface ProviderUserText { texts: string[]; sessionId: string | null; cwd: string | null; eventId: string | null; timestamp: string | null }
 /** Only direct user text, never recursively search a tool result or raw JSON. */
 export function parseProviderUserText(cli: CliProvider, value: unknown): ProviderUserText | null {
+  // Antigravity CLI 의 대화 기록은 이 줄 모양(JSONL)이 아니다. Codex 모양으로 읽지 않는다.
+  if (cli === "gemini") return null;
   const entry = jsonObject(value);
   if (!entry || entry.isSidechain || entry.isMeta || entry.isReplay || entry.is_replay) return null;
   const message = jsonObject(cli === "claude" ? entry.message : entry.payload);
@@ -160,6 +162,7 @@ function textBlocks(content: unknown, kinds: string[]): string[] {
 }
 /** Recognizable non-text user blocks are safe to skip; future text layouts are not absence. */
 export function supportedUserTextLayout(cli: CliProvider, value: unknown): boolean {
+  if (cli === "gemini") return false; // 아는 줄 모양이 없다.
   const entry = jsonObject(value);
   if (!entry || entry.isSidechain || entry.isMeta || entry.isReplay || entry.is_replay) return true;
   const message = jsonObject(cli === "claude" ? entry.message : entry.payload);
@@ -239,6 +242,8 @@ export interface DeliveryLogResult {
 }
 export function readDeliveryEvidence(options: DeliveryEvidenceOptions): DeliveryLogResult {
   const { cli, home, path, sessionId, sessionGeneration, cwd, markers, baseline } = options;
+  // Antigravity CLI 는 세션 기록이 SQLite 라 여기서 읽지 않는다. 수신 증거는 훅 기록에서 읽는다(gemini-hooks.ts readGeminiDeliveryEvidence).
+  if (cli === "gemini") return { evidence: { source: "gemini_log", verdict: "unknown", location: "none", code: "unsupported_provider", complete: false, checkedAt: new Date().toISOString() }, receivedDeliveryIds: [], cursor: options.cursor ?? null };
   const root = join(home, cli === "claude" ? "projects" : "sessions");
   const queryKey = createHash("sha256").update(JSON.stringify([cli, resolve(home), resolve(path), markers, options.bundleMarker, baseline, options.since])).digest("hex");
   const unknown = (code: string): DeliveryLogResult => ({ evidence: { source: cli === "claude" ? "claude_log" : "codex_log", verdict: "unknown", location: "none", code, complete: false, checkedAt: new Date().toISOString() }, receivedDeliveryIds: [], cursor: options.cursor ?? null });

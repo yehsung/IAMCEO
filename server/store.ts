@@ -50,7 +50,7 @@ import type {
   WorkSec,
   WsEvent,
 } from "../shared/types.ts";
-import { BLOCKED_CODES, DEFAULT_CODEX_RANKS, DEFAULT_RANKS, fileKindOf, type BlockedCode } from "../shared/types.ts";
+import { BLOCKED_CODES, DEFAULT_CODEX_RANKS, DEFAULT_GEMINI_RANKS, DEFAULT_RANKS, fileKindOf, type BlockedCode } from "../shared/types.ts";
 import type { MemberRevisions, OperationKind, OperationReceipt, OperationStatus, SyncRevisions, ManualInboxBatch } from "../shared/operations.ts";
 import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, DomainRecorder, LifecycleJournal, MessageReadStore, ProjectPatchStore, RunnerRecoveryStore, TerminalLease, RunnerRecoveryState, ReportReferences, BoardReview } from "./service-contracts.ts";
 import type { RunnerTerminalIdentity } from "./runner/types.ts";
@@ -415,6 +415,8 @@ export const DEFAULT_SETTINGS: Settings = {
   permissionMode: "bypassPermissions",
   ranks: DEFAULT_RANKS,
   codexRanks: DEFAULT_CODEX_RANKS,
+  // Gemini(Antigravity CLI)의 직급표. settings 표의 키 하나라 DB 를 바꾸지 않고, 옛 판으로 되돌려도 무시된다.
+  geminiRanks: DEFAULT_GEMINI_RANKS,
   maxConcurrentTurns: 4,
   compactAtPct: 70,
   contextWindowDefault: DEFAULT_CONTEXT_WINDOW,
@@ -1804,8 +1806,24 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   /** The runtime is fixed to core. Historical backend values on member and settings rows remain readable, never selectable. */
   effectiveBackend(): Backend { return "core"; }
 
+  /** 이 프로젝트의 총괄이 쓰는 CLI. 저장된 값이 아는 CLI 면 그대로, 모르는 값(없는 프로젝트 포함)이면 claude 다. */
   chiefCli(projectId: string): CliProvider {
-    return this.row("SELECT chief_cli FROM projects WHERE id = ?", projectId)?.chief_cli === "codex" ? "codex" : "claude";
+    const saved: unknown = this.row("SELECT chief_cli FROM projects WHERE id = ?", projectId)?.chief_cli;
+    switch (saved) {
+      case "codex": return "codex";
+      // gemini 를 claude 로 읽으면 Gemini 총괄을 골라도 다음에 띄울 때 Claude 로 뜨고, 그 총괄이 띄우는 팀장도 Claude 가 된다.
+      case "gemini": return "gemini";
+      default: return "claude";
+    }
+  }
+
+  /**
+   * Gemini(Antigravity CLI)를 쓰는 근거가 있는가: Gemini 인 팀장·총괄이 있거나(members.cli, projects.chief_cli) Gemini 직급표에 정한 값이 있다.
+   * 근거가 없는 Mac 에서는 서버가 뒤에서 `agy models` 를 띄우지 않는다(모델 목록 갱신, orchestrator.ts).
+   */
+  geminiInUse(): boolean {
+    if (this.row("SELECT 1 AS used FROM members WHERE cli = 'gemini' LIMIT 1") || this.row("SELECT 1 AS used FROM projects WHERE chief_cli = 'gemini' LIMIT 1")) return true;
+    return Object.values(this.getSettings().geminiRanks).some(rank => rank.model !== null || rank.effort !== null);
   }
 
   setChiefCli(projectId: string, cli: CliProvider): void {
@@ -2265,7 +2283,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   /** 세션에 실제로 들어간 설정을 적는다. 잦지 않고, 바뀌었을 때만 화면에 알린다. */
-  /** 비어 있는 직급 effort 를 채운다. 비어 있으면 세션을 다시 열 때 CLI 기본값(medium)으로 돌아간다. */
+  /**
+   * 비어 있는 직급 effort 를 채운다. 비어 있으면 세션을 다시 열 때 CLI 기본값(medium)으로 돌아간다.
+   * Claude 직급표(ranks)만 채운다. Gemini 직급표(geminiRanks)는 채우지 않는다: 모델을 정하지 않은 Gemini 에 effort 를 주면
+   * agy 가 사용자 설정의 기본 모델로 따져 시작 전에 오류로 끝날 수 있다(server/models.ts 의 efforts). Codex 직급표도 예전부터 채우지 않는다.
+   */
   fillRankEfforts(fallback: Effort): void {
     const { ranks } = this.getSettings();
     const missing = (Object.keys(ranks) as Rank[]).filter((r) => !ranks[r].effort);
@@ -3660,6 +3682,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     // 나중에 생긴 직급이 저장값에 없어도 칸은 늘 있어야 한다.
     settings.ranks = Object.fromEntries((Object.keys(DEFAULT_RANKS) as Rank[]).map((rank) => [rank, { ...DEFAULT_RANKS[rank], ...settings.ranks[rank] }])) as Settings["ranks"];
     settings.codexRanks = Object.fromEntries((Object.keys(DEFAULT_CODEX_RANKS) as Rank[]).map((rank) => [rank, { ...DEFAULT_CODEX_RANKS[rank], ...settings.codexRanks[rank] }])) as Settings["codexRanks"];
+    // 저장값이 없는 DB(이 칸이 생기기 전)와 일부 직급만 저장된 값도 칸은 늘 다 있어야 한다.
+    settings.geminiRanks = Object.fromEntries((Object.keys(DEFAULT_GEMINI_RANKS) as Rank[]).map((rank) => [rank, { ...DEFAULT_GEMINI_RANKS[rank], ...settings.geminiRanks?.[rank] }])) as Settings["geminiRanks"];
     settings.contextWindows = { ...DEFAULT_CONTEXT_WINDOWS, ...settings.contextWindows };
     return settings;
   }
@@ -3675,6 +3699,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       }
       if (patch.codexRanks) {
         next.codexRanks = Object.fromEntries((Object.keys(DEFAULT_CODEX_RANKS) as Rank[]).map((rank) => [rank, { ...before.codexRanks[rank], ...patch.codexRanks![rank] }]));
+      }
+      if (patch.geminiRanks) {
+        next.geminiRanks = Object.fromEntries((Object.keys(DEFAULT_GEMINI_RANKS) as Rank[]).map((rank) => [rank, { ...before.geminiRanks[rank], ...patch.geminiRanks![rank] }]));
       }
       this.transaction(() => {
         for (const key of Object.keys(DEFAULT_SETTINGS)) {

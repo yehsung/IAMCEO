@@ -20,10 +20,11 @@ export function canonicalPath(path: string): string {
     return parent === full ? full : join(canonicalPath(parent), full.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
   }
 }
-export interface SecretPathConfig { home?: string; claudeHome?: string; codexHome?: string }
+/** geminiHome: Antigravity CLI 의 자료 폴더를 설정으로 옮긴 경우. 기본 자리(~/.gemini)는 SECRET_DIRS 가 이미 막는다. */
+export interface SecretPathConfig { home?: string; claudeHome?: string; codexHome?: string; geminiHome?: string }
 export function configuredSecretRoots(config: SecretPathConfig, env: NodeJS.ProcessEnv = process.env, userHome = homedir()): string[] {
   const roots = new Set<string>();
-  for (const path of [config.home, config.claudeHome, config.codexHome, env.IAMCEO_HOME, env.CLAUDE_CONFIG_DIR, env.CODEX_HOME]) {
+  for (const path of [config.home, config.claudeHome, config.codexHome, config.geminiHome, env.IAMCEO_HOME, env.CLAUDE_CONFIG_DIR, env.CODEX_HOME, env.IAMCEO_GEMINI_HOME]) {
     if (path) { roots.add(resolve(path)); roots.add(canonicalPath(path)); }
   }
   // A default secret directory/file can itself be a symlink to a neutral name.

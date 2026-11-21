@@ -1,0 +1,131 @@
+{
+ "claude": {
+  "source": "default",
+  "models": [
+   {
+    "value": "opus",
+    "label": "Opus",
+    "efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ]
+   },
+   {
+    "value": "sonnet",
+    "label": "Sonnet",
+    "efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ]
+   },
+   {
+    "value": "haiku",
+    "label": "Haiku",
+    "efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh",
+     "max"
+    ]
+   }
+  ]
+ },
+ "codex": {
+  "source": "default",
+  "models": [
+   {
+    "value": "gpt-6.1-sol",
+    "label": "gpt-6.1-sol",
+    "efforts": [
+     "minimal",
+     "low",
+     "medium",
+     "high",
+     "xhigh"
+    ]
+   },
+   {
+    "value": "gpt-6-luna",
+    "label": "gpt-6-luna",
+    "efforts": [
+     "minimal",
+     "low",
+     "medium",
+     "high",
+     "xhigh"
+    ]
+   },
+   {
+    "value": "gpt-6.1-terra",
+    "label": "gpt-6.1-terra",
+    "efforts": [
+     "minimal",
+     "low",
+     "medium",
+     "high",
+     "xhigh"
+    ]
+   },
+   {
+    "value": "gpt-6-astra",
+    "label": "gpt-6-astra",
+    "efforts": [
+     "minimal",
+     "low",
+     "medium",
+     "high",
+     "xhigh"
+    ]
+   }
+  ]
+ },
+ "gemini": {
+  "source": "cli",
+  "updatedAt": "2026-11-21T00:00:00.000Z",
+  "models": [
+   {
+    "value": "gemini-4-neon",
+    "label": "Gemini 4 Neon",
+    "efforts": [
+     "low",
+     "medium",
+     "high",
+     "xhigh"
+    ],
+    "defaultEffort": "medium"
+   },
+   {
+    "value": "gemini-3.8-flash",
+    "label": "Gemini 3.8 Flash",
+    "efforts": [
+     "low",
+     "medium",
+     "high"
+    ],
+    "defaultEffort": "medium"
+   },
+   {
+    "value": "gemini-pro-orchestrator-neon",
+    "label": "Orchestrator (Neon)",
+    "efforts": []
+   },
+   {
+    "value": "claude-opus-5-5",
+    "label": "Claude Opus 5.5",
+    "efforts": [
+     "low",
+     "medium",
+     "high"
+    ],
+    "defaultEffort": "medium"
+   }
+  ]
+ }
+}

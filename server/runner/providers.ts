@@ -2,17 +2,35 @@
 // IAMCEO additions are invocation-scoped; no global CLI configuration is changed.
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { CLI_INFO, type CliProvider } from "../../shared/types.ts";
 import type { RunnerMember, StartOpts } from "./types.ts";
 import { CoreError } from "./core-client.ts";
 import { writeStatuslineWrapper } from "./statusline.ts";
 import { hookEventsDir, hookSettings, mergeHooks } from "./hooks.ts";
 import { permissionHook } from "./permission-hook.ts";
 import { subagentEnv } from "./env.ts";
+import { geminiHookEventsDir, geminiHooksConfig } from "./gemini-hooks.ts";
+import { geminiInjectDir, geminiSettings, writeGeminiInjectDir } from "./gemini-inject.ts";
+import { geminiStatusLine } from "./gemini-statusline.ts";
 
-export type CoreProvider = "claude" | "codex";
-export interface ProviderLaunch { argv: string[]; env: Record<string, string>; sessionId: string | null }
+/** core 가 띄우는 CLI. "gemini" 는 Antigravity CLI 다: 띄우는 실행 파일은 `agy`(CLI_INFO.gemini.program)이고 값 이름과 다르다. */
+export type CoreProvider = CliProvider;
+export interface ProviderLaunch {
+  argv: string[]; env: Record<string, string>; sessionId: string | null;
+  /** 이 띄우기에만 붙는 터미널 라벨. 실행기가 terminal.run 의 라벨에 더한다(지금은 Antigravity CLI 의 GEMINI_LAUNCH_LABEL 뿐이다). */
+  labels?: Record<string, string>;
+}
+/**
+ * Antigravity CLI 터미널의 라벨: 띄울 때마다 새로 만드는 임의 값. 같은 값을 상태줄 명령의 인자로 실어 상태줄 기록의 launch 칸에 적히게 한다
+ * (gemini-statusline.ts). 실행기는 그 값이 이 라벨과 같은 기록만 이 터미널의 것으로 믿는다(CoreRunner.geminiStatus).
+ * Codex 의 iamceo.binding 과는 다른 라벨이다: 그 값은 입력 앞에 붙는 표지이고 Antigravity CLI 터미널에는 없다.
+ */
+export const GEMINI_LAUNCH_LABEL = "iamceo.launch";
 export interface ProviderBins {
-  claudeBin?: string; codexBin?: string; contextHome?: string;
+  claudeBin?: string; codexBin?: string;
+  /** Antigravity CLI 실행 파일. 없으면 `agy`. */
+  geminiBin?: string;
+  contextHome?: string;
   /** E1 사건 기록 훅. 없으면 IAMCEO_HOOK_EVENTS=0 일 때만 끈다. contextHome 이 있을 때만 넣는다. */
   hookEvents?: boolean;
   /**
@@ -48,10 +66,67 @@ function toolPermissionHook(member: RunnerMember, home: string, bins: ProviderBi
 }
 
 export function providerFor(member: RunnerMember): CoreProvider { return member.cli ?? "claude"; }
+
+/** 이 CLI 로 띄울 실행 파일(설정값, 없으면 기본 이름). gemini 의 기본은 `agy` 다: 값 이름("gemini")을 명령으로 쓰면 옛 Gemini CLI 가 불린다. */
+export function providerBin(provider: CoreProvider, bins: ProviderBins): string {
+  switch (provider) {
+    case "claude": return bins.claudeBin || CLI_INFO.claude.program;
+    case "codex": return bins.codexBin || CLI_INFO.codex.program;
+    case "gemini": return bins.geminiBin || CLI_INFO.gemini.program;
+    default: { const unlisted: never = provider; throw new CoreError("config", `Unknown CLI provider: ${String(unlisted)}`); }
+  }
+}
+
+/**
+ * Antigravity CLI(`agy`) 명령줄. 지침·MCP·훅은 팀장의 주입 폴더(--add-dir)에 쓰고, 나머지는 --settings 한 줄로 넘긴다(gemini-inject.ts).
+ * `agy [--conversation <id>] --add-dir <주입 폴더> --settings '<JSON>' [--model <id> [--effort <e>]] [권한 플래그]`
+ * - 새 대화의 id 는 agy 가 정한다(미리 줄 수 없다). 그래서 새 세션은 sessionId null 이고, id 는 상태줄 기록(없으면 훅 기록)으로 알아낸다(CoreRunner).
+ * - effort 는 모델을 정했을 때만 넘긴다. 모델 없이 --effort 만 주면 agy 가 사용자의 기본 모델로 판정하고, 그 모델이 그 값을 받지 않으면 뜨지 못한다
+ *   (1.5.14 실측: `--effort max` → exit 1 `gemini-4-neon has no "max" effort`. 기본 모델은 사용자마다 다르다).
+ * - 띄울 때마다 임의 값을 만들어 상태줄 명령의 인자와 터미널 라벨(GEMINI_LAUNCH_LABEL)에 함께 싣는다.
+ * - 서브에이전트 모델(subagentModel)은 agy 에 넘길 길이 없어 쓰지 않는다. Claude 용 설정 파일(opts.settingsFile)도 쓰지 않는다.
+ * - 상태 보고(OSC 7501)는 AGY_CLI_OSC7501=on 으로 늘 켠다. MCP 서버의 열쇠는 프로세스 환경·명령줄이 아니라 주입 폴더 옆의 환경 파일(0600)에 둔다(gemini-inject.ts).
+ */
+function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins, bin: string): ProviderLaunch {
+  // agy 도 대화 id 를 스스로 정한다. 모르는 채로 '이어 열기'를 하면 조용히 새 대화가 된다.
+  if (opts.resume && !member.sessionId) throw new CoreError("session_unknown", "Antigravity conversation id is unknown; reattach the existing core terminal or explicitly start a fresh session");
+  const events = bins.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0";
+  // 경로로 쓸 수 없는 팀장 id·상대 경로면 여기서 던진다(띄우지 않는다). 아래의 '빼고 띄웁니다' 줄이 띄우지도 않을 것에 남지 않게 먼저 본다.
+  geminiInjectDir(opts.systemPromptFile, member.id);
+  // 훅·상태줄을 만들지 못해도 CLI 는 띄운다(기록이 없을 뿐이다). 지침·MCP 를 쓰지 못하면 띄우지 않는다.
+  let hooks: Record<string, unknown> | null = null;
+  // 만들지 못한 것은 서버 기록에 한 줄 남긴다: 그 세션은 뜨지만 대화 id·문맥 %·전달 수신 확인의 근거가 줄어든다. 까닭은 오류 종류만 적는다(경로·열쇠는 적지 않는다).
+  const why = (error: unknown): string => (error as NodeJS.ErrnoException)?.code ?? (error instanceof Error ? error.name : "error");
+  if (bins.contextHome && events) {
+    try { hooks = geminiHooksConfig({ memberId: member.id, eventsDir: geminiHookEventsDir(bins.contextHome) }); }
+    catch (error) { console.warn(`[gemini] ${member.id}: 훅 기록을 만들지 못해 훅 없이 띄웁니다. 전달 수신 확인과 대화 id 의 둘째 근거(훅 기록)가 없습니다 (${why(error)})`); }
+  }
+  const injectDir = writeGeminiInjectDir({ memberId: member.id, systemPromptFile: opts.systemPromptFile, mcpConfigFile: opts.mcpConfigFile, hooks });
+  // 이 띄우기의 값. 상태줄 명령이 기록마다 적고, 실행기는 터미널 라벨의 같은 값으로 이 터미널의 기록을 가려낸다.
+  const launchId = crypto.randomUUID().replaceAll("-", "");
+  let statusLine: { type: "command"; command: string } | null = null;
+  if (bins.contextHome) {
+    try { statusLine = geminiStatusLine(bins.contextHome, member.id, { launch: launchId }); }
+    catch (error) { console.warn(`[gemini] ${member.id}: 상태줄 명령을 만들지 못해 상태줄 없이 띄웁니다. 대화 id·문맥 %·한도를 상태줄 기록으로 알 수 없습니다 (${why(error)})`); }
+  }
+  const args: string[] = [];
+  if (opts.resume && member.sessionId) args.push("--conversation", member.sessionId);
+  args.push("--add-dir", injectDir, "--settings", JSON.stringify(geminiSettings({ cwd: member.cwd, injectDir, permissionMode: member.permissionMode, statusLine })));
+  // 모델을 정하지 않았으면 effort 도 넘기지 않는다(위 설명): agy 의 기본 모델·기본 effort 로 뜬다.
+  if (member.model) {
+    args.push("--model", member.model);
+    if (member.effort) args.push("--effort", member.effort);
+  }
+  // default(전부 묻기)는 플래그가 없다: 위 설정의 agentMode "" 가 그 뜻이다.
+  if (member.permissionMode === "bypassPermissions") args.push("--dangerously-skip-permissions");
+  else if (member.permissionMode === "auto") args.push("--mode", "auto");
+  return { argv: [bin, ...args], env: { AGY_CLI_OSC7501: "on", IAMCEO_MEMBER_ID: member.id }, sessionId: opts.resume ? member.sessionId : null, labels: { [GEMINI_LAUNCH_LABEL]: launchId } };
+}
+
 export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins = {}): ProviderLaunch {
   const provider = providerFor(member);
   if (member.sessionId && !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(member.sessionId)) throw new CoreError("invalid_session", "Invalid CLI session id");
-  const configured = provider === "claude" ? bins.claudeBin || "claude" : bins.codexBin || "codex";
+  const configured = providerBin(provider, bins);
   const bin = configured.includes("/") ? configured : Bun.which(configured);
   if (!bin) throw new CoreError("unavailable", `${provider} executable not found: ${configured}`);
   const args: string[] = [];
@@ -75,6 +150,9 @@ export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: Prov
     env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = "false";
     return { argv: [bin, ...args], env, sessionId };
   }
+  if (provider === "gemini") return geminiLaunch(member, opts, bins, bin);
+  // 여기부터는 Codex 뿐이다. CLI 를 더하면 이 줄이 컴파일 오류가 되어 가지를 따로 만들게 한다.
+  provider satisfies "codex";
   // Codex owns its native id; inventing one would make resume silently wrong.
   if (opts.resume && !member.sessionId) throw new CoreError("session_unknown", "Codex session id is unknown; reattach the existing core terminal or explicitly start a fresh session");
   if (member.subagentModel) args.push("-c", `agents.default_subagent_model=${toml(member.subagentModel)}`);
@@ -106,6 +184,10 @@ export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: Prov
   return { argv: [bin, ...args], env, sessionId: opts.resume ? member.sessionId : null };
 }
 
+/**
+ * 이 터미널의 프로그램이 그 CLI 인가. 실행 파일 이름(CLI_INFO 의 program: claude·codex·agy)이거나 설정한 실행 파일과 같아야 한다.
+ * gemini 는 값 이름과 실행 파일 이름이 달라 값 이름으로 견주면 늘 어긋난다.
+ */
 export function isProviderArgv(argv: string[], provider: CoreProvider, bin?: string): boolean {
-  return argv.length > 0 && (basename(argv[0]) === provider || (!!bin && argv[0] === bin));
+  return argv.length > 0 && (basename(argv[0]) === CLI_INFO[provider].program || (!!bin && argv[0] === bin));
 }

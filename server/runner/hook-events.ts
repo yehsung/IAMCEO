@@ -47,10 +47,10 @@ export function parseHookEventLine(line: string): HookEventRecord | null {
 }
 
 interface Cursor { identity: string; offset: number }
-interface Chunk { records: HookEventRecord[]; invalid: number; offset: number; identity: string }
+interface Chunk<T> { records: T[]; invalid: number; offset: number; identity: string }
 
-/** 열 수 없거나 일반 파일이 아니거나 바꿔치기(심볼릭 링크)면 null. */
-function readFrom(path: string, cursor: Cursor | null, maxBytes: number): Chunk | null {
+/** 열 수 없거나 일반 파일이 아니거나 바꿔치기(심볼릭 링크)면 null. parse 가 null 을 돌려준 줄은 invalid 로 센다. */
+function readFrom<T>(path: string, cursor: Cursor | null, maxBytes: number, parse: (line: string) => T | null): Chunk<T> | null {
   let fd: number;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch { return null; }
@@ -61,7 +61,7 @@ function readFrom(path: string, cursor: Cursor | null, maxBytes: number): Chunk 
     // 다른 파일이거나 제자리에서 줄었으면 처음부터 읽는다.
     let offset = cursor && cursor.identity === identity && cursor.offset <= stat.size ? cursor.offset : 0;
     const length = Math.min(stat.size - offset, maxBytes);
-    const records: HookEventRecord[] = [];
+    const records: T[] = [];
     let invalid = 0;
     if (length <= 0) return { records, invalid, offset, identity };
     const bytes = Buffer.alloc(length);
@@ -85,7 +85,7 @@ function readFrom(path: string, cursor: Cursor | null, maxBytes: number): Chunk 
       from = at + 1;
       if (!piece.length) continue;
       if (piece.length > MAX_LINE_BYTES) { invalid++; continue; }
-      const record = parseHookEventLine(piece.toString("utf8"));
+      const record = parse(piece.toString("utf8"));
       if (record) records.push(record); else invalid++;
     }
     offset += end + 1;
@@ -120,23 +120,26 @@ export function hookEventsMark(eventsDir: string, memberId: string): HookEventsM
   finally { try { closeSync(fd); } catch { /* 읽기만 했다 */ } }
 }
 
-/** 팀장 한 명의 사건 파일을 앞으로만 읽는다. 처음 부르면 지금 파일의 처음부터(상한 1 MiB), from 을 주면 그 자리부터 읽는다. */
-export class HookEventReader {
+/**
+ * 팀장 한 명의 사건 파일(<폴더>/<팀장>.jsonl, 돌린 파일은 .1.jsonl)을 앞으로만 읽는다. 처음 부르면 지금 파일의 처음부터(상한 1 MiB),
+ * from 을 주면 그 자리부터 읽는다. 줄 풀이(parse)만 갈아 끼운다: Claude 훅 기록은 HookEventReader, Antigravity CLI 훅 기록은 gemini-hooks.ts 가 쓴다.
+ */
+export class HookFileReader<T> {
   private cursor: Cursor | null = null;
   /** 돌린 파일을 놓쳐 읽지 못한 구간이 있었던 횟수(진단용). */
   gaps = 0;
-  constructor(private readonly eventsDir: string, readonly memberId: string, private readonly maxBytes = 1024 * 1024, from?: HookEventsMark) {
+  constructor(private readonly eventsDir: string, readonly memberId: string, private readonly parse: (line: string) => T | null, private readonly maxBytes = 1024 * 1024, from?: HookEventsMark) {
     if (!MEMBER_RE.test(memberId)) throw new Error("Invalid member id for hook events");
     // 그 자리의 파일이 .1 로 돌았으면 read() 가 .1 의 그 자리부터 마저 읽는다. 그때 파일이 없었으면 지금 파일을 처음부터 읽는다.
     if (from?.identity) this.cursor = { identity: from.identity, offset: from.offset };
   }
-  read(): { records: HookEventRecord[]; invalid: number } {
-    const records: HookEventRecord[] = [];
+  read(): { records: T[]; invalid: number } {
+    const records: T[] = [];
     let invalid = 0;
-    const current = readFrom(hookEventsFile(this.eventsDir, this.memberId), this.cursor, this.maxBytes);
+    const current = readFrom(hookEventsFile(this.eventsDir, this.memberId), this.cursor, this.maxBytes, this.parse);
     if (this.cursor && (!current || current.identity !== this.cursor.identity)) {
       // 읽던 파일이 .1 로 돌아갔다. 같은 파일이면 남은 부분을 마저 읽는다.
-      const rotated = readFrom(hookEventsFile(this.eventsDir, this.memberId, true), this.cursor, this.maxBytes);
+      const rotated = readFrom(hookEventsFile(this.eventsDir, this.memberId, true), this.cursor, this.maxBytes, this.parse);
       if (rotated && rotated.identity === this.cursor.identity) {
         records.push(...rotated.records); invalid += rotated.invalid;
         // 새 파일이 아직 없을 수 있다(돌린 직후). 그때는 다음에 .1 을 같은 자리부터 다시 본다.
@@ -149,6 +152,13 @@ export class HookEventReader {
       this.cursor = { identity: current.identity, offset: current.offset };
     }
     return { records, invalid };
+  }
+}
+
+/** Claude 훅 기록(run/events)의 읽기. 줄은 parseHookEventLine 으로 푼다. */
+export class HookEventReader extends HookFileReader<HookEventRecord> {
+  constructor(eventsDir: string, memberId: string, maxBytes = 1024 * 1024, from?: HookEventsMark) {
+    super(eventsDir, memberId, parseHookEventLine, maxBytes, from);
   }
 }
 

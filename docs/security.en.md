@@ -9,7 +9,7 @@ In one line: **the ways into the server on your Mac from outside are guarded. Th
 ## The shape of it
 
 - The IAMCEO server runs on your Mac as your macOS user. The only server the developer runs is the iPhone notification relay (used only when your Mac has no push key of its own), and the relay cannot reach your Mac.
-- The lead, the staff and the HQ agent are the official Claude Code and Codex CLIs, running as the **same macOS user** as the server.
+- The lead, the staff and the HQ agent are the official Claude Code, Codex and Antigravity (Gemini) CLIs, running as the **same macOS user** as the server.
 - The app on this Mac and any device you connect by typing the code use the shared access code. A device connected with a QR code gets a key of its own. The iPhone connects over Tailscale.
 
 ## What is trusted

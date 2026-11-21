@@ -135,14 +135,16 @@ export function smokeDb(options: SmokeOptions): boolean {
   if (!statSync(source, { throwIfNoEntry: false })?.isFile()) throw new Error(`Not a database file: ${source}`);
   const root = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-smoke-")));
   try {
-    for (const dir of ["home", "iamceo", "claude", "codex", "state", "config", "cache", "tmp", "bin"]) mkdirSync(join(root, dir), { mode: 0o700 });
-    for (const name of ["core", "claude", "codex", "herdr"]) writeFileSync(join(root, "bin", name), "#!/bin/sh\nprintf 'Smoke check: real runtime disabled\\n' >&2\nexit 97\n", { mode: 0o700 });
+    for (const dir of ["home", "iamceo", "claude", "codex", "gemini", "state", "config", "cache", "tmp", "bin"]) mkdirSync(join(root, dir), { mode: 0o700 });
+    // agy = Antigravity CLI (the Gemini provider). The server's default lookup also searches /opt/homebrew/bin and friends, so PATH alone does not hide a real one.
+    for (const name of ["core", "claude", "codex", "agy", "herdr"]) writeFileSync(join(root, "bin", name), "#!/bin/sh\nprintf 'Smoke check: real runtime disabled\\n' >&2\nexit 97\n", { mode: 0o700 });
     // Nothing is inherited: a variable that points at a live socket, home or session cannot leak in.
     const env = {
       PATH: "/usr/bin:/bin", LANG: "en_US.UTF-8", HOME: join(root, "home"), TMPDIR: join(root, "tmp"),
       IAMCEO_TEST: "1", IAMCEO_PORT: "0", IAMCEO_HOME: join(root, "iamceo"),
       IAMCEO_HERDR_SOCKET: join(root, "no-herdr.sock"), IAMCEO_CORE_SOCKET: join(root, "no-core.sock"),
       IAMCEO_CORE_BIN: join(root, "bin", "core"), IAMCEO_CLAUDE_BIN: join(root, "bin", "claude"), IAMCEO_CODEX_BIN: join(root, "bin", "codex"),
+      IAMCEO_GEMINI_BIN: join(root, "bin", "agy"), IAMCEO_GEMINI_HOME: join(root, "gemini"),
       HERDR_BIN_PATH: join(root, "bin", "herdr"), CLAUDE_CONFIG_DIR: join(root, "claude"), CODEX_HOME: join(root, "codex"),
       XDG_STATE_HOME: join(root, "state"), XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"),
     };

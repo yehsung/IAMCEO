@@ -157,7 +157,7 @@ async function until(check: () => boolean, what: string) {
 function fixture() {
   const isolated = createIsolatedRuntime();
   const config = loadConfig({ IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: isolated.socketPath, IAMCEO_HERDR_SOCKET: isolated.herdrSocketPath,
-    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin });
+    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin, IAMCEO_GEMINI_BIN: isolated.bins.geminiBin });
   const db = openDb(config.dbPath), bus = new Bus(), store = new Store(db, bus), runner = new ReplyRunner();
   store.patchSettings({ maxConcurrentTurns: 4, boardTidyHours: 0 });
   const project = store.createProject({ name: "답 상태", cwd: isolated.paths.work });

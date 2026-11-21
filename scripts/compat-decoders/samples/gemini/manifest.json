@@ -1,0 +1,98 @@
+{
+ "about": "Gemini(Antigravity CLI)가 든 응답 견본. 0.2.9 서버의 실제 응답(tests/compat-dump.test.ts 의 덤프)에 Gemini 가 더하는 것만 손으로 넣었다: cli 가 gemini 인 팀장, 설정의 geminiRanks, 모델 목록의 gemini, 실행 환경의 providers.gemini, 전달 근거 출처 gemini_log. 기계 고유 값(경로·주소)은 견본 값으로 바꿨다. run.ts 가 본 덤프와 따로 출시 태그마다 그 해석기에 먹인다. teeth 는 게이트 자체 검사: 그 파일에서 그 칸을 지운 사본은 어느 출시 태그의 해석기에서나 실패해야 한다(견본이 실제로 해석되고 있다는 표시).",
+ "entries": [
+  {
+   "file": "models.json",
+   "type": "ModelCatalog",
+   "checks": [],
+   "note": "모델 목록에 gemini 키"
+  },
+  {
+   "file": "bootstrap.json",
+   "type": "Bootstrap",
+   "checks": [],
+   "note": "설정에 geminiRanks, 실행 환경에 providers.gemini"
+  },
+  {
+   "file": "state.json",
+   "type": "ProjectState",
+   "checks": [
+    "notices-v2"
+   ],
+   "note": "cli 가 gemini 인 팀장"
+  },
+  {
+   "file": "settings-write.json",
+   "type": "SettingsWriteResult",
+   "checks": [],
+   "note": "설정 저장 답에 geminiRanks 와 resetEfforts 의 geminiRanks 칸"
+  },
+  {
+   "file": "ws-member.json",
+   "type": "RealtimeEvent",
+   "checks": [
+    "event-payload"
+   ],
+   "note": "실시간 사건: Gemini 팀장"
+  },
+  {
+   "file": "ws-settings.json",
+   "type": "RealtimeEvent",
+   "checks": [
+    "event-payload"
+   ],
+   "note": "실시간 사건: geminiRanks 가 든 설정"
+  },
+  {
+   "file": "sync-project.json",
+   "type": "SyncSnapshot",
+   "checks": [
+    "sync-ok",
+    "notices-v2"
+   ],
+   "note": "동기화: Gemini 팀장과 geminiRanks 가 함께"
+  },
+  {
+   "file": "member-delivery-notices.json",
+   "type": "DeliveryNoticePage",
+   "checks": [],
+   "note": "전달 근거의 출처가 gemini_log"
+  }
+ ],
+ "teeth": [
+  {
+   "name": "Claude 모델 목록이 빠짐",
+   "file": "models.json",
+   "delete": [
+    "claude"
+   ]
+  },
+  {
+   "name": "Gemini 팀장의 id 가 빠짐",
+   "file": "state.json",
+   "delete": [
+    "members",
+    0,
+    "id"
+   ]
+  },
+  {
+   "name": "Gemini 팀장 사건에 팀장이 빠짐",
+   "file": "ws-member.json",
+   "delete": [
+    "member"
+   ]
+  },
+  {
+   "name": "gemini_log 근거의 출처가 빠짐",
+   "file": "member-delivery-notices.json",
+   "delete": [
+    "items",
+    0,
+    "evidence",
+    0,
+    "source"
+   ]
+  }
+ ]
+}

@@ -1228,7 +1228,8 @@ private struct DecisionCard: View {
             }
             // 0.2.8: 이 기기에서 바로 다른 계정으로 로그인한다. 서버가 그 CLI 의 한도로 멈춘 팀장을 새 계정으로 다시 열어 이어 가게 한다.
             // 옛 서버(로그인을 모른다)·샘플·보관함에는 보이지 않는다.
-            if let cli = decision.usageLimit?.cli, ["claude", "codex"].contains(cli), store.cliAccounts.supported, !store.isDemo, !store.isArchive {
+            // 앱에서 로그인할 수 있는 CLI 에만 낸다(Claude Code·Codex). Gemini 는 서버가 로그인을 다루지 않아 단추가 없다.
+            if let cli = decision.usageLimit?.cli, RankSettingsCLI(cli: cli)?.signsInFromApp == true, store.cliAccounts.supported, !store.isDemo, !store.isArchive {
                 VStack(alignment: .leading, spacing: 6) {
                     Button { store.cliAccounts.requestedLogin = CLILoginTarget(cli: cli) } label: {
                         Label(String(localized: "다른 계정으로 로그인"), systemImage: "person.crop.circle.badge.checkmark")

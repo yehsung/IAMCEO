@@ -17,11 +17,12 @@ enum UsageBreakdown: String, CaseIterable, Hashable, Sendable {
     static var items: [(value: UsageBreakdown, title: String)] { allCases.map { ($0, $0.title) } }
 }
 
-/// 한 CLI 의 한도 창들(한 줄로 보인다).
+/// 한 CLI 의 한도 창들(한 줄로 보인다). Gemini 는 한도 묶음마다 이름이 길 수 있어 묶음 하나가 한 줄이다(bucket 이 그 묶음의 이름).
 struct UsageLimitGroup: Identifiable, Sendable, Equatable {
     let provider: String
     let limits: [UsageLimitWindow]
-    var id: String { provider }
+    var bucket: String? = nil
+    var id: String { bucket.map { "\(provider).\($0)" } ?? provider }
 }
 
 /// 나눠 본 한 줄(팀원·프로젝트·날짜 가운데 하나).
@@ -46,13 +47,33 @@ extension UsageText {
         }
     }
 
-    /// CLI 별 한도 묶음(아는 창이 하나라도 있는 것만). Claude 먼저.
+    /// CLI 별 한도 묶음(아는 창이 하나라도 있는 것만). Claude 먼저, 그다음 Codex, Gemini.
+    /// Gemini 는 서버가 알려 준 한도 묶음마다 한 줄이다(이름을 그대로 보이고, 한 줄에 여러 이름을 이어 붙이지 않는다). 서버가 보내지 않으면 없다.
     static func limitGroups(_ limits: [UsageLimitWindow]) -> [UsageLimitGroup] {
         let known = limits.filter { windowLabel($0) != nil }
-        return ["claude", "codex"].compactMap { provider in
-            let mine = known.filter { $0.provider == provider }
-            return mine.isEmpty ? nil : UsageLimitGroup(provider: provider, limits: mine)
+        return RankSettingsCLI.allCases.flatMap { cli -> [UsageLimitGroup] in
+            let mine = known.filter { $0.provider == cli.rawValue }
+            guard !mine.isEmpty else { return [] }
+            switch cli {
+            case .claude, .codex: return [UsageLimitGroup(provider: cli.rawValue, limits: mine)]
+            case .gemini: return mine.map { UsageLimitGroup(provider: cli.rawValue, limits: [$0], bucket: $0.window) }
+            }
         }
+    }
+
+    /// 한도 줄의 오른쪽 값. 묶음 하나가 한 줄이면(Gemini) 사용률만이다. 이름은 줄 아래 글에 있다.
+    static func limitsValue(_ group: UsageLimitGroup) -> String {
+        guard group.bucket != nil, let only = group.limits.first else { return limitsValue(group.limits) }
+        return percent(only.usedPct)
+    }
+
+    /// 한도 줄 아래 글. 묶음 하나가 한 줄이면(Gemini) 그 묶음의 이름이 꼭 들어간다.
+    static func limitsHint(_ group: UsageLimitGroup, now: Date = Date()) -> String {
+        let base = limitsHint(group.limits, now: now)
+        guard group.bucket != nil, let only = group.limits.first, let label = windowLabel(only) else { return base }
+        // 초기화 시각이 앞으로 남아 있으면 위 글이 이미 '<이름> 한도 <시각> 초기화'로 이름을 적는다. 그렇지 않을 때만 이름을 앞에 둔다.
+        if let resets = parseISODate(only.resetsAt), resets > now { return base }
+        return base.isEmpty ? label : "\(label) · \(base)"
     }
 }
 
@@ -81,7 +102,7 @@ struct UsageGroup: View {
         if !panel.unsupported, store.api != nil {
             // 읽기 실패는 묶음 아래 한 줄(위험 색)로, 평소에는 숫자가 무엇인지 적는다.
             let problem = panel.error
-            SettingsGroup(String(localized: "사용량"), footnote: problem ?? panel.report.map { UsageText.footnote(retentionDays: $0.retentionDays) },
+            SettingsGroup(String(localized: "사용량"), footnote: problem ?? panel.report.map { UsageText.footnote(retentionDays: $0.retentionDays, gemini: UsageText.reportsGemini($0)) },
                           footnoteTone: problem == nil ? CE.ink2 : CE.danger, accessory: {
                 SettingsRefreshButton(label: String(localized: "사용량 다시 읽기"), busy: panel.loading) { Task { await panel.load(store.api) } }
                     .disabled(store.connectionStatus != .connected)
@@ -106,9 +127,9 @@ struct UsageGroup: View {
         SettingsRow(String(localized: "합계"), hint: UsageText.totalHint(report)) { UsageValue(amounts: report.totals) }
         ForEach(UsageText.limitGroups(report.limits)) { group in
             RowDivider(inset: 0)
-            SettingsRow(UsageText.limitsTitle(group.provider), hint: UsageText.limitsHint(group.limits)) {
+            SettingsRow(UsageText.limitsTitle(group.provider), hint: UsageText.limitsHint(group)) {
                 // 80% 를 넘은 창이 있으면 주의 색. 값은 CLI 가 보고한 사용률 그대로다.
-                Text(UsageText.limitsValue(group.limits))
+                Text(UsageText.limitsValue(group))
                     .font(SetupFont.value).monospacedDigit()
                     .foregroundStyle(group.limits.contains { $0.usedPct >= 80 } ? CE.attention : CE.ink)
                     .lineLimit(1).fixedSize()

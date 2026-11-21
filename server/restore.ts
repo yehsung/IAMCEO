@@ -230,7 +230,7 @@ export function restoreBackup(options: RestoreOptions): RestoreResult {
     }
     const configPath = join(stage, "config.json");
     const config = readBackupJson(configPath) as Record<string, unknown>;
-    for (const key of ["claudeBin", "codexBin", "coreBin", "coreSocket"]) {
+    for (const key of ["claudeBin", "codexBin", "geminiBin", "coreBin", "coreSocket"]) {
       if (typeof config[key] === "string") config[key] = relocatePath(config[key], snapshot.manifest.sourceHome, destination);
     }
     // G(C3): 복제본은 원본과 함께 쓰는 별개의 서버다. 원본의 공용 접속 코드로 붙은 기기가 복제본에도 붙지 않게 새 코드를 준다.

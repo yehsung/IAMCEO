@@ -121,8 +121,9 @@ export async function smokeDaemon(input: { daemon: string; version: string; scra
   const root = realpathSync(mkdtempSync(join(input.scratch ?? tmpdir(), "iamceo-release-smoke-")));
   let child: ReturnType<typeof Bun.spawn> | undefined;
   try {
-    for (const dir of ["home", "iamceo", "claude", "codex", "state", "config", "cache", "tmp", "bin"]) mkdirSync(join(root, dir), { mode: 0o700 });
-    for (const name of ["core", "claude", "codex", "herdr"]) writeFileSync(join(root, "bin", name), "#!/bin/sh\nprintf 'Release smoke: real runtime disabled\\n' >&2\nexit 97\n", { mode: 0o700 });
+    // Must match what rehearsalEnvironment points at: bin/agy is the fake Antigravity CLI (the Gemini provider), gemini its data folder.
+    for (const dir of ["home", "iamceo", "claude", "codex", "gemini", "state", "config", "cache", "tmp", "bin"]) mkdirSync(join(root, dir), { mode: 0o700 });
+    for (const name of ["core", "claude", "codex", "agy", "herdr"]) writeFileSync(join(root, "bin", name), "#!/bin/sh\nprintf 'Release smoke: real runtime disabled\\n' >&2\nexit 97\n", { mode: 0o700 });
     // Loopback only: a smoke server must not appear on the tailnet or the LAN of the release Mac.
     writeFileSync(join(root, "iamceo", "config.json"), `${JSON.stringify({ hosts: ["127.0.0.1"], keepAwake: false })}\n`, { mode: 0o600 });
     const env = { ...rehearsalEnvironment(root), IAMCEO_LOG_WRITER: "1" };

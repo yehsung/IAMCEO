@@ -270,7 +270,12 @@ export function removeDeletedProjectFiles(config: Pick<Config, "home" | "uploads
     } catch { failed++; }
     for (const name of runFiles) {
       if (!name.startsWith(`${memberId}.`)) continue;
-      try { if (lstatSync(join(run, name)).isFile()) unlinkSync(join(run, name)); } catch { failed++; }
+      try {
+        const entry = lstatSync(join(run, name));
+        if (entry.isFile()) unlinkSync(join(run, name));
+        // Gemini 팀장의 실행 폴더(<팀장 id>.gemini: 규칙·MCP 설정·주입 폴더). 토큰이 든 MCP 설정이 있어 폴더째 지운다. 링크는 따라가지 않는다.
+        else if (name === `${memberId}.gemini` && entry.isDirectory() && !entry.isSymbolicLink()) rmSync(join(run, name), { recursive: true });
+      } catch { failed++; }
     }
   }
   return { attachments, failed };

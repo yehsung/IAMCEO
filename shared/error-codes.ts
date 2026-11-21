@@ -146,6 +146,7 @@ export const ERROR_CODES = {
   reopen_failed: { ko: "팀장을 다시 열지 못했습니다", en: "Couldn't reopen the staff member" },
   legacy_session: { ko: "이전 실행기의 세션은 자동으로 다시 열거나 전환하지 않습니다", en: "Sessions from the previous runner are not reopened or switched automatically" },
   resume_record_checking: { ko: "이어갈 native 세션 기록을 확인하는 중입니다", en: "Checking the native session record to continue from" },
+  archive_gemini_session_unknown: { ko: "Gemini 세션의 대화 ID를 아직 알지 못했습니다. 그 세션을 먼저 재운 뒤 보관하세요", en: "The Gemini session's conversation ID isn't known yet. Put that session to sleep first, then archive" },
   resume_record_missing: { ko: "이어갈 native 세션 기록을 확인할 수 없습니다", en: "Couldn't find the native session record to continue from" },
   resume_record_mismatch: { ko: "현재 native 세션과 일치하는 주 세션 기록을 확인할 수 없습니다", en: "Couldn't find a main session record that matches the current native session" },
   sleep_terminal_lease: { ko: "직접 조작권이 남아 있어 잠재울 수 없습니다", en: "Direct control is still held, so it can't be put to sleep" },
@@ -162,6 +163,7 @@ export const ERROR_CODES = {
   cli_switch_busy: { ko: "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요", en: "Work or a session action is in progress. Switch the CLI after the turn ends" },
   cli_switch_delivery_unknown: { ko: "전달 여부가 확인되지 않은 입력이 있어 CLI를 바꿀 수 없습니다", en: "Some input has an unconfirmed delivery, so the CLI can't be switched" },
   cli_switch_model_mismatch: { ko: "Codex용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요", en: "Pick a model for Codex, or set the staff member's model back to the default" },
+  cli_switch_model_mismatch_gemini: { ko: "Gemini용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요", en: "Pick a model for Gemini, or set the staff member's model back to the default" },
   cli_config_failed: { ko: "CLI 설정을 적용할 수 없습니다", en: "Couldn't apply the CLI settings" },
   model_unknown: { ko: "목록에 없는 모델입니다", en: "That model is not on the list" },
   effort_unsupported: { ko: "이 CLI에서 지원하지 않는 effort입니다", en: "This CLI doesn't support that effort" },
@@ -194,6 +196,7 @@ export const ERROR_CODES = {
   compact_baseline_missing: { ko: "미확정 압축의 baseline이 없어 자동 입력을 보류합니다", en: "The unconfirmed compaction has no baseline, so automatic input is on hold" },
   compact_record_corrupt: { ko: "압축 기록이 손상되어 자동 입력을 보류합니다", en: "The compaction record is damaged, so automatic input is on hold" },
   compact_result_mismatch: { ko: "다른 압축 작업의 결과입니다", en: "This is the result of a different compaction" },
+  compact_unsupported_gemini: { ko: "Gemini(Antigravity CLI) 팀원은 압축할 수 없습니다. 이 CLI는 문맥을 스스로 정리합니다", en: "Gemini (Antigravity CLI) staff can't be compacted here. This AI program tidies its context by itself" },
   compact_not_awake: { ko: "깨어 있고 실행이 켜진 팀원만 압축할 수 있습니다", en: "Only awake staff with running turned on can be compacted" },
   compact_record_missing: { ko: "압축 완료를 관찰할 native 세션 기록이 없습니다", en: "There is no native session record to watch the compaction finish" },
   compact_session_changed: { ko: "압축을 예약하는 동안 세션이 변경되었습니다", en: "The session changed while compaction was being scheduled" },
@@ -484,6 +487,7 @@ export const ERROR_CODES = {
   observation_trust_dialog_unrecognized: { ko: "폴더 신뢰 확인 창으로 보이지만 정확히 읽지 못했습니다. 터미널을 열어 직접 답해 주세요", en: "This looks like the folder trust prompt but couldn't be read exactly. Open the terminal and answer it yourself" },
   observation_start_not_ready: { ko: "띄운 뒤 60초 넘게 준비를 알리지 않았습니다. 터미널을 열어 화면을 확인해 주세요", en: "It hasn't reported ready for over 60 seconds after starting. Open the terminal and check the screen" },
   observation_login_required: { ko: "Claude 로그인이 필요합니다. 터미널에서 /login 으로 다시 로그인하면 이어 갑니다", en: "Claude needs you to sign in again. Run /login in the terminal to continue" },
+  observation_gemini_setup: { ko: "Antigravity CLI의 로그인·첫 설정이 끝나지 않았습니다. 터미널을 열어 직접 끝내 주세요", en: "Antigravity CLI hasn't finished sign-in or first-run setup. Open the terminal and finish it yourself" },
   // ---- 11-16 핫픽스 B: 턴은 끝났지만 Codex 가 띄운 백그라운드 프로그램이 남은 팀장(쉬는 중으로 보이지만 입력을 넣지 않는다) ----
   // 넓은 코드(member_working·archive_member_working·cli_switch_busy)는 출시된 앱이 보므로 그대로 두고 reason 칸으로 싣는다.
   sleep_background_program: { ko: "턴은 끝났지만 Codex가 띄운 백그라운드 프로그램이 아직 돌고 있어 잠재우지 않았습니다. 터미널에서 /stop 으로 닫은 뒤 잠재우거나, 그래도 잠재우면 그 프로그램도 함께 끝납니다", en: "The turn ended, but a background program that Codex started is still running, so the staff member wasn't put to sleep. Close it with /stop in the terminal first, or put the staff member to sleep anyway and that program ends too" },

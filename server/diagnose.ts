@@ -24,7 +24,7 @@ const ROW_LIMIT = 300;
 const MASK = "[가림]";
 
 type DiagnoseConfig = Pick<Config, "accessCode" | "port" | "hosts" | "claudeBin"> &
-  Partial<Pick<Config, "hostsAuto" | "keepAwake" | "codexBin" | "coreBin" | "coreSocket" | "claudeHome" | "codexHome" | "pushRelay" | "pushRelayUrl">>;
+  Partial<Pick<Config, "hostsAuto" | "keepAwake" | "codexBin" | "geminiBin" | "coreBin" | "coreSocket" | "claudeHome" | "codexHome" | "geminiHome" | "pushRelay" | "pushRelayUrl">>;
 
 export interface DiagnoseInput {
   home: string;
@@ -93,7 +93,7 @@ function safeRows<T>(read: () => T, fallback: T): T {
   try { return read(); } catch { return fallback; }
 }
 
-const SETTINGS_KEYS = ["backend", "permissionMode", "ranks", "codexRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault",
+const SETTINGS_KEYS = ["backend", "permissionMode", "ranks", "codexRanks", "geminiRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault",
   "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged", "reportLanguage"];
 
 function databaseSummary(db: Database): Record<string, unknown> {
@@ -366,6 +366,8 @@ export async function createDiagnostics(input: DiagnoseInput): Promise<DiagnoseR
       home: input.home, port: config.port, hosts: config.hosts, hostsAuto: config.hostsAuto ?? null, keepAwake: config.keepAwake ?? true,
       claudeBin: config.claudeBin, codexBin: config.codexBin ?? null, coreBin: config.coreBin ?? null, coreSocket: config.coreSocket ?? null,
       claudeHome: config.claudeHome ?? null, codexHome: config.codexHome ?? null,
+      // Antigravity CLI(Gemini)의 실행 파일과, 설정에 적었을 때만 있는 자료 폴더. 경로만 적는다: ~/.gemini 의 내용(대화·로그인 기록)은 읽지 않는다.
+      geminiBin: config.geminiBin ?? null, geminiHome: config.geminiHome ?? null,
     } : null,
     // 알림 중계: 켜고 끈 설정과 설치 파일이 있는지·만든 날·중계 호스트만. 설치 ID·비밀은 넣지 않는다.
     pushRelay: { setting: config?.pushRelay === false ? "off" : "auto", customUrl: config?.pushRelayUrl !== undefined, ...pushRelaySummary(input.home) },

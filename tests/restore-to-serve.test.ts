@@ -69,7 +69,7 @@ test("백업 → 새 Mac 의 빈 홈에 복원 → 조정 → 재개 → 서버 
   const core = await startFakeCore({ claudeHome, contextHome: newHome });
   cleanups.push(() => core.stop());
   const env = { IAMCEO_HOME: newHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: core.socketPath, IAMCEO_CORE_BIN: "/usr/bin/false",
-    IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false" };
+    IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_GEMINI_BIN: "/usr/bin/false" };
   const config = loadConfig(env);
   expect(config.accessCode).toBe("restore-to-serve-code");
   const runtime = await startOpsRuntime(config, {

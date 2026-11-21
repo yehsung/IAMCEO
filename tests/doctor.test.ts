@@ -1,14 +1,16 @@
 // B3 스스로 점검: 판정(사실 → 점검표), 사실 모으기(로그인 기록·자동 시작·백업), GET /api/doctor, `iamceo doctor`(서버가 꺼져 있어도).
-// 진짜 launchctl·Claude·Codex 를 부르지 않는다: 판정은 주입한 사실로, 모으기는 임시 홈과 가짜 명령으로 시험한다.
+// 진짜 launchctl·Claude·Codex·Antigravity CLI 를 부르지 않는다: 판정은 주입한 사실로, 모으기는 임시 홈과 가짜 명령으로 시험한다.
+// Antigravity CLI(agy) 자리는 늘 정해 준다(가짜이거나 없는 경로). 비워 두면 설정이 이 Mac 에 깔린 진짜 agy 를 찾아 Gemini 줄이 Mac 마다 달라진다.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DOCTOR_CHECK_IDS, type DoctorReport } from "../shared/types.ts";
 import { Bus } from "../server/bus.ts";
 import { defaultCoreBin, loadConfig, updateConfigFile, VERSION, type Config } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
-import { askServerDoctor, doctorChecks, doctorReport, formatDoctorReport, newestBackupAt, probeLogin, probeService, type DoctorFacts } from "../server/doctor.ts";
+import { askServerDoctor, DOCTOR_GEMINI_CHECK_ID, doctorChecks, doctorReport, formatDoctorReport, geminiLastActiveAt, localDoctorFacts, newestBackupAt, probeLogin, probeService, serverDoctorFacts, type DoctorFacts } from "../server/doctor.ts";
+import { geminiStatusFromPayload, geminiStatusPath } from "../server/runner/gemini-status.ts";
 import { startServer, type RunningServer } from "../server/http.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import { Store } from "../server/store.ts";
@@ -204,7 +206,205 @@ describe("점검 판정", () => {
   });
 });
 
+/** Gemini 팀장의 상태줄 기록을 래퍼가 하듯 둔다. */
+function putGeminiStatus(home: string, memberId: string, at: Date, payload: Record<string, unknown>): void {
+  const path = geminiStatusPath(home, memberId);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, JSON.stringify(geminiStatusFromPayload(memberId, payload, at)), { mode: 0o600 });
+}
+const CONVERSATION = "0b6f6a52-3c1e-4d7a-9a51-7f2d5c1e8a90";
+
+describe("점검 판정: Gemini(Antigravity CLI)", () => {
+  const AGY = { provider: "gemini" as const, installed: true, version: "1.5.14", known: true };
+  const withGemini = (patch: Partial<DoctorFacts> = {}) => healthy({
+    providers: { ...healthy().providers, gemini: { installed: true, login: "unknown" } },
+    cliVersions: [...healthy().cliVersions!, AGY], ...patch,
+  });
+  const ids = (facts: DoctorFacts) => doctorChecks(facts).map(check => check.id);
+  const WITH_GEMINI = ["server", "engine", "claude", "codex", "gemini", "cli_version", "tailscale", "service", "backup", "disk"];
+
+  test("깔려 있지 않고 쓰는 팀장도 없으면 항목이 없다(점검표가 예전 그대로다)", () => {
+    expect(DOCTOR_GEMINI_CHECK_ID).toBe("gemini");
+    expect([...DOCTOR_CHECK_IDS]).not.toContain(DOCTOR_GEMINI_CHECK_ID);
+    for (const facts of [
+      healthy(), healthy({ geminiInUse: false }), healthy({ geminiInUse: null }),
+      healthy({ providers: { ...healthy().providers, gemini: { installed: false, login: "unknown" } }, geminiInUse: false }),
+      // 버전 목록에 '설치되지 않음' 줄이 실려 와도 마찬가지다.
+      healthy({ cliVersions: [...healthy().cliVersions!, { provider: "gemini", installed: false, version: null, known: false }] }),
+    ]) {
+      expect(ids(facts)).toEqual([...DOCTOR_CHECK_IDS]);
+      for (const check of doctorChecks(facts)) expect(check.state).toBe("ok");
+      expect(byId(facts).cli_version!.detail).toBe("Claude Code 2.1.322 · Codex 0.166.0 (확인된 버전)");
+    }
+  });
+
+  test("깔려 있으면 Codex 다음 줄에 붙는다. 로그인은 판정하지 않고, 쓰지 않으면 아무것도 권하지 않는다", () => {
+    expect(ids(withGemini())).toEqual(WITH_GEMINI);
+    const idle = byId(withGemini({ geminiInUse: false })).gemini!;
+    expect(idle).toEqual({ id: "gemini", state: "unknown", title: "Gemini", detail: "Antigravity CLI 설치됨 · 1.5.14 · 로그인은 세션을 열 때 확인합니다" });
+    // 로그인 사실(login)이 무엇이든 판정에 쓰지 않는다: Codex 의 기준이 흘러들어와도 '로그인됨'·'로그인 기록 없음'이라 하지 않는다.
+    for (const login of ["yes", "no", "unknown"] as const) {
+      const check = byId(withGemini({ providers: { ...healthy().providers, gemini: { installed: true, login } }, geminiInUse: false })).gemini!;
+      expect(check).toEqual(idle);
+    }
+    // 버전을 못 읽었으면 버전 없이 적는다.
+    expect(byId(withGemini({ cliVersions: healthy().cliVersions })).gemini!.detail).toBe("Antigravity CLI 설치됨 · 로그인은 세션을 열 때 확인합니다");
+    expect(byId(withGemini({ geminiInUse: false }), "en").gemini).toEqual({ id: "gemini", state: "unknown", title: "Gemini", detail: "Antigravity CLI installed · 1.5.14 · sign-in is checked when a session starts" });
+    // 나머지 항목은 그대로 정상이다.
+    for (const check of doctorChecks(withGemini())) if (check.id !== "gemini") expect(check.state).toBe("ok");
+  });
+
+  test("쓰는 팀장이 있으면: 없을 때는 문제, 있을 때는 첫 설정 안내, 최근에 대화가 돌았으면 정상", () => {
+    const missing = byId(healthy({ geminiInUse: true })).gemini!;
+    expect(missing).toMatchObject({ state: "fail", title: "Gemini", detail: "Gemini를 쓰는 총괄·팀장이 있는데 Antigravity CLI(agy)를 찾지 못했습니다" });
+    expect(missing.fix).toBe("Antigravity CLI를 설치한 뒤(curl -fsSL https://antigravity.google/cli/install.sh | bash) 이 Mac의 터미널에서 agy를 한 번 실행해 로그인과 첫 설정(약관 동의)을 끝내세요.");
+    expect(ids(healthy({ geminiInUse: true }))).toEqual(WITH_GEMINI);
+    const en = byId(healthy({ geminiInUse: true }), "en").gemini!;
+    expect(en.detail).toBe("Some sessions use Gemini, but the Antigravity CLI (agy) was not found");
+    expect(en.fix).toBe("Install the Antigravity CLI (curl -fsSL https://antigravity.google/cli/install.sh | bash), then run agy once in Terminal on this Mac to sign in and finish the first-run setup (terms).");
+
+    const waiting = byId(withGemini({ geminiInUse: true })).gemini!;
+    expect(waiting).toMatchObject({ state: "unknown", detail: "Antigravity CLI 설치됨 · 1.5.14 · 로그인은 세션을 열 때 확인합니다" });
+    expect(waiting.fix).toBe("Gemini 팀장이 시작하지 못하고 멈추면 이 Mac의 터미널에서 agy를 한 번 실행해 로그인과 첫 설정(약관 동의)을 끝내세요.");
+    expect(byId(withGemini({ geminiInUse: true }), "en").gemini!.fix)
+      .toBe("If a Gemini session stops right after starting, run agy once in Terminal on this Mac to sign in and finish the first-run setup (terms).");
+
+    const active = byId(withGemini({ geminiInUse: true, geminiActiveAt: new Date(NOW.getTime() - 3 * HOUR).toISOString() })).gemini!;
+    expect(active).toEqual({ id: "gemini", state: "ok", title: "Gemini", detail: "Antigravity CLI 설치됨 · 1.5.14 · 마지막 대화 3시간 전" });
+    expect(byId(withGemini({ geminiInUse: true, geminiActiveAt: new Date(NOW.getTime() - 3 * HOUR).toISOString() }), "en").gemini!.detail)
+      .toBe("Antigravity CLI installed · 1.5.14 · last conversation 3 h ago");
+    // 오래된 흔적(7일 넘음)이나 깨진 시각은 근거로 치지 않는다.
+    for (const stale of [new Date(NOW.getTime() - 8 * 24 * HOUR).toISOString(), "not-a-date"]) {
+      expect(byId(withGemini({ geminiInUse: true, geminiActiveAt: stale })).gemini!.state).toBe("unknown");
+    }
+  });
+
+  test("CLI 버전: Antigravity CLI 는 이름이 Codex 로 적히지 않고, 쓰는 팀장이 있을 때만 '확인되지 않은 버전'으로 알린다", () => {
+    expect(byId(withGemini()).cli_version).toMatchObject({ state: "ok", detail: "Claude Code 2.1.322 · Codex 0.166.0 · Antigravity CLI 1.5.14 (확인된 버전)" });
+    const newer = [...healthy().cliVersions!, { provider: "gemini" as const, installed: true, version: "1.6.0", known: false }];
+    const inUse = byId(withGemini({ cliVersions: newer, geminiInUse: true })).cli_version!;
+    expect(inUse).toMatchObject({ state: "warn", detail: "확인되지 않은 CLI 버전: Antigravity CLI 1.6.0" });
+    expect(inUse.fix).toBeDefined();
+    // 깔려만 있고 쓰지 않으면(또는 모르면) 버전이 달라도 알리지 않는다.
+    for (const geminiInUse of [false, null, undefined]) {
+      expect(byId(withGemini({ cliVersions: newer, geminiInUse })).cli_version).toMatchObject({ state: "ok", detail: "Claude Code 2.1.322 · Codex 0.166.0 (확인된 버전)" });
+    }
+    // Claude·Codex 의 알림은 그대로다(Gemini 를 쓰든 말든).
+    const codexNew = [{ provider: "claude" as const, installed: true, version: "2.1.322", known: true }, { provider: "codex" as const, installed: true, version: "9.9.9", known: false }, AGY];
+    expect(byId(withGemini({ cliVersions: codexNew, geminiInUse: false })).cli_version!.detail).toBe("확인되지 않은 CLI 버전: Codex 9.9.9");
+  });
+
+  test("고치는 법에 개발자 명령이 없고, 문제·확인 필요에는 고치는 법이 붙는다", () => {
+    const variants = [healthy({ geminiInUse: true }), withGemini({ geminiInUse: true }), withGemini({ geminiInUse: false }),
+      withGemini({ geminiInUse: true, cliVersions: [{ provider: "gemini", installed: true, version: "1.6.0", known: false }] })];
+    for (const facts of variants) for (const lang of ["ko", "en"] as const) for (const check of doctorChecks(facts, lang)) {
+      expect(`${check.detail ?? ""} ${check.fix ?? ""}`).not.toMatch(/bun run|setup:core|iamceo open/);
+      if (check.state === "fail" || check.state === "warn") expect(check.fix).toBeDefined();
+      for (const key of Object.keys(check)) expect(["id", "state", "title", "detail", "fix"]).toContain(key);
+    }
+    const text = formatDoctorReport(doctorReport(healthy({ geminiInUse: true }), "ko", "0.2.10"), "ko");
+    expect(text).toContain("✗ Gemini — Gemini를 쓰는 총괄·팀장이 있는데 Antigravity CLI(agy)를 찾지 못했습니다");
+    expect(text.trim().split("\n").at(-1)).toBe("문제 1 · 확인 필요 0");
+  });
+});
+
 describe("사실 모으기", () => {
+  test("Gemini 의 로그인은 판정하지 않는다: Codex 의 기준(OPENAI_API_KEY·auth.json)으로도, ~/.gemini 의 파일로도 보지 않는다", () => {
+    const home = temp("iamceo-doctor-gemini-login-");
+    const codexHome = temp("iamceo-doctor-gemini-codex-");
+    writeFileSync(join(codexHome, "auth.json"), JSON.stringify({ tokens: { id_token: "x" } }));
+    mkdirSync(join(home, ".gemini", "antigravity-cli"), { recursive: true });
+    writeFileSync(join(home, ".gemini", "oauth_creds.json"), JSON.stringify({ access_token: "x" }));
+    writeFileSync(join(home, ".gemini", "google_accounts.json"), JSON.stringify({ active: "x" }));
+    // 같은 사실로 Codex 는 '로그인됨'이다. Gemini 는 어느 것으로도 판정하지 않는다.
+    expect(probeLogin("codex", { userHome: home, codexHome }, {} as NodeJS.ProcessEnv)).toBe("yes");
+    expect(probeLogin("gemini", { userHome: home, codexHome }, {} as NodeJS.ProcessEnv)).toBe("unknown");
+    expect(probeLogin("gemini", { userHome: home, codexHome }, { OPENAI_API_KEY: "k", ANTHROPIC_API_KEY: "k", GEMINI_API_KEY: "k" } as NodeJS.ProcessEnv)).toBe("unknown");
+    expect(probeLogin("gemini", { userHome: temp("iamceo-doctor-gemini-empty-") }, {} as NodeJS.ProcessEnv)).toBe("unknown");
+  });
+
+  test("Gemini 팀장의 상태줄 기록에서 대화가 돌던 마지막 시각을 읽는다(로그인 대기·오류·대화 없는 기록은 세지 않는다)", () => {
+    const home = temp("iamceo-doctor-gemini-status-");
+    expect(geminiLastActiveAt(home, [])).toBeNull();
+    expect(geminiLastActiveAt(home, ["m_none"])).toBeNull();
+    const at = (hours: number) => new Date(NOW.getTime() - hours * HOUR);
+    putGeminiStatus(home, "m_old", at(30), { conversation_id: CONVERSATION, agent_state: "idle" });
+    putGeminiStatus(home, "m_new", at(2), { conversation_id: CONVERSATION, agent_state: "working" });
+    // 더 새롭지만 근거가 아닌 기록들: 대화가 아직 없다, 로그인을 기다린다, 오류다, 시작하는 중이다.
+    putGeminiStatus(home, "m_fresh", at(1), { session_id: "", agent_state: "idle" });
+    putGeminiStatus(home, "m_auth", at(1), { conversation_id: CONVERSATION, agent_state: "authenticating" });
+    putGeminiStatus(home, "m_error", at(1), { conversation_id: CONVERSATION, agent_state: "error" });
+    putGeminiStatus(home, "m_init", at(1), { conversation_id: CONVERSATION, agent_state: "initializing" });
+    writeFileSync(geminiStatusPath(home, "m_broken"), "{");
+    const all = ["m_old", "m_new", "m_fresh", "m_auth", "m_error", "m_init", "m_broken", "m_none", "../escape"];
+    expect(geminiLastActiveAt(home, all)).toBe(at(2).toISOString());
+    expect(geminiLastActiveAt(home, ["m_old"])).toBe(at(30).toISOString());
+    expect(geminiLastActiveAt(home, ["m_fresh", "m_auth", "m_error", "m_init", "m_broken"])).toBeNull();
+    // 상태를 알려 주지 않은 기록(agent_state 없음)도 대화가 있으면 센다.
+    putGeminiStatus(home, "m_plain", at(0.5), { conversation_id: CONVERSATION });
+    expect(geminiLastActiveAt(home, [...all, "m_plain"])).toBe(at(0.5).toISOString());
+  });
+
+  test("서버 안에서 모으기: Gemini 는 서버가 아는 값(runtime)에 있을 때만 깔린 것으로 보고, 쓰는 팀장과 마지막 대화를 싣는다", async () => {
+    const home = temp("iamceo-doctor-gemini-facts-");
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    const agy = join(bin, "agy");
+    writeFileSync(agy, "#!/bin/sh\nexit 97\n", { mode: 0o755 });
+    const config = { home, dbPath: join(home, "iamceo.db"), claudeBin: join(bin, "no-claude"), codexBin: join(bin, "no-codex"), geminiBin: agy };
+    const asked: unknown[] = [];
+    const probes = {
+      service: async () => ({ state: "unknown" as const }), disk: () => null, tailscaleAddress: () => null,
+      login: (provider: string) => { asked.push(provider); return "yes" as const; },
+      cliVersions: async (bins: unknown) => { asked.push(bins); return null; },
+    };
+    const base = { config, ready: true, engine: null, tailnet: null, tailnetSeen: false, detectedTailnet: [], codexInUse: false, probes, now: NOW };
+    const core = { installed: true, available: true, version: "0.5.2", detail: null };
+    const without = await serverDoctorFacts({ ...base, runtime: { backend: "core", core, providers: { claude: { installed: true }, codex: { installed: false } } } });
+    expect(without.providers.gemini).toBeUndefined();
+    expect([without.geminiInUse, without.geminiActiveAt]).toEqual([null, null]);
+    // 버전 읽기에는 설정의 gemini 실행 파일을 넘긴다(codex 실행 파일로 읽지 않는다).
+    expect(asked).toContainEqual({ claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin: agy });
+    expect(asked).not.toContain("gemini");
+    const installed = await serverDoctorFacts({ ...base, geminiMemberIds: [],
+      runtime: { backend: "core", core, providers: { claude: { installed: true }, codex: { installed: false }, gemini: { installed: true } } } });
+    expect(installed.providers.gemini).toEqual({ installed: true, login: "yes" });
+    expect([installed.geminiInUse, installed.geminiActiveAt]).toEqual([false, null]);
+    // 서버 값이 없으면(runtime null) 설정이 찾아 둔 실행 파일이 있는지만 본다. 설정에 없으면 찾지 않는다.
+    expect((await serverDoctorFacts({ ...base, runtime: null })).providers.gemini).toEqual({ installed: true, login: "yes" });
+    expect((await serverDoctorFacts({ ...base, runtime: null, config: { ...config, geminiBin: join(bin, "no-agy") } })).providers.gemini).toBeUndefined();
+    expect((await serverDoctorFacts({ ...base, runtime: null, config: { ...config, geminiBin: undefined } })).providers.gemini).toBeUndefined();
+    // 쓰는 팀장과 그 상태줄 기록.
+    putGeminiStatus(home, "m_lead", new Date(NOW.getTime() - HOUR), { conversation_id: CONVERSATION, agent_state: "idle" });
+    const used = await serverDoctorFacts({ ...base, runtime: null, geminiMemberIds: ["m_lead", "m_other"] });
+    expect([used.geminiInUse, used.geminiActiveAt]).toEqual([true, new Date(NOW.getTime() - HOUR).toISOString()]);
+    expect(byId(used).gemini).toMatchObject({ state: "ok", detail: "Antigravity CLI 설치됨 · 마지막 대화 1시간 전" });
+  });
+
+  test("명령줄에서 모으기: 설정이 없으면 IAMCEO_GEMINI_BIN, 그것도 없으면 agy 를 찾는다(gemini 라는 이름으로 찾지 않는다)", async () => {
+    const home = temp("iamceo-doctor-gemini-local-");
+    const looked: string[] = [];
+    const bins: unknown[] = [];
+    const probes = {
+      service: async () => ({ state: "unknown" as const }), disk: () => null, tailscaleAddress: () => null, login: () => "unknown" as const,
+      run: async () => ({ code: 1, stdout: "" }),
+      installed: (binary: string) => { looked.push(binary); return binary.endsWith("/agy"); },
+      cliVersions: async (given: unknown) => { bins.push(given); return null; },
+    };
+    const env = { IAMCEO_CLAUDE_BIN: "/x/claude", IAMCEO_CODEX_BIN: "/x/codex", IAMCEO_CORE_BIN: "/x/core" } as NodeJS.ProcessEnv;
+    const byName = await localDoctorFacts({ home, config: null, server: { state: "missing_home" }, env, probes, now: NOW });
+    expect(looked).toContain("agy");
+    expect(looked).not.toContain("gemini");
+    expect(bins.at(-1)).toEqual({ claudeBin: "/x/claude", codexBin: "/x/codex", geminiBin: "agy" });
+    expect(byName.providers.gemini).toBeUndefined();
+    expect([byName.geminiInUse, byName.geminiActiveAt]).toEqual([null, null]);
+    expect(doctorChecks(byName).map(check => check.id)).toEqual([...DOCTOR_CHECK_IDS]);
+    const pinned = await localDoctorFacts({ home, config: null, server: { state: "missing_home" }, env: { ...env, IAMCEO_GEMINI_BIN: "/x/agy" }, probes, now: NOW });
+    expect(bins.at(-1)).toEqual({ claudeBin: "/x/claude", codexBin: "/x/codex", geminiBin: "/x/agy" });
+    expect(pinned.providers.gemini).toEqual({ installed: true, login: "unknown" });
+    expect(doctorChecks(pinned).map(check => check.id)).toContain("gemini");
+  });
+
   test("로그인 기록: Claude 는 oauthAccount·credentials·환경 변수, Codex 는 auth.json. 내용은 읽어 두지 않는다", () => {
     const home = temp("iamceo-doctor-login-");
     const env = {} as NodeJS.ProcessEnv;
@@ -284,11 +484,17 @@ function freshConfig(): Config {
   mkdirSync(join(home, "bin"));
   writeFileSync(claudeBin, "#!/bin/sh\nexit 97\n", { mode: 0o755 });
   // Codex 는 설치되지 않은 Mac 으로 둔다(쓰는 팀장이 있을 때만 문제인지 본다).
-  return { ...loadConfig(env), hosts: ["127.0.0.1"], hostsAuto: true, claudeBin, codexBin: join(home, "no-such-codex") };
+  // Antigravity CLI 도 설치되지 않은 Mac 으로 둔다. 정해 주지 않으면 설정이 이 Mac 의 진짜 agy 를 찾아, agy 가 깔린 Mac 에서만 Gemini 줄이 생긴다.
+  return { ...loadConfig(env), hosts: ["127.0.0.1"], hostsAuto: true, claudeBin, codexBin: join(home, "no-such-codex"), geminiBin: join(home, "no-such-agy") };
 }
 
-async function boot(options: { ready?: boolean } = {}) {
+async function boot(options: { ready?: boolean; agy?: boolean } = {}) {
   const config = freshConfig();
+  if (options.agy) {
+    // Antigravity CLI 가 깔린 Mac: 이 시험 홈에 둔 실행 파일 자리다(부르지 않는다).
+    config.geminiBin = join(config.home, "bin", "agy");
+    writeFileSync(config.geminiBin, "#!/bin/sh\nexit 97\n", { mode: 0o755 });
+  }
   const bus = new Bus();
   const store = new Store(openDb(config.dbPath), bus);
   const orch = new Orchestrator({ config, store, runners: new Map(), notifier: () => {} });
@@ -347,6 +553,37 @@ describe("GET /api/doctor", () => {
     expect(report.checks.find(check => check.id === "server")!.title).toBe("Server");
   });
 
+  test("Gemini: Antigravity CLI 가 깔려 있으면 Codex 다음 줄에 붙고, 쓰는 팀장의 최근 대화가 있으면 정상이다", async () => {
+    const t = await boot({ agy: true });
+    const read = async (lang = "ko") => (await (await t.request(`/api/doctor?lang=${lang}`)).json() as DoctorReport).checks;
+    const idle = await read();
+    expect(idle.map(check => check.id)).toEqual(["server", "engine", "claude", "codex", "gemini", "cli_version", "tailscale", "service", "backup", "disk"]);
+    // 주입한 로그인 사실(yes)을 쓰지 않는다. 쓰는 팀장이 없으니 권하는 것도 없다.
+    expect(idle.find(check => check.id === "gemini")).toEqual({ id: "gemini", state: "unknown", title: "Gemini", detail: "Antigravity CLI 설치됨 · 로그인은 세션을 열 때 확인합니다" });
+    const project = t.store.createProject({ name: "제미나이", cwd: t.config.home });
+    const member = t.store.createMember({ projectId: project.id, handle: "gm", name: "자료 조사", kind: "worker", cli: "gemini" });
+    const waiting = (await read()).find(check => check.id === "gemini")!;
+    expect(waiting.state).toBe("unknown");
+    expect(waiting.fix).toContain("agy를 한 번 실행해");
+    expect((await read("en")).find(check => check.id === "gemini")!.fix).toContain("run agy once in Terminal");
+    putGeminiStatus(t.config.home, member.id, new Date(Date.now() - 5 * 60_000), { conversation_id: CONVERSATION, agent_state: "idle" });
+    expect((await read()).find(check => check.id === "gemini")).toEqual({ id: "gemini", state: "ok", title: "Gemini", detail: "Antigravity CLI 설치됨 · 마지막 대화 5분 전" });
+    // 보관한 프로젝트의 팀장은 '쓰는 팀장'으로 치지 않는다.
+    t.store.patchProject(project.id, { archived: true });
+    expect((await read()).find(check => check.id === "gemini")!.fix).toBeUndefined();
+  });
+
+  test("Gemini: 쓰는 팀장이 있는데 Antigravity CLI 가 없으면 문제다. 팀장이 없으면 줄이 없다", async () => {
+    const t = await boot();
+    expect(((await (await t.request("/api/doctor")).json()) as DoctorReport).checks.some(check => check.id === "gemini")).toBe(false);
+    const project = t.store.createProject({ name: "제미나이", cwd: t.config.home });
+    t.store.createMember({ projectId: project.id, handle: "gm", name: "자료 조사", kind: "worker", cli: "gemini" });
+    const report = await (await t.request("/api/doctor")).json() as DoctorReport;
+    expect(report.checks.find(check => check.id === "gemini")).toMatchObject({ state: "fail", detail: "Gemini를 쓰는 총괄·팀장이 있는데 Antigravity CLI(agy)를 찾지 못했습니다" });
+    // Codex 줄은 Gemini 팀장 때문에 문제가 되지 않는다.
+    expect(report.checks.find(check => check.id === "codex")).toMatchObject({ state: "unknown" });
+  });
+
   test("인증·검증·시작 중", async () => {
     const t = await boot();
     expect((await fetch(`http://127.0.0.1:${t.server.port}/api/doctor`)).status).toBe(401);
@@ -385,7 +622,9 @@ function cliEnv(home: string, extra: Record<string, string> = {}): Record<string
   return {
     ...env, IAMCEO_HOME: home, IAMCEO_PORT: "0", IAMCEO_TEST: "1", HOME: userHome,
     CLAUDE_CONFIG_DIR: join(userHome, ".claude"), CODEX_HOME: join(userHome, ".codex"),
-    IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_CORE_BIN: "/usr/bin/false", ...extra,
+    IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_CORE_BIN: "/usr/bin/false",
+    // Antigravity CLI 는 깔려 있지 않은 Mac 으로 둔다(없는 경로). 물려받은 값이나 이 Mac 의 진짜 agy 를 쓰지 않는다.
+    IAMCEO_GEMINI_BIN: join(userHome, "no-such-agy"), IAMCEO_GEMINI_HOME: join(userHome, "gemini-home"), ...extra,
   };
 }
 
@@ -426,6 +665,26 @@ describe("iamceo doctor", () => {
     const help = await runCli(["help"], cliEnv(home, { IAMCEO_LANG: "ko" }));
     expect(help.stdout).toContain("doctor [--json]");
     expect(help.stdout).toContain("diagnose");
+  }, 30_000);
+});
+
+describe("iamceo doctor: Gemini", () => {
+  test("Antigravity CLI 자리에 가짜 agy 를 두면 Gemini 줄과 버전이 나온다. 서버가 꺼져 있어도, 처음인 Mac 에서도", async () => {
+    const bin = temp("iamceo-doctor-agy-");
+    const agy = join(bin, "agy");
+    // 진짜 agy 처럼 --version 에 버전 번호 한 줄만 찍는다. 다른 인자로 부르면 실패한다(버전 말고는 부르지 않는지 본다).
+    writeFileSync(agy, `#!/bin/sh\necho "$@" >> '${join(bin, "calls")}'\n[ "$1" = "--version" ] || exit 9\necho 1.5.14\n`, { mode: 0o755 });
+    const home = temp("iamceo-doctor-cli-gemini-");
+    updateConfigFile({ accessCode: "code" }, { IAMCEO_HOME: home });
+    const result = await runCli(["doctor", "--json"], cliEnv(home, { IAMCEO_GEMINI_BIN: agy, IAMCEO_LANG: "ko" }));
+    const report = JSON.parse(result.stdout) as DoctorReport;
+    expect(report.checks.map(check => check.id)).toEqual(["server", "engine", "claude", "codex", "gemini", "cli_version", "tailscale", "service", "backup", "disk"]);
+    expect(report.checks.find(check => check.id === "gemini")).toEqual({ id: "gemini", state: "unknown", title: "Gemini", detail: "Antigravity CLI 설치됨 · 1.5.14 · 로그인은 세션을 열 때 확인합니다" });
+    // 처음인 Mac(설정 파일 없음)에서도 환경 변수의 실행 파일을 본다.
+    const fresh = await runCli(["doctor", "--json"], cliEnv(join(temp("iamceo-doctor-fresh-gemini-"), "never-started"), { IAMCEO_GEMINI_BIN: agy, IAMCEO_LANG: "en" }));
+    expect((JSON.parse(fresh.stdout) as DoctorReport).checks.find(check => check.id === "gemini")).toMatchObject({ state: "unknown", detail: "Antigravity CLI installed · 1.5.14 · sign-in is checked when a session starts" });
+    // --version 으로만 불렀다.
+    expect([...new Set(readFileSync(join(bin, "calls"), "utf8").trim().split("\n"))]).toEqual(["--version"]);
   }, 30_000);
 });
 

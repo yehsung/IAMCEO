@@ -81,7 +81,7 @@ export async function createReleaseFixture() {
   await new Promise<void>((resolve, reject) => { peer.once("error", reject); peer.listen(runtime.socketPath, resolve); });
   const env = { IAMCEO_HOME: runtime.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: runtime.socketPath,
     IAMCEO_HERDR_SOCKET: runtime.herdrSocketPath, IAMCEO_CORE_BIN: runtime.bins.coreBin,
-    IAMCEO_CLAUDE_BIN: runtime.bins.claudeBin, IAMCEO_CODEX_BIN: runtime.bins.codexBin };
+    IAMCEO_CLAUDE_BIN: runtime.bins.claudeBin, IAMCEO_CODEX_BIN: runtime.bins.codexBin, IAMCEO_GEMINI_BIN: runtime.bins.geminiBin };
   updateConfigFile({ hosts: ["127.0.0.1"], accessCode: "w10-fixture-only" }, env);
   const config = loadConfig(env);
   let db = openDb(config.dbPath), bus = new Bus(), store = new Store(db, bus);

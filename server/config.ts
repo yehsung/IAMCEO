@@ -4,6 +4,7 @@ import { homedir, networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
 import pkg from "../package.json";
 import coreLock from "../vendor/herdr-core/release-lock.json";
+import { CLI_INFO } from "../shared/types.ts";
 import { withHomeOwner } from "./home-owner.ts";
 import { normalizePushRelayUrl } from "./push/relay-url.ts";
 import { toStorageError } from "./storage-errors.ts";
@@ -20,8 +21,12 @@ export interface ConfigFile {
   hosts?: string[];
   claudeBin?: string;
   codexBin?: string;
+  /** Gemini 팀장이 띄우는 Antigravity CLI 실행 파일. 없으면 `agy`. */
+  geminiBin?: string;
   claudeHome?: string;
   codexHome?: string;
+  /** Antigravity CLI 의 자료 폴더. 없으면 ~/.gemini/antigravity-cli (defaultGeminiHome). */
+  geminiHome?: string;
   coreBin?: string;
   coreSocket?: string;
   /** false 면 서버가 Mac 의 유휴 잠자기를 막지 않는다. 없으면 막는다. */
@@ -46,8 +51,12 @@ export interface Config {
   hostsAuto?: boolean;
   claudeBin: string;
   codexBin?: string;
+  /** Antigravity CLI(`agy`) 실행 파일. 찾았으면 절대 경로, 못 찾았으면 적은 이름 그대로다. */
+  geminiBin?: string;
   claudeHome?: string;
   codexHome?: string;
+  /** 설정(IAMCEO_GEMINI_HOME·config.json)에 적었을 때만 있다. 없으면 쓰는 쪽이 defaultGeminiHome() 을 쓴다. */
+  geminiHome?: string;
   coreBin?: string;
   coreSocket?: string;
   /** 서버가 떠 있는 동안 Mac 의 유휴 잠자기를 막는다. config.json 에서 false 로만 끈다. */
@@ -175,7 +184,7 @@ function validateConfig(value: unknown, path: string): Partial<ConfigFile> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`설정 파일 형식이 잘못되었습니다: ${path}`);
   const file = value as Record<string, unknown>;
   // 옛 herdr 실행기의 소켓 설정(herdrSocket)은 더 읽지 않는다. 파일에 남아 있어도 값을 보지 않고 그대로 둔다.
-  for (const key of ["accessCode", "claudeBin", "codexBin", "coreBin", "coreSocket"]) {
+  for (const key of ["accessCode", "claudeBin", "codexBin", "geminiBin", "coreBin", "coreSocket"]) {
     if (file[key] !== undefined && (typeof file[key] !== "string" || !file[key] || (file[key] as string).includes("\0"))) {
       throw new Error(`설정 파일 필드가 잘못되었습니다(${key}): ${path}`);
     }
@@ -283,6 +292,14 @@ export function resolveCliExecutable(command: string, env: NodeJS.ProcessEnv = p
 }
 
 /**
+ * Antigravity CLI(agy)가 대화·기록을 두는 폴더. IAMCEO_GEMINI_HOME 이 있으면 그 값, 없으면 ~/.gemini/antigravity-cli.
+ * Config.geminiHome 이 비었을 때 쓰는 쪽(실행기·사용량·모델 목록)이 이 함수로 정한다. 읽기만 하는 자리다: agy 가 쓰는 폴더를 옮기지는 못한다.
+ */
+export function defaultGeminiHome(env: NodeJS.ProcessEnv = process.env): string {
+  return env.IAMCEO_GEMINI_HOME || join(env.HOME || homedir(), ".gemini", "antigravity-cli");
+}
+
+/**
  * Prefer a packaged companion or the explicit, pinned local installation. Never install at startup.
  * 앱 묶음 안의 서버(…/runtime/iamceo)는 엔진을 옆의 runtime/Herdr Core.app 안에 둔다(LocalHostService·build-native 와 같은 자리).
  * 그 자리를 모르면 서비스 설정 없이 돈 `iamceo doctor`·`uninstall` 이 엔진을 PATH 에서 찾다가 '실행 엔진 없음'으로 판정한다.
@@ -368,12 +385,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rolesDir,
     claudeHome: env.CLAUDE_CONFIG_DIR || file.claudeHome,
     codexHome: env.CODEX_HOME || file.codexHome,
+    geminiHome: env.IAMCEO_GEMINI_HOME || file.geminiHome,
     accessCode: file.accessCode!,
     port: parsePort(env.IAMCEO_PORT, "IAMCEO_PORT") ?? parsePort(file.port, "config.json") ?? DEFAULT_PORT,
     hosts: Array.isArray(file.hosts) && file.hosts.length > 0 ? file.hosts : defaultHosts(),
     hostsAuto: !(Array.isArray(file.hosts) && file.hosts.length > 0),
     claudeBin: resolveCliExecutable(env.IAMCEO_CLAUDE_BIN || file.claudeBin || "claude", env) ?? env.IAMCEO_CLAUDE_BIN ?? file.claudeBin ?? "claude",
     codexBin: resolveCliExecutable(env.IAMCEO_CODEX_BIN || file.codexBin || "codex", env) ?? env.IAMCEO_CODEX_BIN ?? file.codexBin ?? "codex",
+    geminiBin: resolveCliExecutable(env.IAMCEO_GEMINI_BIN || file.geminiBin || CLI_INFO.gemini.program, env) ?? env.IAMCEO_GEMINI_BIN ?? file.geminiBin ?? CLI_INFO.gemini.program,
     coreBin: env.IAMCEO_CORE_BIN || file.coreBin || defaultCoreBin(),
     coreSocket: env.IAMCEO_CORE_SOCKET || file.coreSocket || join(home, "run", "core.sock"),
     ...(file.keepAwake === false ? { keepAwake: false } : {}),

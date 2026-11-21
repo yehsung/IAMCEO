@@ -58,7 +58,7 @@ class FakeCore implements Runner {
 
 function fixture(timings: Partial<OrchestratorTimings> = {}, env: Record<string, string> = {}) {
   const runtime = createIsolatedRuntime();
-  const config = loadConfig({ IAMCEO_HOME: runtime.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: runtime.socketPath, IAMCEO_CORE_BIN: runtime.bins.coreBin, IAMCEO_CLAUDE_BIN: runtime.bins.claudeBin, IAMCEO_CODEX_BIN: runtime.bins.codexBin, ...env });
+  const config = loadConfig({ IAMCEO_HOME: runtime.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: runtime.socketPath, IAMCEO_CORE_BIN: runtime.bins.coreBin, IAMCEO_CLAUDE_BIN: runtime.bins.claudeBin, IAMCEO_CODEX_BIN: runtime.bins.codexBin, IAMCEO_GEMINI_BIN: runtime.bins.geminiBin, ...env });
   const bus = new Bus(), events: WsEvent[] = [];
   bus.subscribe(event => events.push(event));
   const db = openDb(config.dbPath), store = new Store(db, bus);
@@ -122,7 +122,7 @@ describe("perf-4: 화면 요청은 실행기 정리와 느린 조회를 기다�
     const log = join(runtime.dir, "version-calls"), bin = join(runtime.paths.bin, "versioned-core");
     writeFileSync(bin, `#!/bin/sh\nprintf 'x\\n' >> '${log}'\nprintf 'herdr-core 9.9.9\\n'\n`);
     chmodSync(bin, 0o700);
-    const config = loadConfig({ IAMCEO_HOME: runtime.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: runtime.socketPath, IAMCEO_CORE_BIN: bin, IAMCEO_CLAUDE_BIN: runtime.bins.claudeBin, IAMCEO_CODEX_BIN: runtime.bins.codexBin });
+    const config = loadConfig({ IAMCEO_HOME: runtime.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: runtime.socketPath, IAMCEO_CORE_BIN: bin, IAMCEO_CLAUDE_BIN: runtime.bins.claudeBin, IAMCEO_CODEX_BIN: runtime.bins.codexBin, IAMCEO_GEMINI_BIN: runtime.bins.geminiBin });
     const db = openDb(config.dbPath), store = new Store(db, new Bus());
     const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["core", new FakeCore()]]), providerHomes: runtime.providerHomes, timings: { tickMs: 60_000, healthMs: 60_000 } });
     cleanups.push(async () => { await orch.shutdown(); db.close(); });

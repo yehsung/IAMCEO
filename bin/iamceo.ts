@@ -8,7 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
-import { EFFORTS, type Bootstrap, type Effort, type Member, type Project, type ProjectState } from "../shared/types.ts";
+import { CLI_INFO, EFFORTS, type Bootstrap, type Effort, type Member, type Project, type ProjectState } from "../shared/types.ts";
 import { DEFAULT_PORT, homeDir, detectTailscaleIp, isTailscaleV4, loadConfig, updateConfigFile, type Config } from "../server/config.ts";
 import { cliLang, say } from "../server/cli-text.ts";
 
@@ -1009,15 +1009,23 @@ export async function service(args: string[], dependencies?: ServiceDependencies
   const logDir = join(config.home, "logs");
   const serviceEnv = { ...inherited, ...process.env };
   const env = Object.fromEntries(
-    (["IAMCEO_HOME", "IAMCEO_PORT", "IAMCEO_CLAUDE_BIN", "IAMCEO_CODEX_BIN", "IAMCEO_CORE_BIN", "IAMCEO_CORE_SOCKET", "IAMCEO_LANG"] as const).flatMap((k) => (serviceEnv[k] ? [[k, serviceEnv[k]!]] : [])),
+    (["IAMCEO_HOME", "IAMCEO_PORT", "IAMCEO_CLAUDE_BIN", "IAMCEO_CODEX_BIN", "IAMCEO_GEMINI_BIN", "IAMCEO_GEMINI_HOME", "IAMCEO_CORE_BIN", "IAMCEO_CORE_SOCKET", "IAMCEO_LANG"] as const).flatMap((k) => (serviceEnv[k] ? [[k, serviceEnv[k]!]] : [])),
   );
   // 0.2.6 Y: 새로 설치하는 서버(데이터가 아직 없음)의 첫 실행 언어. 앱은 IAMCEO_LANG 에 화면 언어를 넣어 부른다.
   // 명령줄로 처음 켤 때는 그 터미널의 언어(say 와 같은 규칙)를 적는다. 데이터가 이미 있으면 적지 않는다(쓰던 서버의 설정이 바뀌지 않게).
   if (!env.IAMCEO_LANG && !existsSync(config.dbPath)) env.IAMCEO_LANG = cliLang();
   const claude = config.claudeBin.includes("/") ? config.claudeBin : Bun.which(config.claudeBin);
   const codex = config.codexBin?.includes("/") ? config.codexBin : Bun.which(config.codexBin ?? "codex");
+  // Gemini 팀장이 띄우는 Antigravity CLI. 실행 파일 이름은 agy 다(`gemini` 는 다른 프로그램). 선택 사항이라 없어도 알리지 않는다.
+  // 적힌 자리에 실행 파일이 없으면(지웠거나 다른 방법으로 다시 깔아 자리가 바뀜) 서비스에 적지 않는다: 적어 두면 서버가 없는 경로만 보고,
+  // 적지 않으면 서버가 뜰 때마다 이름(agy)으로 다시 찾는다.
+  const geminiAt = config.geminiBin?.includes("/") ? config.geminiBin : Bun.which(config.geminiBin ?? CLI_INFO.gemini.program);
+  const gemini = geminiAt && existsSync(geminiAt) ? geminiAt : null;
+  if (!gemini) delete env.IAMCEO_GEMINI_BIN;
   const core = config.coreBin?.includes("/") ? config.coreBin : Bun.which(config.coreBin ?? "herdr-core");
-  Object.assign(env, { IAMCEO_LOG_WRITER: "1", IAMCEO_HOME: config.home, ...(claude ? { IAMCEO_CLAUDE_BIN: claude } : {}), ...(codex ? { IAMCEO_CODEX_BIN: codex } : {}), ...(core ? { IAMCEO_CORE_BIN: core } : {}), IAMCEO_CORE_SOCKET: config.coreSocket ?? join(config.home, "run", "core.sock") });
+  Object.assign(env, { IAMCEO_LOG_WRITER: "1", IAMCEO_HOME: config.home, ...(claude ? { IAMCEO_CLAUDE_BIN: claude } : {}), ...(codex ? { IAMCEO_CODEX_BIN: codex } : {}), ...(gemini ? { IAMCEO_GEMINI_BIN: gemini } : {}), ...(core ? { IAMCEO_CORE_BIN: core } : {}), IAMCEO_CORE_SOCKET: config.coreSocket ?? join(config.home, "run", "core.sock") });
+  // agy 의 폴더는 PATH 에 더하지 않는다: 서버는 agy 를 절대 경로(IAMCEO_GEMINI_BIN)로 띄우고, 더하면 agy 가 깔린 Mac 에서만
+  // Claude·Codex 팀장이 부르는 도구(node·bun 등)의 우선순위가 0.2.9 와 달라진다.
   const plist = launchdPlist({ program: dependencies?.program ?? selfCommand("serve"), home, logDir, workingDir: home, env, path: servicePath(home, [claude, codex ?? null, core ?? null]) });
   if (dry) return console.log(say(`쓸 파일: ${plistPath}\n로그: ${join(logDir, "server.log")}\n실행할 명령: launchctl bootstrap ${target} ${plistPath}\n\n${plist}`,
     `File to write: ${plistPath}\nLog: ${join(logDir, "server.log")}\nCommand to run: launchctl bootstrap ${target} ${plistPath}\n\n${plist}`));

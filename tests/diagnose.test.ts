@@ -36,7 +36,8 @@ function seededHome() {
   const home = temp("iamceo-diagnose-");
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: ACCESS }, env);
-  const config: Config = { ...loadConfig(env), hosts: ["127.0.0.1"], hostsAuto: true };
+  // Antigravity CLI(Gemini)는 깔려 있지 않은 Mac 으로 둔다. 정해 주지 않으면 설정이 이 Mac 의 진짜 agy 를 찾아 점검표가 Mac 마다 달라진다.
+  const config: Config = { ...loadConfig(env), hosts: ["127.0.0.1"], hostsAuto: true, geminiBin: join(home, "no-such-agy") };
   const bus = new Bus();
   const store = new Store(openDb(config.dbPath), bus);
   const project = store.createProject({ name: "진단 시험", cwd: home });
@@ -273,7 +274,9 @@ describe("iamceo diagnose", () => {
     for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
     Object.assign(env, { IAMCEO_HOME: t.home, IAMCEO_PORT: "0", IAMCEO_TEST: "1", HOME: userHome, IAMCEO_LANG: "ko",
       CLAUDE_CONFIG_DIR: join(userHome, ".claude"), CODEX_HOME: join(userHome, ".codex"),
-      IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_CORE_BIN: "/usr/bin/false" });
+      IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_CORE_BIN: "/usr/bin/false",
+      // Antigravity CLI(Gemini) 자리도 정해 준다. 물려받은 값이나 이 Mac 에 깔린 진짜 agy 를 점검이 실행하지 않게 한다.
+      IAMCEO_GEMINI_BIN: "/usr/bin/false", IAMCEO_GEMINI_HOME: join(userHome, "gemini-home") });
     const run = async (home: string) => {
       const child = Bun.spawn([process.execPath, BIN, "diagnose"], { env: { ...env, IAMCEO_HOME: home }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
       return { stdout: await new Response(child.stdout).text(), stderr: await new Response(child.stderr).text(), code: await child.exited };

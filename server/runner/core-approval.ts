@@ -92,10 +92,12 @@ const SELECTED_OPTION = /^\s*[│┃]?\s*[❯›]\s*\S/;
  * the conversation reads the same. A dialog is a menu, so a selected option row must sit among the last rows, below
  * the wording. A composer also starts with that mark, so the caller must first rule out a visible input box
  * (`trustDialogLike` in core.ts): a real folder-trust dialog has none.
+ *
+ * selectedOption: 고른 줄의 모양. 기본은 Claude·Codex 의 표시(❯·›)다. Antigravity CLI 는 `> 1. …` 로 그려 부르는 쪽이 그 모양을 넘긴다.
  */
-export function looksLikeFolderTrust(screen: string): boolean {
+export function looksLikeFolderTrust(screen: string, selectedOption: RegExp = SELECTED_OPTION): boolean {
   const lines = screen.replace(ANSI, "").split(/\r?\n/).filter(line => line.trim()).slice(-40);
-  const selected = lines.findLastIndex(line => SELECTED_OPTION.test(line));
+  const selected = lines.findLastIndex(line => selectedOption.test(line));
   if (selected < 1 || lines.length - 1 - selected > 8) return false;
   return TRUST_WORDING.test(lines.slice(0, selected).join("\n"));
 }

@@ -7,6 +7,18 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 0.2.10 — 출시 전
+
+- **Gemini를 쓸 수 있습니다.** 총괄과 팀장을 Google의 Antigravity CLI(`agy`)로 띄웁니다. Claude Code·Codex처럼 내 계정 로그인으로 돕니다. 새 팀장·팀장 실행 설정·새 프로젝트에서 CLI를 Gemini로 고르거나, 총괄에게 Gemini로 띄워 달라고 하면 됩니다. 모델은 Antigravity CLI가 알려 주는 목록 그대로입니다(요금제에 든 Claude·GPT-OSS 모델도 함께 보입니다). 역할 지침, IAMCEO 도구 연결, 사건 기록 훅은 그 세션에만 넣고, `~/.gemini`의 설정과 프로젝트 폴더에는 아무것도 쓰지 않습니다. 옛 Gemini CLI(`gemini` 명령)는 지원하지 않습니다.
+- **Gemini를 쓰기 전에 이 Mac에서 한 번 준비합니다.** [Antigravity CLI](https://antigravity.google/docs/getting-started)를 설치하고 터미널에서 `agy`를 한 번 실행해 로그인과 첫 설정(약관 동의)을 끝냅니다. 끝내지 않은 채 띄운 팀장은 '로그인·첫 설정 필요'로 멈추고, 팀 화면에서 그 팀장의 터미널을 열어 직접 끝낼 수 있습니다(다른 터미널에서 끝냈다면 그 팀장을 재웠다가 다시 깨웁니다). 로그인과 약관 동의 화면에는 IAMCEO가 어떤 키도 보내지 않습니다. 점검표(설정 → AI 모델 → 실행 환경)에는 Antigravity CLI를 설치했거나 Gemini 팀장이 있을 때 Gemini 줄이 생깁니다.
+- **Gemini 팀장이 Claude Code·Codex 팀장과 다른 점입니다.**
+  - 앱의 'AI 계정'에서 로그인하거나 계정을 바꿀 수 없습니다. Antigravity CLI는 브라우저로만 로그인합니다.
+  - 권한 방식이 '위험할 때만 묻기'나 '매번 묻기'일 때 뜨는 승인 창은 결재함 카드로 오지 않습니다. 그 팀장의 터미널에서 답합니다. '위험할 때만 묻기'는 Antigravity의 auto 모드로 띄우는데, 계정이나 환경이 auto를 지원하지 않으면 Antigravity가 '매번 묻기'로 띄웁니다.
+  - 문맥 압축을 요청할 수 없습니다(CLI가 스스로 정리합니다). 사용 한도나 인터넷 장애로 턴이 끝나면 오류로 보고하고, 자동으로 이어 가지 않습니다.
+  - 서브에이전트 모델을 따로 정할 수 없고, effort는 모델을 정했을 때만 고를 수 있습니다(모델마다 받는 effort가 다릅니다).
+- **CLI를 고르는 칸이 셋이 됐습니다.** 칸에는 짧은 이름(Claude·Codex·Gemini)만 두고, 설치되지 않은 CLI는 칸 아래 한 줄로 알립니다('Gemini · 설치 필요'). Antigravity CLI가 없는 Mac에서도 Gemini 칸과 설정의 Gemini 직급 묶음은 보입니다.
+- **앱도 0.2.10으로 올려 주세요.** 0.2.9 이하의 앱은 Gemini 팀장을 Claude 팀장처럼 그립니다(모델 목록·직급 기본값이 Claude 것으로 보입니다). 서버를 0.2.9 이하로 되돌리려면 먼저 Gemini 총괄·팀장을 다른 CLI로 바꾸거나 닫으세요. 옛 서버는 그 세션을 Codex로 띄우려 합니다.
+
 ### 0.2.9 — 2026-11-20
 
 - **Codex 총괄이 서로 상관없는 일을 미루지 않고 바로 나눠 맡깁니다.** 서버가 Codex 세션에 넣는 글 앞에 붙이던 '이 일은 순서대로 하고 서브에이전트를 띄우지 말라'는 줄이 총괄에게도 붙어, Codex 총괄이 팀장에게 일을 나누는 것까지 순서대로 했습니다. 다른 성격의 일을 시켜도 앞 일이 끝날 때까지 새 팀장을 띄우지 않고 예정에만 올려 두었고, 팀장에게 주는 지시에도 '병렬 금지'를 적었습니다. 이제 총괄에게는 자기 서브에이전트만 띄우지 말라고 알립니다. 총괄 지침에도 나누는 기준을 더했습니다: 서로 결과를 기다릴 필요가 없는 일은 지금 맞는 팀장에게 맡기거나 새로 띄워 함께 돌리고('그리고'·'이것도'는 순서를 정한 말이 아닙니다), 한 가지 일에 '팀장·사원'처럼 위아래를 따로 띄우지 않으며(이름에 직급을 붙이지 않습니다), 대표가 서브에이전트·병렬을 말하면 팀장을 더 띄우는 대신 그 팀장의 병렬을 켭니다. 총괄이 대표에게 쓰는 글에서도 화면과 같이 '팀장'이라고 부릅니다(예전에는 '직원'). 바뀐 지침은 새로 여는 세션부터 실립니다.
@@ -177,6 +189,18 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### 0.2.10 — unreleased
+
+- **You can now use Gemini.** The lead and staff can run on Google's Antigravity CLI (`agy`), under your own log-in like Claude Code and Codex. Pick Gemini as the CLI in "Add staff member", a member's run settings or "New project", or ask the lead to start someone on Gemini. The models are exactly the list the Antigravity CLI reports (Claude and GPT-OSS models in your plan appear too). The role instructions, the connection to IAMCEO's tools and the event hooks go into that session only; nothing is written to your `~/.gemini` settings or to the project folder. The older Gemini CLI (the `gemini` command) is not supported.
+- **Set it up once on this Mac before using Gemini.** Install the [Antigravity CLI](https://antigravity.google/docs/getting-started) and run `agy` once in Terminal to sign in and finish the first-run setup (terms). A staff member started before that stops at "Sign-in or setup needed"; you can open that member's terminal on the team screen and finish it there (or, if you finished it in another terminal, put that member to sleep and wake it again). IAMCEO never sends a key to the sign-in and terms screens. The checklist (Settings → AI models → Runtime) gains a Gemini line when the Antigravity CLI is installed or a staff member uses Gemini.
+- **How Gemini staff differ from Claude Code and Codex staff.**
+  - You cannot sign in or switch accounts from "AI accounts" in the app. The Antigravity CLI signs in through the browser only.
+  - With the permission mode set to "ask only when risky" or "ask every time", approval prompts do not arrive as cards in 결재함 (Inbox). Answer them in that member's terminal. "Ask only when risky" starts Antigravity in its auto mode; where your account or environment does not support auto, Antigravity starts in "ask every time" instead.
+  - Context compaction cannot be requested (the CLI tidies its context itself). A turn that ends on a usage limit or a network outage is reported as an error and is not resumed automatically.
+  - There is no separate subagent model, and effort can be chosen only together with a model (each model accepts different efforts).
+- **The CLI picker now has three choices.** It shows short names (Claude, Codex, Gemini), and a CLI that is not installed is named in a line under the picker ("Gemini · needs install"). The Gemini choice and the Gemini rank group in Settings are shown even on a Mac without the Antigravity CLI.
+- **Update the app to 0.2.10 as well.** Apps on 0.2.9 or earlier draw a Gemini staff member like a Claude one (the model list and rank defaults shown are Claude's). Before rolling the server back to 0.2.9 or earlier, switch Gemini leads and staff to another CLI or close them; an older server tries to start those sessions on Codex.
 
 ### 0.2.9 — 2026-11-20
 

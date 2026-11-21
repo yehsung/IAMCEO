@@ -20,6 +20,7 @@ import { classifyTurnError, type TurnErrorKind } from "../api-outage.ts";
 import { HookEventReader, type HookEventRecord } from "./hook-events.ts";
 import { HOOK_COMPARE_FILE } from "./hooks.ts";
 import type { RunnerEvent } from "./types.ts";
+import type { CliProvider } from "../../shared/types.ts";
 
 export { HOOK_COMPARE_FILE };
 export const HOOK_COMPARE_CATEGORIES = ["receipt", "turn_end", "error_kind", "compact", "session"] as const;
@@ -144,7 +145,7 @@ export class HookShadow {
   }
 
   /** 보내기가 전송 영수증과 함께 성공했다(지금 판정: 받았다). Claude 팀장만 센다. */
-  sent(memberId: string, cli: "claude" | "codex", info: { sessionId: string | null; text: string }): void {
+  sent(memberId: string, cli: CliProvider, info: { sessionId: string | null; text: string }): void {
     if (cli !== "claude" || this.stopped) return;
     try {
       const bundle = BUNDLE_RE.exec(info.text)?.[0];
@@ -158,7 +159,7 @@ export class HookShadow {
   }
 
   /** 실행기 사건(관측 정보가 붙은 것). Claude 팀장만 본다. */
-  observe(event: RunnerEvent, cli: "claude" | "codex"): void {
+  observe(event: RunnerEvent, cli: CliProvider): void {
     if (cli !== "claude" || this.stopped) return;
     try {
       const m = this.member(event.memberId);

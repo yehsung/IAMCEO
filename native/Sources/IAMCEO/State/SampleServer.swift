@@ -571,7 +571,7 @@ final class SampleServer: @unchecked Sendable {
     private func writeSettings(_ input: Object, versioned: Bool) -> Reply {
         var settings = bootstrap["settings"] as? Object ?? [:]
         for (key, value) in input {
-            if key == "ranks" || key == "codexRanks", let patch = value as? Object {
+            if key == "ranks" || key == "codexRanks" || key == "geminiRanks", let patch = value as? Object {
                 var ranks = settings[key] as? Object ?? [:]
                 for (rank, change) in patch {
                     var current = ranks[rank] as? Object ?? [:]

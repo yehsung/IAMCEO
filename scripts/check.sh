@@ -27,8 +27,10 @@ shutil.rmtree(sys.argv[1], onerror=unlock)
 PY
 }
 trap cleanup EXIT
-mkdir -p "$CHECK_ROOT"/{home,iamceo,claude,codex,core-state,core-config,work,bin,tmp}
-for name in core claude codex herdr; do
+mkdir -p "$CHECK_ROOT"/{home,iamceo,claude,codex,gemini,core-state,core-config,work,bin,tmp}
+# agy = Antigravity CLI (the Gemini provider). Without a fake, the server's default lookup finds a real
+# /opt/homebrew/bin/agy on a Mac that has it, whatever PATH says (server/config.ts resolveCliExecutable).
+for name in core claude codex agy herdr; do
   printf '#!/bin/sh\nprintf "Isolated check: real runtime disabled\\n" >&2\nexit 97\n' > "$CHECK_ROOT/bin/$name"
   chmod +x "$CHECK_ROOT/bin/$name"
 done
@@ -38,6 +40,7 @@ export HOME="$CHECK_ROOT/home" TMPDIR="$CHECK_ROOT/tmp"
 export IAMCEO_TEST=1 IAMCEO_PORT=0 IAMCEO_HOME="$CHECK_ROOT/iamceo"
 export IAMCEO_HERDR_SOCKET="$CHECK_ROOT/no-herdr.sock" IAMCEO_CORE_SOCKET="$CHECK_ROOT/no-core.sock"
 export IAMCEO_CORE_BIN="$CHECK_ROOT/bin/core" IAMCEO_CLAUDE_BIN="$CHECK_ROOT/bin/claude" IAMCEO_CODEX_BIN="$CHECK_ROOT/bin/codex"
+export IAMCEO_GEMINI_BIN="$CHECK_ROOT/bin/agy" IAMCEO_GEMINI_HOME="$CHECK_ROOT/gemini"
 export HERDR_BIN_PATH="$CHECK_ROOT/bin/herdr" CLAUDE_CONFIG_DIR="$CHECK_ROOT/claude" CODEX_HOME="$CHECK_ROOT/codex"
 export XDG_STATE_HOME="$CHECK_ROOT/core-state" XDG_CONFIG_HOME="$CHECK_ROOT/core-config" XDG_CACHE_HOME="$CHECK_ROOT/cache"
 export CLANG_MODULE_CACHE_PATH="$CHECK_ROOT/clang" SWIFTPM_MODULECACHE_OVERRIDE="$CHECK_ROOT/swift-module"

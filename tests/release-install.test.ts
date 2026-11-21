@@ -85,7 +85,7 @@ esac`);
     PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: home, TMPDIR: join(path, "tmp"),
     FIXTURE_ROOT: path, IAMCEO_INSTALL_DIR: dir, IAMCEO_DOWNLOAD_URL: `file://${release}`, IAMCEO_TEST: "1",
     IAMCEO_HOME: join(path, "iamceo"), IAMCEO_PORT: "0", IAMCEO_CORE_BIN: "/usr/bin/false",
-    IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false",
+    IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_GEMINI_BIN: "/usr/bin/false",
     IAMCEO_CORE_SOCKET: join(path, "no-core.sock"), IAMCEO_HERDR_SOCKET: join(path, "no-herdr.sock"),
     // 문구는 이 값으로 고른다(없으면 LANG). 아래 단언은 한국어 문구를 본다. 영어는 'installer: English' 시험이 본다.
     IAMCEO_LANG: "ko",

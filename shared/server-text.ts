@@ -86,6 +86,8 @@ export const SERVER_TEXTS = {
   "why.usage_model_new_session": { ko: "사용 한도로 멈췄습니다. 모델을 {model:으로} 바꿨지만 이어 열 세션 기록이 없어 새 세션으로 엽니다", en: "stopped at the usage limit. Switched to {model}, but there is no session record to continue, so it opens a new session" },
   "why.usage_account_new_session": { ko: "사용 한도로 멈췄습니다. 다른 계정으로 로그인했지만 이어 열 세션 기록이 없어 새 세션으로 엽니다", en: "stopped at the usage limit. Signed in with another account, but there is no session record to continue, so it opens a new session" },
   "why.login_new_session": { ko: "로그인 오류로 멈췄습니다. 다시 로그인했지만 이어 열 세션 기록이 없어 새 세션으로 엽니다", en: "stopped by a sign-in error. Signed in again, but there is no session record to continue, so it opens a new session" },
+  // 0.2.10: 이어 연 줄 알았던 Gemini(Antigravity CLI) 대화가 실제로는 새 대화였다(재시작 이어가기로 처리했던 실행을 중단으로 다시 알린다).
+  "why.gemini_resume_lost": { ko: "이전 대화를 이어 열지 못해 새 대화로 열렸습니다(앞 대화의 맥락 없음)", en: "the previous conversation couldn't be reopened, so a new one was opened (the earlier context is gone)" },
   // 실행 중단의 까닭(endExecution 의 사유). journal 에는 한국어 문장 그대로 남는다.
   "why.slept": { ko: "팀원을 잠재워 실행을 종료했습니다", en: "the staff member was put to sleep, which ended the run" },
   "why.closed": { ko: "팀원을 닫아 실행을 종료했습니다", en: "the staff member was closed, which ended the run" },
@@ -110,6 +112,9 @@ export const SERVER_TEXTS = {
   "activity.decision_closed_by_answer": { ko: "결재 #{id}를 대표 답 #{answer}에 따라 닫았습니다: {issue}", en: "Closed decision #{id} based on your answer #{answer}: {issue}" },
   "activity.decision_closed_by_answer_group": { ko: "결재 #{id}를 대표 답 #{answer}에 따라 닫았습니다 (같은 그룹)", en: "Closed decision #{id} based on your answer #{answer} (same group)" },
   "activity.restart_reopened": { ko: "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 세션을 이어서 열었습니다", en: "The Mac or the engine restarted; the session that closed was reopened to continue" },
+  // 0.2.10: Gemini(Antigravity CLI)는 이어 열 대화를 열지 못하면 오류 없이 새 대화를 연다. 대화 id 가 바뀐 것으로 안다.
+  "activity.gemini_resume_lost": { ko: "이전 대화를 이어 열지 못해 새 대화로 열렸습니다. 앞 대화의 맥락은 없습니다", en: "Couldn't reopen the previous conversation, so a new one was opened. The earlier context is gone" },
+  "activity.gemini_conversation_changed": { ko: "대화가 새로 열렸습니다. 앞 대화의 맥락은 이어지지 않습니다", en: "A new conversation was opened. The earlier context doesn't carry over" },
   "activity.missing_report_final": { ko: "결과 보고 누락: 보완 요청 뒤에도 결과가 남지 않았습니다", en: "Missing result report: no result even after it was asked for" },
   "activity.missing_report_requested": { ko: "필수 보고가 없어 보고 보완을 요청했습니다", en: "The required report was missing, so it was asked for" },
   "activity.late_receipt": { ko: "늦게 도착한 수신 확인으로 전달을 확정했습니다", en: "A late receipt confirmed the delivery" },
@@ -271,6 +276,7 @@ export const SERVER_TEXTS = {
   "notice.start_slow": { ko: "시작이 늦어지고 있습니다. 터미널을 열어 화면을 확인해 주세요", en: "Starting is taking long. Open the terminal and check the screen" },
   "notice.check_needed.title": { ko: "{name} 확인 필요", en: "{name} needs a check" },
   "notice.trust_unreadable": { ko: "폴더 신뢰 확인 창을 읽지 못했습니다. 터미널을 열어 직접 답해 주세요", en: "Couldn't read the folder trust prompt. Open the terminal and answer it yourself" },
+  "notice.gemini_setup": { ko: "Antigravity CLI의 로그인·첫 설정이 끝나지 않았습니다. 터미널을 열어 직접 끝내 주세요", en: "Antigravity CLI hasn't finished sign-in or first-run setup. Open the terminal and finish it yourself" },
   "notice.approval_prompt": { ko: "승인 창 앞에서 멈췄습니다", en: "Stopped at an approval prompt" },
   "notice.approval_summary": { ko: "{summary} · 결재함에서 승인·거절할 수 있습니다", en: "{summary} · you can approve or deny it in the Inbox" },
   "notice.tool_permission.title": { ko: "{name} 도구 승인", en: "{name} tool approval" },

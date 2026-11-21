@@ -49,6 +49,11 @@ describe("확인된 버전 목록과 견본 폴더", () => {
   test("VERIFIED_CLI_VERSIONS 와 견본 폴더가 정확히 같다(견본 없는 버전을 확인됐다고 하지 않는다)", () => {
     for (const provider of ["claude", "codex"] as const) expect(folders(provider)).toEqual([...VERIFIED_CLI_VERSIONS[provider]].sort());
   });
+  test("Gemini(Antigravity CLI)는 아직 견본 폴더가 없다: 실제 화면을 받기 전에는 손으로 만든 화면만으로 견본을 두지 않는다", () => {
+    // agy 의 화면 판독(server/runner/gemini-screen.ts)은 문서 그림을 바탕으로 했고 그 시험(tests/gemini-screen.test.ts)의 화면도 만든 것이다.
+    // 실제 화면·기록을 받으면 tests/fixtures/cli/gemini/<버전>/ 에 넣고, 위의 Provider·all·screenResults 에 gemini 를 더한 뒤 이 시험을 지운다.
+    expect(existsSync(join(ROOT, "gemini"))).toBe(false);
+  });
   test.each(all)("$provider $version: manifest 가 폴더와 맞고 견본 파일이 모두 있다", ({ provider, version }) => {
     const m = manifest(provider, version);
     expect(m.provider).toBe(provider);

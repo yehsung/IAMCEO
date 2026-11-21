@@ -1,6 +1,184 @@
 {
   "sourceLanguage" : "ko",
   "strings" : {
+    "로그인·첫 설정 필요" : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원. 로그인·첫 설정에서 막힌 팀장의 안내",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign-in or setup needed"
+          }
+        }
+      }
+    },
+    "Antigravity CLI의 로그인·첫 설정이 끝나지 않았습니다. 터미널을 열어 직접 끝내 주세요." : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원. 로그인·첫 설정에서 막힌 팀장의 안내",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Antigravity CLI hasn't finished sign-in or first-run setup. Open the terminal and finish it yourself."
+          }
+        }
+      }
+    },
+    "터미널 열어 직접 끝내기" : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원. 로그인·첫 설정에서 막힌 팀장의 안내",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open the terminal and finish"
+          }
+        }
+      }
+    },
+    "비용은 Claude Code와 Antigravity CLI(Gemini)가 보고한 금액 그대로이며, 구독 요금제라면 실제 청구액과 다를 수 있습니다. Codex는 토큰 수만 보고합니다. 날짜는 서버가 수치를 받은 때로 나누고, %lld일 동안 보관합니다." : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원. 설정 → AI 모델 → 사용량의 묶음 아래 설명(보고에 Gemini 수치가 있을 때)",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Costs are exactly what Claude Code and Antigravity CLI (Gemini) reported and may differ from your actual bill on a subscription plan. Codex reports token counts only. Days follow when the server received the numbers, which are kept for %lld day."
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Costs are exactly what Claude Code and Antigravity CLI (Gemini) reported and may differ from your actual bill on a subscription plan. Codex reports token counts only. Days follow when the server received the numbers, which are kept for %lld days."
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "비용은 Claude Code와 Antigravity CLI(Gemini)가 보고한 금액 그대로이며, 구독 요금제라면 실제 청구액과 다를 수 있습니다. Codex는 토큰 수만 보고합니다. 날짜는 서버가 수치를 받은 때로 나누고, %lld일 동안 보관합니다."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "알 수 없는 CLI" : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unknown CLI"
+          }
+        }
+      }
+    },
+    "팀장은 %@에서 Claude Code·Codex·Gemini로 명령을 실행합니다. 파일을 고치고 지우는 일, 프로그램 설치, git 명령이 포함됩니다. 어떻게 실행할지 골라 주세요. 설정에서 언제든 바꿀 수 있습니다." : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Staff run commands on %@ with Claude Code, Codex and Gemini. That includes editing and deleting files, installing programs and git commands. Choose how they should run. You can change it any time in Settings."
+          }
+        }
+      }
+    },
+    "Gemini 주 세션 입력 기록" : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini main session input log"
+          }
+        }
+      }
+    },
+    "총괄이 일을 받아 Claude Code·Codex·Gemini 팀장을 꾸립니다." : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The lead takes the work and builds a team of Claude Code, Codex and Gemini staff."
+          }
+        }
+      }
+    },
+    "이 앱이 모르는 CLI(%@)를 쓰는 세션입니다. 앱을 새 버전으로 올리면 모델을 고를 수 있습니다." : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This session uses a CLI this app doesn't know (%@). Update the app to choose its model."
+          }
+        }
+      }
+    },
+    "같은 %@ 대화를 새 모델·effort로 이어 엽니다." : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reopens the same %@ conversation with the new model and effort."
+          }
+        }
+      }
+    },
+    "같은 %@ 대화를 새 설정으로 다시 열었습니다." : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reopened the same %@ conversation with the new settings."
+          }
+        }
+      }
+    },
+    "Gemini는 Antigravity CLI(agy)로 일합니다" : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gemini runs on Antigravity CLI (agy)"
+          }
+        }
+      }
+    },
+    "처음 쓴다면 서버 컴퓨터의 터미널에서 agy를 한 번 실행해 로그인과 첫 설정을 끝내 주세요." : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "If this is the first time, run agy once in a terminal on the server computer to sign in and finish its first-time setup."
+          }
+        }
+      }
+    },
+    "Antigravity CLI는 문맥을 스스로 압축합니다. 여기서 압축을 요청하지 않습니다." : {
+      "comment" : "0.2.10 Gemini(Antigravity CLI) 지원",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Antigravity CLI compacts its context on its own. It isn't requested from here."
+          }
+        }
+      }
+    },
     "앱의 메뉴와 안내 글에 쓰는 언어로, 이 기기에만 저장됩니다. 총괄·팀장이 쓰는 보고의 언어는 '보고 언어'에서 따로 정합니다." : {
       "comment" : "W(0.2.5) 앱 화면 언어(설정 → 일반 → 이 기기)",
       "localizations" : {
@@ -217,16 +395,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : " · banners %@ · sounds %@"
-          }
-        }
-      }
-    },
-    " · 설치 필요" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : " · needs install"
           }
         }
       }
@@ -22687,6 +22855,23 @@
         }
       }
     },
+    "server.text.why.gemini_resume_lost" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "the previous conversation couldn't be reopened, so a new one was opened (the earlier context is gone)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이전 대화를 이어 열지 못해 새 대화로 열렸습니다(앞 대화의 맥락 없음)"
+          }
+        }
+      }
+    },
     "server.text.why.slept" : {
       "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
       "localizations" : {
@@ -23040,6 +23225,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 세션을 이어서 열었습니다"
+          }
+        }
+      }
+    },
+    "server.text.activity.gemini_resume_lost" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't reopen the previous conversation, so a new one was opened. The earlier context is gone"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이전 대화를 이어 열지 못해 새 대화로 열렸습니다. 앞 대화의 맥락은 없습니다"
+          }
+        }
+      }
+    },
+    "server.text.activity.gemini_conversation_changed" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A new conversation was opened. The earlier context doesn't carry over"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "대화가 새로 열렸습니다. 앞 대화의 맥락은 이어지지 않습니다"
           }
         }
       }

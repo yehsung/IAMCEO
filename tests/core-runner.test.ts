@@ -84,7 +84,7 @@ describe("core Claude folder trust approval", () => {
     // 폴더 신뢰 창은 160칸 미만의 한 줄 경로만 인정한다. 임시 폴더 경로가 길면 짧은 작업 폴더를 따로 쓴다.
     const cwd = Bun.stringWidth(f.dir) < 120 ? f.dir : mkdtempSync("/tmp/iamceo-ct-");
     const config = loadConfig({ IAMCEO_HOME: join(f.dir, "iamceo"), IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: f.socketPath,
-      IAMCEO_CLAUDE_BIN: "/fake/claude", IAMCEO_CODEX_BIN: "/fake/codex", IAMCEO_CORE_BIN: "/usr/bin/false" });
+      IAMCEO_CLAUDE_BIN: "/fake/claude", IAMCEO_CODEX_BIN: "/fake/codex", IAMCEO_GEMINI_BIN: "/fake/agy", IAMCEO_CORE_BIN: "/usr/bin/false" });
     const db = openDb(config.dbPath); const store = new Store(db, new Bus());
     const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]),
       providerHomes: { claudeHome: join(f.dir, "claude-home"), codexHome: join(f.dir, "codex-home") }, timings: { healthMs: 1, tickMs: 60000 } });
@@ -1740,7 +1740,7 @@ test("한도 메뉴가 사라져도 OSC blocked가 계속되면 대기 상한 �
 test("관리 턴 도중 OSC blocked 한도 메뉴는 실행 자리를 풀고 Esc 뒤 이어가기를 실제로 전달한다", async () => {
   const f = await fixture();
   const config = loadConfig({ IAMCEO_HOME: join(f.dir, "iamceo"), IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: f.socketPath,
-    IAMCEO_CLAUDE_BIN: "/fake/claude", IAMCEO_CODEX_BIN: "/fake/codex", IAMCEO_CORE_BIN: "/usr/bin/false" });
+    IAMCEO_CLAUDE_BIN: "/fake/claude", IAMCEO_CODEX_BIN: "/fake/codex", IAMCEO_GEMINI_BIN: "/fake/agy", IAMCEO_CORE_BIN: "/usr/bin/false" });
   const db = openDb(config.dbPath), store = new Store(db, new Bus());
   const runner = f.runner(20, { recoveryStore: store });
   const orch = new Orchestrator({ config, store, runners: new Map([["core", runner]]), providerHomes: { claudeHome: join(f.dir, "claude-home"), codexHome: join(f.dir, "codex-home") }, timings: { tickMs: 60000, healthMs: 60000 } });

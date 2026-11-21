@@ -21,7 +21,7 @@ afterEach(async () => { for (const stop of stops.splice(0).reverse()) await stop
 function config(): Config {
   const home = mkdtempSync("/private/tmp/iamceo-ops-");
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0", IAMCEO_HERDR_SOCKET: join(home, "no-herdr.sock"),
-    IAMCEO_CORE_SOCKET: join(home, "no-core.sock"), IAMCEO_CORE_BIN: "/usr/bin/false", IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false" };
+    IAMCEO_CORE_SOCKET: join(home, "no-core.sock"), IAMCEO_CORE_BIN: "/usr/bin/false", IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_GEMINI_BIN: "/usr/bin/false" };
   updateConfigFile({ hosts: ["127.0.0.1"] }, env);
   return loadConfig(env);
 }

@@ -6,7 +6,7 @@
 
 **AI 코딩 에이전트를 회사처럼 부리세요. 당신은 말하고, 결정만 합니다.**
 
-Claude Code·Codex 세션 여럿을 총괄과 팀장으로 나눠 일을 맡기고,<br/>
+Claude Code·Codex·Gemini 세션 여럿을 총괄과 팀장으로 나눠 일을 맡기고,<br/>
 Mac과 iPhone 한 화면에서 지시하고 결재합니다.
 
 [![최신 릴리스](https://img.shields.io/github/v/release/yehsung/IAMCEO?style=flat-square&color=8b5cf6&label=release)](https://github.com/yehsung/IAMCEO/releases/latest)
@@ -25,7 +25,7 @@ Mac과 iPhone 한 화면에서 지시하고 결재합니다.
 - **결과물은 자료에** — 문서·표·이미지·영상·HTML 페이지를 경로가 아니라 앱 안에서 바로 엽니다.
 - **자리를 떠도 계속** — iPhone으로 지시하고 결재합니다. Mac이 깨어 있는 동안 일은 멈추지 않습니다. iPhone 알림은 개발자가 운영하는 작은 중계를 거칩니다 → [알림](#알림)
 - **기록은 내 Mac에** — 대화·결재·자료는 내 Mac의 SQLite에 남습니다. AI 계정을 바꿔도 그대로입니다.
-- **해 둔 설정을 그대로 이어 씁니다** — 공식 Claude Code·Codex CLI가 내 로그인으로 그대로 돕니다. 설정 파일에 적어 둔 설정, MCP 서버, 스킬, `CLAUDE.md`는 그대로 적용됩니다. → [무엇이 다른가](#무엇이-다른가)
+- **해 둔 설정을 그대로 이어 씁니다** — 공식 Claude Code·Codex·Antigravity CLI가 내 로그인으로 그대로 돕니다. 설정 파일에 적어 둔 설정, MCP 서버, 스킬, `CLAUDE.md`는 그대로 적용됩니다. → [무엇이 다른가](#무엇이-다른가)
 - **바퀴를 다시 만들지 않았습니다** — 공식 CLI·herdr-core·MCP·SQLite·Tailscale은 그대로 쓰고, 그 위에서 '회사처럼 일하게 하는' 부분만 만들었습니다. → [설계](#어떻게-돌아가나)
 
 Mac·iPhone 네이티브 앱을 사용합니다. iOS 앱은 iPhone 전용이며 iPad는 지원하지 않습니다. 웹 버전은 2026-11-10 제거했으며 기존 앱의 API 계약은 유지합니다.
@@ -38,9 +38,9 @@ brew install --cask yehsung/tap/iamceo
 
 또는 `curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh | sh` · [릴리스에서 DMG 받기](https://github.com/yehsung/IAMCEO/releases/latest)
 
-**필요한 것:** Apple Silicon Mac(macOS 14 이상), 설치하고 로그인한 [Claude Code](https://claude.com/claude-code). [Codex CLI](https://github.com/openai/codex)는 선택입니다. AI는 각자의 계정과 사용 한도로 돕니다.
+**필요한 것:** Apple Silicon Mac(macOS 14 이상), 설치하고 로그인한 [Claude Code](https://claude.com/claude-code). [Codex CLI](https://github.com/openai/codex)와 Gemini를 쓰는 [Antigravity CLI](https://antigravity.google/docs/getting-started)(0.2.10부터)는 선택입니다. AI는 각자의 계정과 사용 한도로 돕니다.
 
-**시작하기 전에 알아 둘 것:** 총괄과 팀장은 기본으로 승인 창에서 멈추지 않고 명령을 실행합니다(Claude Code는 `bypassPermissions` 방식, Codex는 승인과 샌드박스를 건너뛰는 방식). 이 Mac에서 처음 시작할 때 세 가지 중 하나를 고릅니다. 묻지 않기(기본 선택), 위험할 때만 묻기, 매번 묻기입니다. 나중에 설정에서 바꿀 수 있습니다. 서버가 강제하는 것과 약속일 뿐인 것은 [누가 결정하나](#누가-결정하나)에, 무엇을 믿고 무엇을 막는지는 [보안 설명서](docs/security.md)에 있습니다.
+**시작하기 전에 알아 둘 것:** 총괄과 팀장은 기본으로 승인 창에서 멈추지 않고 명령을 실행합니다(Claude Code는 `bypassPermissions` 방식, Codex는 승인과 샌드박스를 건너뛰는 방식, Antigravity CLI는 `--dangerously-skip-permissions`). 이 Mac에서 처음 시작할 때 세 가지 중 하나를 고릅니다. 묻지 않기(기본 선택), 위험할 때만 묻기, 매번 묻기입니다. 나중에 설정에서 바꿀 수 있습니다. 서버가 강제하는 것과 약속일 뿐인 것은 [누가 결정하나](#누가-결정하나)에, 무엇을 믿고 무엇을 막는지는 [보안 설명서](docs/security.md)에 있습니다.
 
 ## 빠른 시작
 
@@ -128,6 +128,7 @@ brew install --cask yehsung/tap/iamceo
   - Claude Code: 문맥 사용량을 읽으려고 상태줄을 한 겹 감쌉니다(내 상태줄 명령은 그대로 실행됩니다). 입력칸의 추천 문구는 끕니다.
   - Claude Code: 세션 시작, 입력 접수, 턴 끝, 오류 종류, 압축을 CLI가 직접 `~/.iamceo/run/events`에 한 줄씩 남기는 훅을 이 세션에만 더합니다. 글 본문은 남기지 않습니다. 지금은 IAMCEO의 판단과 맞는지 비교만 하고, 내 훅은 그대로 둡니다.
   - Codex: 여러 에이전트 기능을 켜고, 시작할 때의 업데이트 확인을 끕니다. 역할 지침은 `developer_instructions`로 넘기므로, 이 세션에서는 `config.toml`에 적어 둔 같은 항목을 대신합니다.
+  - Gemini(Antigravity CLI): 역할 지침, IAMCEO 도구 연결, 사건 기록 훅을 `~/.iamceo/run` 안의 세션 전용 폴더에 두고 `--add-dir`로 넘깁니다. 문맥 사용량과 대화 ID를 읽으려고 이 세션의 상태줄을 IAMCEO 것으로 바꾸고(내 상태줄 명령은 이 세션에서 보이지 않습니다), 팁과 설문을 끕니다. `~/.gemini`의 설정과 프로젝트 폴더에는 아무것도 쓰지 않습니다.
 
 **하지 않는 것**
 
@@ -144,7 +145,7 @@ flowchart LR
     APP["Mac · iPhone 앱<br/>(SwiftUI)"] -- "REST · WebSocket<br/>Tailscale" --> D["IAMCEO 서버<br/>전달 대기열 · 결재 · 자료"]
     D --- DB[("SQLite")]
     D -- "터미널 잡기" --> CORE["herdr-core"]
-    CORE --> L["총괄<br/>Claude Code"] & W["팀장<br/>Claude Code · Codex"]
+    CORE --> L["총괄<br/>Claude Code"] & W["팀장<br/>Claude Code · Codex · Gemini"]
     L & W -- "MCP 도구<br/>post · ask · file · team_assign" --> D
     classDef own fill:#8b5cf6,stroke:#6d28d9,color:#ffffff
     classDef reuse fill:#f4f1fa,stroke:#b8a9d9,color:#1f1633
@@ -158,7 +159,7 @@ flowchart LR
 
 | 맡은 일 | 쓰는 것 | 그래서 얻는 것 |
 |---|---|---|
-| AI와 코딩 도구 | 공식 [Claude Code](https://claude.com/claude-code) · [Codex CLI](https://github.com/openai/codex) | 내 구독과 로그인을 그대로 씁니다. API 키가 필요 없고 IAMCEO 때문에 드는 요금도 없습니다. CLI에 새 기능이 나오면 그대로 따라옵니다. |
+| AI와 코딩 도구 | 공식 [Claude Code](https://claude.com/claude-code) · [Codex CLI](https://github.com/openai/codex) · [Antigravity CLI](https://antigravity.google/docs/getting-started) | 내 구독과 로그인을 그대로 씁니다. API 키가 필요 없고 IAMCEO 때문에 드는 요금도 없습니다. CLI에 새 기능이 나오면 그대로 따라옵니다. |
 | 터미널 붙잡기 | [herdr-core](https://github.com/herdrdev/herdr-core) | 앱을 닫거나 서버를 다시 켜도 세션이 살아 있습니다. |
 | AI와 주고받기 | [MCP](https://modelcontextprotocol.io) 표준 규약 | 화면 글자를 긁지 않습니다. 보고와 요청이 도구 호출로 와서 전부 기록으로 남습니다. |
 | 서버와 데이터 | [Bun](https://bun.sh) · SQLite | DB 서버를 따로 설치하지 않습니다. 데이터는 내 Mac의 폴더 하나(`~/.iamceo`: SQLite DB와 첨부 파일)에 있고, 서버가 하루에 한 번 검증한 백업을 만듭니다. 실행에 필요한 외부 패키지는 2개뿐입니다. |
@@ -177,7 +178,7 @@ flowchart LR
 
 ### 설계 원칙
 
-- **공식 CLI를 고치지 않습니다.** Claude Code와 Codex가 내 계정 로그인으로 대화형 터미널에서 돕니다. IAMCEO는 역할 지침과 MCP 연결, 그 세션에만 쓰는 상태줄·사건 기록 훅만 더하고, CLI의 전역 설정 파일은 건드리지 않습니다.
+- **공식 CLI를 고치지 않습니다.** Claude Code, Codex, Antigravity CLI가 내 계정 로그인으로 대화형 터미널에서 돕니다. IAMCEO는 역할 지침과 MCP 연결, 그 세션에만 쓰는 상태줄·사건 기록 훅만 더하고, CLI의 전역 설정 파일은 건드리지 않습니다.
 - **세션은 앱과 서버보다 오래 삽니다.** herdr-core가 터미널을 붙잡고 있어서, 앱을 닫거나 서버를 다시 켜도 일은 이어집니다.
 - **상태를 추측하지 않습니다.** 일하는 중인지 끝났는지는 CLI가 남기는 기록으로 판단합니다. 알 수 없으면 자동 입력을 멈추고 확인을 요청합니다.
 - **보고는 화면 긁기가 아니라 도구 호출입니다.** 보고(`post`), 결재 요청(`ask`), 자료(`file`), 일 맡기기(`team_assign`)가 모두 기록으로 남습니다.

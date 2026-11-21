@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 // T(F6): 설정 → AI 모델의 '사용량'(GET /api/usage). 팀원·프로젝트·날짜별로 CLI 가 보고한 값을 그대로 보인다.
-// 비용은 Claude Code 가 보고한 금액이고 Codex 는 토큰만 보고한다. 앱은 아무것도 계산해 채우지 않는다(없으면 없다고 보인다).
+// 비용은 Claude Code 가(Gemini 팀장은 Antigravity CLI 가) 보고한 금액이고 Codex 는 토큰만 보고한다. 앱은 아무것도 계산해 채우지 않는다(없으면 없다고 보인다).
 // 옛 서버는 경로를 모른다(404): 그때 이 묶음은 보이지 않는다.
 
 /// CLI 가 보고한 값의 합. 그 범위에서 보고한 기록이 없으면 nil(0 과 다르다).
@@ -33,7 +33,7 @@ struct UsageMemberRow: Decodable, Sendable, Equatable, Identifiable {
     var name: String
     /// root · conductor · worker
     var kind: String
-    /// claude · codex(도중에 CLI 를 바꾸면 둘)
+    /// claude · codex · gemini(도중에 CLI 를 바꾸면 여럿)
     var providers: [String]
     /// 팀원을 닫아 명부에 없다.
     var removed: Bool
@@ -99,7 +99,7 @@ struct UsageDayRow: Decodable, Sendable, Equatable, Identifiable {
 /// 계정 한도의 마지막 사용률(계정 전체 값이라 팀원별로 나누지 않는다).
 struct UsageLimitWindow: Decodable, Sendable, Equatable, Identifiable {
     var provider: String
-    /// Claude: five_hour · seven_day(_opus 등), Codex: primary · secondary
+    /// Claude: five_hour · seven_day(_opus 등), Codex: primary · secondary, Gemini: 한도 묶음의 이름 그대로
     var window: String
     var windowMinutes: Int?
     var usedPct: Double
@@ -189,7 +189,12 @@ enum UsageText {
     }
 
     /// 한도 창의 이름. 모르는 창이면 nil(그 창은 보이지 않는다).
+    /// Gemini 는 Antigravity CLI 가 알려 준 한도 묶음의 이름을 그대로 쓴다(창 길이를 알려 주지 않는다).
     static func windowLabel(_ limit: UsageLimitWindow) -> String? {
+        if limit.provider == RankSettingsCLI.gemini.rawValue {
+            let name = limit.window.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        }
         let model: String? = {
             guard limit.provider == "claude", let range = limit.window.range(of: #"^(five_hour|seven_day)_"#, options: .regularExpression) else { return nil }
             let rest = limit.window[range.upperBound...]
@@ -263,8 +268,18 @@ enum UsageText {
         report.from.isEmpty || report.from == report.to ? dayLabel(report.to, now: now) : "\(dayLabel(report.from, now: now)) – \(dayLabel(report.to, now: now))"
     }
 
-    static func footnote(retentionDays: Int) -> String {
-        String(localized: "비용은 Claude Code가 보고한 금액 그대로이며, 구독 요금제라면 실제 청구액과 다를 수 있습니다. Codex는 토큰 수만 보고합니다. 날짜는 서버가 수치를 받은 때로 나누고, \(retentionDays)일 동안 보관합니다.")
+    /// `gemini`: 이 보고에 Gemini 의 수치가 들어 있다. 그때만 Antigravity CLI 를 함께 적는다(없으면 예전 문장 그대로다).
+    static func footnote(retentionDays: Int, gemini: Bool = false) -> String {
+        if gemini {
+            return String(localized: "비용은 Claude Code와 Antigravity CLI(Gemini)가 보고한 금액 그대로이며, 구독 요금제라면 실제 청구액과 다를 수 있습니다. Codex는 토큰 수만 보고합니다. 날짜는 서버가 수치를 받은 때로 나누고, \(retentionDays)일 동안 보관합니다.")
+        }
+        return String(localized: "비용은 Claude Code가 보고한 금액 그대로이며, 구독 요금제라면 실제 청구액과 다를 수 있습니다. Codex는 토큰 수만 보고합니다. 날짜는 서버가 수치를 받은 때로 나누고, \(retentionDays)일 동안 보관합니다.")
+    }
+
+    /// 이 보고에 Gemini 의 수치(팀원 줄이나 한도)가 있는가.
+    static func reportsGemini(_ report: UsageReport) -> Bool {
+        let gemini = RankSettingsCLI.gemini.rawValue
+        return report.members.contains { $0.providers.contains(gemini) } || report.limits.contains { $0.provider == gemini }
     }
 }
 

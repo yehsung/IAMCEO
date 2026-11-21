@@ -24,6 +24,8 @@ function cliEnv(home: string, extra: Record<string, string> = {}): Record<string
     IAMCEO_HOME: home, IAMCEO_PORT: "0", IAMCEO_HERDR_SOCKET: join(home, "no-herdr.sock"),
     IAMCEO_CORE_SOCKET: join(home, "no-core.sock"), IAMCEO_CORE_BIN: "/usr/bin/false",
     IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false",
+    // Antigravity CLI(Gemini) 자리도 정해 준다. 비워 두면 설정이 이 Mac 에 깔린 진짜 agy 를 찾는다.
+    IAMCEO_GEMINI_BIN: "/usr/bin/false", IAMCEO_GEMINI_HOME: join(home, "gemini"),
     CLAUDE_CONFIG_DIR: join(home, "claude"), CODEX_HOME: join(home, "codex"), IAMCEO_TEST: "1", ...extra };
 }
 

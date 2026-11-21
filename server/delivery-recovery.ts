@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { memberConfig, type Delivery, type DeliveryEvidence, type DeliveryNoticeItem, type DeliveryNoticePage, type DeliveryNoticePageOptions, type DeliveryNotices, type DeliveryRecoveryRequest, type DeliveryRecoveryResult, type Member, type MemberDeliverySummary, type Message, type UnassignedRecoveryRequest, type UnassignedRecoveryResult } from "../shared/types.ts";
+import { memberConfig, staffConfig, type Delivery, type DeliveryEvidence, type DeliveryNoticeItem, type DeliveryNoticePage, type DeliveryNoticePageOptions, type DeliveryNotices, type DeliveryRecoveryRequest, type DeliveryRecoveryResult, type Member, type MemberDeliverySummary, type Message, type UnassignedRecoveryRequest, type UnassignedRecoveryResult } from "../shared/types.ts";
 import { ApiError, type Store } from "./store.ts";
 import { ERROR_CODES } from "../shared/error-codes.ts";
 import { textRef } from "../shared/server-text.ts";
@@ -46,6 +46,17 @@ const CHECK_MS = [1_000, 3_000, 10_000, 30_000, 60_000];
 const RETRY_MS = [2_000, 10_000, 30_000];
 const STOP_NOTE = ERROR_CODES.note_stopped.ko;
 const PHYSICAL = ["prepared", "write_started", "unknown"];
+/**
+ * Gemini(Antigravity CLI)의 수신 증거는 훅 기록이다(runner/gemini-hooks.ts readGeminiDeliveryEvidence). 표지를 찾지 못한 까닭의 코드를
+ * 대표에게 선택지(중복 위험을 알고 다시 보내기)를 주는 아는 사유로 옮긴다. 옮기지 않으면 모르는 사유로 남아 '다시 확인'·'그만 보내기'만 보이고
+ * 그동안 그 팀장의 전달 줄이 막힌다. 훅 기록을 볼 수 없던 것은 '기록 없음', 보았지만 받았는지 정하지 못한 것은 '기록으로 확정 못 함'이다.
+ */
+const GEMINI_LOG_MISSING = ["hooks_off", "no_baseline", "hook_log_missing"];
+const GEMINI_LOG_INCOMPLETE = ["marker_not_in_hook_log", "hook_log_rotated", "hook_log_unreadable", "hook_log_untrusted"];
+function geminiLogReason(evidence: DeliveryEvidence | undefined): "log_missing" | "log_incomplete" | null {
+  if (evidence?.source !== "gemini_log" || evidence.verdict !== "unknown") return null;
+  return GEMINI_LOG_MISSING.includes(evidence.code) ? "log_missing" : GEMINI_LOG_INCOMPLETE.includes(evidence.code) ? "log_incomplete" : null;
+}
 const CHECK_NOTE = ERROR_CODES.note_checking.ko;
 const requestSchema = z.discriminatedUnion("action", [
   z.strictObject({ operationId: z.uuid(), expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), action: z.literal("recheck") }),
@@ -128,8 +139,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   }
   private member(member: Member): RunnerMember {
     const settings = this.store.getSettings();
-    return { ...member, ...memberConfig(member, settings.ranks, settings.codexRanks), sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration,
-      subagentModel: (member.cli === "codex" ? settings.codexRanks : settings.ranks).staff.model, permissionMode: settings.permissionMode };
+    // 직급표는 그 팀장의 CLI 것이다(Gemini 팀장에게 Claude 직급의 모델 이름을 넘기지 않는다).
+    return { ...member, ...memberConfig(member, settings.ranks, settings.codexRanks, settings.geminiRanks), sessionGeneration: this.store.memberRevisions(member.id).sessionGeneration,
+      subagentModel: staffConfig(member.cli, settings).model, permissionMode: settings.permissionMode };
   }
 
   /** Capture before the first external write; never infer a source version during retry. */
@@ -322,7 +334,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   private loadRepair(memberId: string, request: DeliveryRepair): DeliveryDispatch | null {
     const dispatch = this.store.getDispatch(request.dispatchId);
     const member = this.store.getMember(memberId);
-    if (!dispatch || !this.validDispatch(dispatch) || !member || dispatch.memberId !== memberId || (this.store.requireProject(member.projectId).archived || !this.store.requireProject(member.projectId).runnerEnabled) || this.store.inputState(memberId).lease || dispatch.identity.sessionGeneration !== this.store.memberRevisions(memberId).sessionGeneration || dispatch.identity.sessionId !== member.sessionId || dispatch.identity.terminalId !== member.paneId || request.expectedSessionGeneration !== dispatch.identity.sessionGeneration || request.expectedSessionId !== dispatch.identity.sessionId || request.expectedTerminalId !== dispatch.identity.terminalId) return null;
+    if (!dispatch || !this.validDispatch(dispatch) || !member || dispatch.memberId !== memberId || (this.store.requireProject(member.projectId).archived || !this.store.requireProject(member.projectId).runnerEnabled) || this.store.inputState(memberId).lease || dispatch.identity.sessionGeneration !== this.store.memberRevisions(memberId).sessionGeneration || (!this.sessionFree(dispatch) && dispatch.identity.sessionId !== member.sessionId) || dispatch.identity.terminalId !== member.paneId || request.expectedSessionGeneration !== dispatch.identity.sessionGeneration || (!this.sessionFree(dispatch) && request.expectedSessionId !== dispatch.identity.sessionId) || request.expectedTerminalId !== dispatch.identity.terminalId) return null;
     if (dispatch.items.some(item => {
       const d = this.store.requireDelivery(item.deliveryId);
       const r = this.record(d.id);
@@ -438,7 +450,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       if (latest.has(dispatch.dispatchId) || !["prepared", "write_started", "unknown"].includes(dispatch.transportState)) continue;
       const member = this.store.requireMember(dispatch.memberId);
       const runner = this.options.runner(member);
-      if (!runner?.inspectDelivery || !this.validDispatch(dispatch) || member.sessionId !== dispatch.identity.sessionId || this.store.memberRevisions(member.id).sessionGeneration !== dispatch.identity.sessionGeneration) continue;
+      if (!runner?.inspectDelivery || !this.validDispatch(dispatch) || (!this.sessionFree(dispatch) && member.sessionId !== dispatch.identity.sessionId) || this.store.memberRevisions(member.id).sessionGeneration !== dispatch.identity.sessionGeneration) continue;
       let inspection: DeliveryInspection;
       leaseChecked = false;
       try { inspection = await runner.inspectDelivery(this.member(member), dispatch); }
@@ -474,7 +486,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
           const current = this.store.requireDelivery(id);
           if (received.has(id)) this.received(current, inspection.snapshot?.composer === "matches", inspection.evidence);
           else if (current.status === "delivered" && this.record(id).reason === "duplicate_draft") {
-            if (dispatch && this.sameIdentity(dispatch.identity, inspection.snapshot?.identity) && inspection.snapshot?.composer === "empty") this.received(current, false, inspection.evidence);
+            if (dispatch && this.sameTerminal(dispatch, inspection.snapshot?.identity) && inspection.snapshot?.composer === "empty") this.received(current, false, inspection.evidence);
           } else this.observe(current, dispatch, inspection);
         }
         for (const id of ids) {
@@ -591,7 +603,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     const scanning = code === "scan_pending" && r.phase !== "needs_owner";
     const reason = absent ? (r.autoAttempts >= 3 ? "retry_exhausted" : "complete_range_without_marker")
       : ["identity_changed", "session_unbound", "unsupported_schema"].includes(code) ? code
-      : ["file_missing", "permission_denied"].includes(code) ? "log_missing" : "log_incomplete";
+      : ["file_missing", "permission_denied"].includes(code) ? "log_missing" : geminiLogReason(inspection.evidence[0]) ?? "log_incomplete";
     this.store.updateDeliveryRecovery(d.id, r.version, { phase: scanning ? "checking" : "needs_owner", reason: scanning ? r.reason ?? "inflight_unsettled" : reason, checkCount: r.checkCount + 1,
       lastCheckedAt: this.iso(), nextCheckAt: this.iso(this.now() + (scanning ? CHECK_MS[0] : 60_000)), evidence: inspection.evidence });
     this.projectStatus(d, "held", scanning ? CHECK_NOTE : note(reason, inspection.evidence));
@@ -631,7 +643,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   }
   private settlePhysical(dispatch: DeliveryDispatch, inspection: DeliveryInspection): void {
     const snapshot = inspection.snapshot;
-    if (!snapshot || !this.sameIdentity(dispatch.identity, snapshot.identity) || snapshot.ownership !== "verified" || inspection.quiescence !== "settled" || snapshot.originalWrite === "unresolved") return;
+    if (!snapshot || !this.sameTerminal(dispatch, snapshot.identity) || snapshot.ownership !== "verified" || inspection.quiescence !== "settled" || snapshot.originalWrite === "unresolved") return;
     const current = this.store.getDispatch(dispatch.dispatchId)!;
     if (["prepared", "write_started", "unknown"].includes(current.transportState)) this.store.updateDispatch(current.dispatchId, current.transportState, snapshot.originalWrite === "not_written" || snapshot.originalWrite === "rejected" ? "rejected" : "accepted");
   }
@@ -647,9 +659,21 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     return !!b && a.terminalId === b.terminalId && a.sessionId === b.sessionId && a.sessionGeneration === b.sessionGeneration &&
       (!a.process || !!b.process && a.process.pid === b.process.pid && a.process.startedAt === b.process.startedAt);
   }
+  /**
+   * 이 봉투의 신원 대조에서 대화(세션) id 를 빼는가. Gemini(Antigravity CLI) 봉투만 그렇다: agy 는 첫 글을 받을 때 대화 id 를 스스로 정해,
+   * 첫 전달의 봉투에는 id 가 없고(null) 서버는 그 뒤에야 알게 된다(터미널 안에서 대화를 새로 열면 바뀌기도 한다). id 까지 견주면 결과를 모르는
+   * 첫 전달은 언제나 '세션이 바뀜'이 되어 자동으로도, 대표의 동의로도 다시 보낼 수 없다. 세션 세대와 터미널은 그대로 견준다(실행기의 판정과 같다).
+   * Claude·Codex 봉투는 지금처럼 세션 id 까지 견준다.
+   */
+  private sessionFree(dispatch: DeliveryDispatch): boolean { return dispatch.cli === "gemini"; }
+  /** 봉투가 묶인 터미널이 지금 본 터미널인가. Claude·Codex 는 sameIdentity 그대로이고, Gemini 봉투는 대화 id 를 빼고 견준다(sessionFree). */
+  private sameTerminal(dispatch: DeliveryDispatch, identity?: RunnerTerminalIdentity): boolean {
+    if (!this.sessionFree(dispatch)) return this.sameIdentity(dispatch.identity, identity);
+    return !!identity && this.sameIdentity({ ...dispatch.identity, sessionId: identity.sessionId }, identity);
+  }
   private safe(dispatch: DeliveryDispatch, inspection: DeliveryInspection): boolean {
     const s = inspection.snapshot;
-    return !!s && this.sameIdentity(dispatch.identity, s.identity) && s.ownership === "verified" && ["idle", "done"].includes(s.status) && !s.blockedReason && !s.leaseActive && s.mutation === "none" && s.externalInput === false && s.inputEpoch !== null && s.identity.terminalId !== null && inspection.quiescence === "settled" && ["settled", "not_written", "rejected"].includes(s.originalWrite);
+    return !!s && this.sameTerminal(dispatch, s.identity) && s.ownership === "verified" && ["idle", "done"].includes(s.status) && !s.blockedReason && !s.leaseActive && s.mutation === "none" && s.externalInput === false && s.inputEpoch !== null && s.identity.terminalId !== null && inspection.quiescence === "settled" && ["settled", "not_written", "rejected"].includes(s.originalWrite);
   }
   private observe(d: Delivery, dispatch: DeliveryDispatch | null, inspection: DeliveryInspection): void {
     let r = this.record(d.id);
@@ -666,7 +690,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     let reason = inspection.evidence[0]?.code ?? "inflight_unsettled";
     if (["partial_log", "partial_line", "scan_incomplete"].includes(reason)) reason = "log_incomplete";
     if (["file_missing", "permission_denied"].includes(reason)) reason = "log_missing";
-    if (dispatch && s && !this.sameIdentity(dispatch.identity, s.identity) || s?.status === "gone") reason = "session_lost";
+    // Gemini(Antigravity CLI): 훅 기록에서 표지를 찾지 못한 까닭도 같은 두 사유로 옮긴다(대표가 다시 보내기를 고를 수 있게).
+    reason = geminiLogReason(inspection.evidence[0]) ?? reason;
+    if (dispatch && s && !this.sameTerminal(dispatch, s.identity) || s?.status === "gone") reason = "session_lost";
     let phase: DeliveryRecoveryRecord["phase"] = r.phase === "needs_owner" ? "needs_owner" : "checking";
     let nextCheckAt = this.iso(this.now() + (scanning ? CHECK_MS[0] : CHECK_MS[Math.min(r.checkCount, CHECK_MS.length - 1)]));
     const retry = this.store.getDeliveryRetry(d.id);
@@ -761,7 +787,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     if (r.phase !== "needs_owner") return ["recheck", "stop_retry"];
     if (r.reason === "duplicate_draft") return ["recheck", "stop_retry"];
     const dispatch = this.latest(d);
-    const retry = dispatch && this.validDispatch(dispatch) && this.sourceValid(dispatch, d) && (["retry_exhausted", "log_missing", "log_incomplete", "unsupported_schema"].includes(r.reason ?? "") || r.evidence.some(e => e.code === "complete_range_without_marker" && e.verdict === "absent" && e.complete)) && this.store.memberRevisions(d.memberId).sessionGeneration === dispatch.identity.sessionGeneration && this.store.requireMember(d.memberId).sessionId === dispatch.identity.sessionId;
+    const retry = dispatch && this.validDispatch(dispatch) && this.sourceValid(dispatch, d) && (["retry_exhausted", "log_missing", "log_incomplete", "unsupported_schema"].includes(r.reason ?? "") || r.evidence.some(e => e.code === "complete_range_without_marker" && e.verdict === "absent" && e.complete)) && this.store.memberRevisions(d.memberId).sessionGeneration === dispatch.identity.sessionGeneration && (this.sessionFree(dispatch) || this.store.requireMember(d.memberId).sessionId === dispatch.identity.sessionId);
     return retry ? ["recheck", "retry_with_risk", "stop_retry"] : ["recheck", "stop_retry"];
   }
 

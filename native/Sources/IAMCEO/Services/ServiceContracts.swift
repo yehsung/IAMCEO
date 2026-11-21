@@ -90,6 +90,8 @@ struct SettingsPatchRequest: Encodable, Sendable {
     var permissionMode: String? = nil
     var ranks: [String: RankConfigPatch]? = nil
     var codexRanks: [String: RankConfigPatch]? = nil
+    /// Gemini 직급을 고쳤을 때만 싣는다. 이 칸을 모르는 서버에서는 Gemini 직급을 고칠 수 없어 실리지 않는다.
+    var geminiRanks: [String: RankConfigPatch]? = nil
     var maxConcurrentTurns: Int? = nil
     var compactAtPct: Int? = nil
     var contextWindowDefault: Int? = nil

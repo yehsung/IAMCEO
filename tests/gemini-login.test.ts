@@ -427,6 +427,37 @@ describe("Gemini 줄의 요금제", () => {
     expect(latestGeminiPlan(store, config.home, Date.parse("2026-11-22T01:30:00.000Z"))).toBe("Pro");
     expect(readFileSync(geminiStatusPath(config.home, b.id), "utf8")).not.toContain(EMAIL);
   });
+
+  test("다른 계정으로 바꾼 뒤에는 지금 Gemini 계정 세대로 띄운(다시 연) 팀장의 기록만 본다: 아직 옛 세션으로 도는 팀장의 요금제를 섞지 않는다", () => {
+    const config = freshConfig();
+    const store = new Store(openDb(config.dbPath), new Bus());
+    cleanups.push(() => store.db.close());
+    const project = store.createProject({ name: "요금제 세대", cwd: config.home });
+    const fresh = store.createMember({ projectId: project.id, handle: "a", name: "가", kind: "worker", cli: "gemini" });
+    const stale = store.createMember({ projectId: project.id, handle: "b", name: "나", kind: "worker", cli: "gemini" });
+    const write = (id: string, plan: string, at: string) => {
+      const path = geminiStatusPath(config.home, id);
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, JSON.stringify(geminiStatusFromPayload(id, { plan_tier: plan }, new Date(at))));
+    };
+    const applied = (id: string, account?: number) => store.setAppliedConfig(id, { model: null, effort: null, staffModel: null, staffEffort: null, ...(account ? { account } : {}) });
+    // 오케스트레이터가 저장한 계정 세대(cliLoggedIn): Gemini 는 2세대째.
+    store.saveApiRecovery("cli_accounts", { claude: { epoch: 0, identity: null }, codex: { epoch: 0, identity: null }, gemini: { epoch: 2, identity: "g-new" } });
+    applied(fresh.id, 2);
+    applied(stale.id, 1);
+    write(fresh.id, "Pro", "2026-11-22T01:00:00.000Z");
+    // 옛 세션(1세대)이 로그인 뒤에도 옛 계정의 요금제로 기록을 쓴다.
+    write(stale.id, "Free", "2026-11-22T02:00:00.000Z");
+    expect(latestGeminiPlan(store, config.home, 0)).toBe("Pro");
+    // 그 팀장이 새 세대로 다시 열리고 새 기록을 쓰면 그것을 본다.
+    applied(stale.id, 2);
+    write(stale.id, "Ultra", "2026-11-22T03:00:00.000Z");
+    expect(latestGeminiPlan(store, config.home, 0)).toBe("Ultra");
+    // 세대를 모르면(저장한 적이 없다) 예전처럼 세대 0 이다: 적용 기록에 계정 칸이 없는 팀장만 본다.
+    store.saveApiRecovery("cli_accounts", { claude: { epoch: 0, identity: null }, codex: { epoch: 0, identity: null } });
+    applied(fresh.id);
+    expect(latestGeminiPlan(store, config.home, 0)).toBe("Pro");
+  });
 });
 
 describe("GET /api/cli-accounts · /api/cli-login (Gemini)", () => {

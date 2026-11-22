@@ -261,14 +261,25 @@ const GONE_ROUTES: [method: string, path: string, message: string][] = [
   ["POST", "/api/members/:id/reopen-with-tools", "'도구 붙여 다시 열기'는 없어졌습니다. 이전 실행기의 세션은 그 터미널에서 확인하고, 이어서 맡기려면 팀장을 새로 만드세요"],
 ];
 
+/** 오케스트레이터가 저장한 지금 Gemini 계정 세대(api_recovery_state 의 cli_accounts.gemini.epoch, Orchestrator.cliLoggedIn). 없거나 모양이 다르면 0. */
+function geminiAccountEpoch(store: Store): number {
+  try {
+    const epoch = store.loadApiRecovery<{ gemini?: { epoch?: unknown } }>("cli_accounts")?.gemini?.epoch;
+    return typeof epoch === "number" && Number.isInteger(epoch) && epoch > 0 ? epoch : 0;
+  } catch { return 0; }
+}
+
 /**
  * 0.2.10 AI 계정의 Gemini 줄에 보일 요금제: 떠 있는 Gemini 팀장들의 상태줄 기록(<홈>/context/gemini/<팀장>.json) 가운데 since(ms) 뒤에 쓰인 것의
- * 최신 plan_tier. 기록에는 계정 메일이 없다(상태줄 래퍼가 옮기지 않는다). 없으면 null.
+ * 최신 plan_tier. 지금 Gemini 계정 세대로 띄운(다시 연) 팀장의 기록만 본다: 다른 계정으로 바꾼 뒤에도 턴을 마칠 때까지 옛 세션(옛 계정)으로 도는 팀장의
+ * 요금제를 섞지 않는다. 기록에는 계정 메일이 없다(상태줄 래퍼가 옮기지 않는다). 없으면 null.
  */
 export function latestGeminiPlan(store: Store, home: string, since: number): string | null {
   let best: { at: number; plan: string } | null = null;
+  const epoch = geminiAccountEpoch(store);
   for (const member of store.listAllMembers()) {
     if (member.cli !== "gemini") continue;
+    if ((store.getAppliedConfig(member.id)?.account ?? 0) !== epoch) continue;
     const record = readGeminiStatus(home, member.id);
     const at = record ? Date.parse(record.at) : NaN;
     if (!record?.planTier || !Number.isFinite(at) || at <= since) continue;

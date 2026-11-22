@@ -171,6 +171,7 @@ private struct TeamStartPanel: View {
 // MARK: - Work list
 
 private struct TeamWorkList: View {
+    @Environment(AppStore.self) private var store
     let work: [WorkItem]
     /// nil = 전체 (everything not done).
     @State private var filter: WorkSection?
@@ -215,6 +216,21 @@ private struct TeamWorkList: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                    } else if active == .done, store.canLoadOlderWork || store.olderDone.loadingWork {
+                        // 0.2.10 창 묶음: 오래전에 끝낸 업무는 눌러서 더 받는다.
+                        RowDivider(inset: 0)
+                        let loading = store.olderDone.loadingWork
+                        Button { Task { await store.loadOlderDoneWork() } } label: {
+                            Text(loading ? String(localized: "이전 완료를 불러오는 중") : String(localized: "이전 완료 더 보기"))
+                                .font(CEFont.note.weight(.medium)).foregroundStyle(loading ? CE.ink2 : CE.accent)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(loading)
+                        if let error = store.olderDone.error, !loading {
+                            Text(error).font(CEFont.secondary).foregroundStyle(CE.danger).frame(maxWidth: .infinity).padding(.bottom, 8)
+                        }
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 4)
@@ -227,7 +243,10 @@ private struct TeamWorkList: View {
         showAll = false
     }
 
-    private func count(_ section: WorkSection) -> Int { work.filter { $0.sec == section.rawValue }.count }
+    /// 0.2.10 창 묶음이면 완료 칸은 최근 것만 와서, 완료 수는 서버가 센 전체 수를 쓴다.
+    private func count(_ section: WorkSection) -> Int {
+        section == .done && store.stateWindow != nil ? store.doneWorkTotal : work.filter { $0.sec == section.rawValue }.count
+    }
 
     /// A chip that emptied out (its last item moved) falls back to 전체.
     private var effectiveFilter: WorkSection? {
@@ -239,6 +258,8 @@ private struct TeamWorkList: View {
         let sections = WorkSection.allCases
         func rank(_ item: WorkItem) -> Int { sections.firstIndex { $0.rawValue == item.sec } ?? sections.count }
         if let filter {
+            // 0.2.10 창 묶음: 완료 칸은 창 묶음 + '더 보기'로 받은 것을 최근 끝낸 순서로(서버와 같은 순서라 더 받은 것이 아래에 붙는다).
+            if filter == .done, let done = store.windowedDoneWork { return done }
             let list = work.filter { $0.sec == filter.rawValue }
             if filter == .done { return list.sorted { ($0.doneAt ?? $0.updatedAt) > ($1.doneAt ?? $1.updatedAt) } }
             return list.sorted { $0.order < $1.order }

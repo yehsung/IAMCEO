@@ -495,7 +495,7 @@ struct InboxView: View {
                 latest: current,
                 asker: asker(shown),
                 // 0.2.7: 근거 자료가 새 판으로 바뀌면 서버가 열린 카드의 fileId 를 옮긴다(카드의 판은 그대로). 지금 값을 쓴다.
-                fileTitle: (current ?? shown).fileId.flatMap { fileID in store.files.first { $0.id == fileID }?.title },
+                fileTitle: (current ?? shown).fileId.flatMap { fileID in store.file(id: fileID)?.title },
                 wide: wide,
                 locked: !gateOpen,
                 lockHint: lockHint,
@@ -595,7 +595,7 @@ struct InboxView: View {
                     if !decision.detail.isEmpty { MarkdownText(text: decision.detail, size: 14.5, lineHeight: 1.6).foregroundStyle(CE.ink) }
                     if !decision.images.isEmpty { ImageStrip(images: decision.images) }
                     if let fileID = decision.fileId {
-                        FileChip(title: store.files.first { $0.id == fileID }?.title) { router.openFile(fileID) }
+                        FileChip(title: store.file(id: fileID)?.title) { router.openFile(fileID) }
                     }
                 }
                 .padding(.vertical, 12).padding(.horizontal, 14)

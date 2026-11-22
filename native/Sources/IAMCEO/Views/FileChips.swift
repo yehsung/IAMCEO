@@ -8,7 +8,7 @@ struct FileChips: View {
     var body: some View {
         ChipFlow(spacing: 6) {
             ForEach(FileLinks.unique(fileIDs), id: \.self) { id in
-                let file = store.files.first { $0.id == id }
+                let file = store.file(id: id)
                 LinkChip(icon: fileKindIcon(file?.kind ?? "file"), label: String(localized: "자료"),
                          title: file?.title ?? String(localized: "자료 열기"), help: String(localized: "자료 열기")) {
                     router.openFile(id)

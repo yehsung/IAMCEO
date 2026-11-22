@@ -7,6 +7,12 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 0.2.10 — 출시 전
+
+- **오래 쓴 프로젝트도 이벤트마다 받는 양이 늘지 않습니다.** 새 앱은 프로젝트 상태를 받을 때 끝난 할 일·완료 업무를 최근 것(최근 끝낸 50개, 오늘 끝낸 것은 모두)만, 자료는 옛 판 없이 받습니다. 홈 '완료한 할 일'과 팀 '업무 › 완료'의 끝에 '이전 완료 더 보기'가 있고, 옛 판은 '이전 판'이나 보고의 링크로 열면 그때 받습니다. 업무가 바뀔 때 오는 실시간 알림도 같이 줄었습니다. 이미 설치한 앱은 지금과 같은 양을 받지만, 서버가 자료 본문을 읽지도 않게 되어 상태를 만드는 시간은 함께 줄었습니다.
+- **자료가 수천 개여도 자료 화면이 멈추지 않습니다.** 종류를 고른 채 목록을 그릴 때 줄마다 목록 전체를 다시 정렬하던 것을 고쳤습니다(자료 5천 개에서 한 번 그리는 데 수 초 걸리던 것이 2밀리초 안으로).
+- **iPhone이 마지막으로 본 상태를 크기 때문에 버리지 않습니다.** 2MB를 넘으면 예전에는 아무것도 남기지 않아 연결이 안 될 때 빈 화면이 떴습니다. 이제 오래된 것부터 덜어 최근 상태를 남기고, 그때는 '기기에는 최근 것만 남겨 두었습니다'라고 알립니다.
+
 ### 0.2.9 — 2026-11-20
 
 - **Codex 총괄이 서로 상관없는 일을 미루지 않고 바로 나눠 맡깁니다.** 서버가 Codex 세션에 넣는 글 앞에 붙이던 '이 일은 순서대로 하고 서브에이전트를 띄우지 말라'는 줄이 총괄에게도 붙어, Codex 총괄이 팀장에게 일을 나누는 것까지 순서대로 했습니다. 다른 성격의 일을 시켜도 앞 일이 끝날 때까지 새 팀장을 띄우지 않고 예정에만 올려 두었고, 팀장에게 주는 지시에도 '병렬 금지'를 적었습니다. 이제 총괄에게는 자기 서브에이전트만 띄우지 말라고 알립니다. 총괄 지침에도 나누는 기준을 더했습니다: 서로 결과를 기다릴 필요가 없는 일은 지금 맞는 팀장에게 맡기거나 새로 띄워 함께 돌리고('그리고'·'이것도'는 순서를 정한 말이 아닙니다), 한 가지 일에 '팀장·사원'처럼 위아래를 따로 띄우지 않으며(이름에 직급을 붙이지 않습니다), 대표가 서브에이전트·병렬을 말하면 팀장을 더 띄우는 대신 그 팀장의 병렬을 켭니다. 총괄이 대표에게 쓰는 글에서도 화면과 같이 '팀장'이라고 부릅니다(예전에는 '직원'). 바뀐 지침은 새로 여는 세션부터 실립니다.
@@ -177,6 +183,12 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### 0.2.10 — unreleased
+
+- **Long-running projects no longer send more data on every event.** The new app receives finished to-dos and finished work as only the recent ones (the last 50 finished, plus everything finished today) and files without their older versions. "Show earlier finished" at the end of Home's finished to-dos and Team's Work › Done loads the rest, and an older version is fetched when you open it from "Previous versions" or a report link. Live updates for work changes shrank the same way. Apps already installed receive the same data as before, but the server no longer reads file bodies it does not send, so building the project state got faster for them too.
+- **The Files screen stays responsive with thousands of files.** With a kind filter on, every row re-sorted the whole list; one redraw of 5,000 files took several seconds and now takes under 2 milliseconds.
+- **iPhone keeps the last state it saw even when it grows large.** Over 2 MB it used to save nothing, so an unreachable server showed an empty screen. It now trims the oldest items first and keeps the recent state, and says "Only recent items were kept on this device."
 
 ### 0.2.9 — 2026-11-20
 

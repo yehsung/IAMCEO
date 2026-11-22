@@ -27,7 +27,7 @@ extension AppStore {
 
     private func showLastSeen(_ snapshot: LastSeenSnapshot) {
         let namespace = snapshot.namespace
-        lastSeen = LastSeenInfo(namespace: namespace, savedAt: snapshot.savedAt, serverID: snapshot.serverID)
+        lastSeen = LastSeenInfo(namespace: namespace, savedAt: snapshot.savedAt, serverID: snapshot.serverID, partial: snapshot.partial == true)
         lastSeenAnnounced = false
         // 같은 서버의 초안·전송 기록·화면 위치를 그대로 쓴다. 쓰기는 연결 전이라 어차피 막힌다.
         writeNamespace = namespace

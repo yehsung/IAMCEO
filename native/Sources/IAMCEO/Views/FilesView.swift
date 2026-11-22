@@ -74,40 +74,31 @@ struct FilesView: View {
     @FocusState private var listFocused: Bool
     #endif
 
+    /// 0.2.10: 목록 계산(정렬·옛 판 빼기·종류·보일 목록)은 입력이 바뀔 때만 한 번 한다(FileListModel). 예전에는 그릴 때마다 여러 번,
+    /// 종류를 골랐으면 목록 줄마다 다시 해서 자료 수의 제곱으로 느려졌다(5천 개에 한 번 그리는 데 수 초).
+    @State private var listCache = FileListCache()
+    private var model: FileListModel {
+        listCache.model(store: ObjectIdentifier(store), revision: store.filesRevision, files: store.files, kind: kind, query: query, results: searchResults)
+    }
     /// Newest first: server order desc, then creation time desc.
-    private var allFiles: [FileDoc] {
-        store.files.sorted { $0.order != $1.order ? $0.order > $1.order : $0.createdAt > $1.createdAt }
-    }
+    private var allFiles: [FileDoc] { model.all }
     /// 0.2.7: 목록에는 최신 판만. 옛 판은 최신 판의 '이전 판'으로, 보고·결재의 링크로는 그대로 열린다(allFiles).
-    private var listedFiles: [FileDoc] { FileVersions.listed(allFiles) }
+    private var listedFiles: [FileDoc] { model.listed }
     /// A kind filter whose files disappeared falls back to 전체.
-    private var activeKind: String? {
-        guard let kind, listedFiles.contains(where: { $0.kind == kind }) else { return nil }
-        return kind
-    }
+    private var activeKind: String? { model.activeKind }
     private var query: String { search.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var shown: [FileDoc] {
-        if !query.isEmpty, let searchResults {
-            return FileSearchPresentation(results: searchResults).files(listedFiles, kind: activeKind)
-        }
-        return listedFiles.filter { file in
-            (activeKind == nil || file.kind == activeKind)
-                && FileLinks.matches(file, body: nil, query: query)
-        }
-    }
-    private var kindCounts: [String: Int] { listedFiles.reduce(into: [:]) { $0[$1.kind, default: 0] += 1 } }
+    private var shown: [FileDoc] { model.shown }
+    private var kindCounts: [String: Int] { model.kindCounts }
     /// Kinds present, in chip order; unknown future kinds go last.
-    private var presentKinds: [String] {
-        let kinds = Set(listedFiles.map(\.kind))
-        return fileKindOrder.filter(kinds.contains) + kinds.subtracting(fileKindOrder).sorted()
-    }
+    private var presentKinds: [String] { model.presentKinds }
     /// Filtering by kind only helps when there are two kinds to tell apart (web rule).
     private var showsChips: Bool { presentKinds.count >= 2 }
     /// The web has no search. It appears once the list is long enough to need one, and stays while it holds text.
     private var showsSearch: Bool { true }
     /// A linked file opens regardless of the filter; with nothing linked the first visible file is shown.
     private var selectedFile: FileDoc? {
-        if let id = router.fileID { return allFiles.first { $0.id == id } }
+        // 0.2.10 창 묶음에서 빠진 옛 판(보고·결재의 링크)은 받아 둔 것으로 연다(아래 task 가 받는다).
+        if let id = router.fileID { return model.byID[id] ?? store.extraFiles[id] }
         return shown.first
     }
     private var openDecisionsByFile: [String: Int] {
@@ -136,11 +127,15 @@ struct FilesView: View {
             search = ""; kind = nil; searchResults = nil; arrivals = FileListArrivalState()
             listPreview = nil; listPreviewResource = nil
         }
-        .onChange(of: listedFiles.map(\.id), initial: true) { _, ids in
+        .onChange(of: model.listedIDs, initial: true) { _, ids in
             arrivals.update(ids)
             if wide { router.fileID = FileLinks.pinnedSelection(current: router.fileID, visibleIDs: shown.map(\.id)) }
         }
-        .task(id: "\(store.selectedProjectID ?? ""):\(store.isArchive):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(query):\(allFiles.map(\.id).joined(separator: ","))") { await searchBodies() }
+        .task(id: "\(store.selectedProjectID ?? ""):\(store.isArchive):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(query):\(model.allIDsKey)") { await searchBodies() }
+        // 0.2.10: 링크로 연 자료가 목록에 없으면(창 묶음에서 빠진 옛 판) 그 판 묶음을 받는다.
+        .task(id: "\(router.fileID ?? ""):\(store.filesRevision)") {
+            if let id = router.fileID, model.byID[id] == nil, store.extraFiles[id] == nil { await store.loadFileChain(id: id) }
+        }
         .task(id: store.api.map(ObjectIdentifier.init)) {
             listPreview = nil; listPreviewResource = nil
             host = await FileHostConnection.current(store.api)
@@ -240,7 +235,7 @@ struct FilesView: View {
                                     listFocused = true
                                     #endif
                                 } label: {
-                                    FileRow(file: file, openDecisions: counts[file.id] ?? 0, selected: selected, searchResult: searchResults?.first { $0.id == file.id })
+                                    FileRow(file: file, openDecisions: counts[file.id] ?? 0, selected: selected, searchResult: model.resultsByID[file.id])
                                 }
                                 // web .fl-row: radius 15, hover white .06, the selected row is the rail's violet drop.
                                 .buttonStyle(RowButtonStyle(selected: selected, radius: 15))
@@ -325,7 +320,7 @@ struct FilesView: View {
                             ForEach(Array(shown.enumerated()), id: \.element.id) { index, file in
                                 if index > 0 { RowDivider(inset: 14) }
                                 Button { router.fileID = file.id } label: {
-                                    FileRow(file: file, openDecisions: counts[file.id] ?? 0, chevron: true, searchResult: searchResults?.first { $0.id == file.id })
+                                    FileRow(file: file, openDecisions: counts[file.id] ?? 0, chevron: true, searchResult: model.resultsByID[file.id])
                                 }
                                 .buttonStyle(RowButtonStyle(radius: 0))
                             }
@@ -438,7 +433,7 @@ struct FilesView: View {
     private func share(_ file: FileDoc) async {
         guard let api = store.api else { return }
         do {
-            let full = store.isArchive ? file : try await store.fileBody(id: file.id)
+            let full = store.isArchive && !file.body.isEmpty ? file : try await store.fileBody(id: file.id)
             let result: FileResource
             if full.kind == "artifact" {
                 result = try FileResource(api: api, data: Data(try await FileResources.artifact(full.id, api: api).utf8), name: full.title + ".html")
@@ -452,7 +447,7 @@ struct FilesView: View {
     private func quickLook(_ file: FileDoc) async {
         guard let api = store.api else { return }
         do {
-            let full = store.isArchive ? file : try await store.fileBody(id: file.id)
+            let full = store.isArchive && !file.body.isEmpty ? file : try await store.fileBody(id: file.id)
             let resource: FileResource
             if full.kind == "artifact" {
                 // Quick Look receives source text. Executable HTML stays inside SandboxedHTML.
@@ -576,12 +571,19 @@ private struct RowThumb: View {
 private struct FileDetailScreen: View {
     @Environment(AppStore.self) private var store
     let fileID: String
+    @State private var loadingChain = false
     var body: some View {
-        let file = store.files.first { $0.id == fileID }
+        // 0.2.10: 창 묶음에서 빠진 옛 판(보고·결재의 링크)은 받아 둔 것으로 연다.
+        let file = store.file(id: fileID)
         Group {
             if let file {
                 // web .fl-panel--phone: the reader sits on a glass panel, not straight on the aurora.
                 FileReader(file: file, framed: true)
+            } else if loadingChain {
+                ScrollView {
+                    EmptyTile(loading: true, title: String(localized: "자료를 불러오는 중입니다"))
+                        .ceContentColumn()
+                }
             } else {
                 ScrollView {
                     EmptyTile(icon: "questionmark.folder", title: String(localized: "찾을 수 없는 자료입니다"), detail: String(localized: "목록에서 다시 골라 주세요."))
@@ -593,6 +595,12 @@ private struct FileDetailScreen: View {
         // The reader shows the full, selectable title itself; the bar names the kind so it is not said twice.
         .navigationTitle(file.map { fileKindName($0.kind) } ?? String(localized: "자료"))
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: "\(fileID):\(store.filesRevision)") {
+            guard store.file(id: fileID) == nil, store.stateWindow != nil else { return }
+            loadingChain = true
+            await store.loadFileChain(id: fileID)
+            loadingChain = false
+        }
     }
 }
 #endif
@@ -621,7 +629,8 @@ private struct FileBodyReader: View {
     @State private var failure: String?
     @State private var retry = 0
     var body: some View {
-        let direct = store.isArchive
+        // 보관 상태는 예전에는 본문째 왔다. 0.2.10 보관 상태 lite(capabilities.archiveLite)는 본문이 없어 다른 자료처럼 읽는다.
+        let direct = store.isArchive && !file.body.isEmpty
         let cached = store.api.flatMap { FileBodyMemory.shared.get(file.id, api: $0) }
         let resolved = direct ? file : full ?? cached ?? file
         FileReaderContent(file: resolved, framed: framed,
@@ -770,17 +779,20 @@ private struct FileReaderContent: View {
 
     /// 옛 판이면 새 판으로 가는 안내, 최신 판이면 이전 판 목록. 판 갈이가 없으면 아무것도 없다.
     @ViewBuilder private var versionBlock: some View {
-        let newest = FileVersions.newest(of: file, in: store.files)
+        // 0.2.10 창 묶음은 옛 판을 목록에 싣지 않는다: 받아 둔 옛 판까지 함께 보고(store.versionFiles), 모자라면 판 묶음을 받는다.
+        let files = store.versionFiles
+        let newest = FileVersions.newest(of: file, in: files)
+        Group {
         if newest.id != file.id {
             // 몇 번째 판인지도 밝힌다('이전 판' 줄의 '판 N'과 같은 번호).
-            let number = FileVersions.number(of: file, in: store.files)
+            let number = FileVersions.number(of: file, in: files)
             // 좁으면(영어 iPhone) '새 판 보기'를 글 아래로 내려 단추 글·제목을 자르거나 꺾지 않는다(0.2.7 화면 재확인 N1).
             InlineNotice(tone: .attention, icon: "clock.arrow.circlepath",
                          title: number.map { String(localized: "옛 판입니다 · 판 \($0)") } ?? String(localized: "옛 판입니다"),
                          detail: String(localized: "고친 판이 있습니다: \(newest.title.isEmpty ? String(localized: "제목 없는 자료") : newest.title)"),
                          actionTitle: String(localized: "새 판 보기"), action: { router.openFile(newest.id) }, wrapsAction: true)
         } else {
-            let older = FileVersions.previous(of: file, in: store.files)
+            let older = FileVersions.previous(of: file, in: files)
             if !older.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("이전 판 \(older.count)개").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
@@ -801,6 +813,10 @@ private struct FileReaderContent: View {
                     }
                 }
             }
+        }
+        }
+        .task(id: "\(file.id):\(store.filesRevision)") {
+            if store.needsFileChain(file) { await store.loadFileChain(id: file.id) }
         }
     }
 
@@ -3155,3 +3171,67 @@ private struct FileActivitySheet: View {
     }
 }
 #endif
+
+
+// MARK: - List model (0.2.10)
+
+/// 자료 목록 계산을 한 번에: 정렬(최신 먼저), 옛 판 빼기(목록에는 최신 판만), 고른 종류(사라졌으면 전체), 보일 목록, 종류별 수.
+/// FilesView 는 같은 입력이면 앞서 만든 것을 다시 쓴다(FileListCache). 결과는 예전 계산과 같다(UXFilesTests 가 견준다).
+struct FileListModel {
+    let all: [FileDoc]
+    let listed: [FileDoc]
+    let activeKind: String?
+    let shown: [FileDoc]
+    let kindCounts: [String: Int]
+    let presentKinds: [String]
+    let listedIDs: [String]
+    /// 검색을 다시 할 때를 가르는 열쇠(모든 판의 id). 예전 task id 와 같은 글자다.
+    let allIDsKey: String
+    let byID: [String: FileDoc]
+    let resultsByID: [String: FileSearchResult]
+
+    init(files: [FileDoc], kind: String?, query: String, searchResults: [FileSearchResult]?) {
+        let all = files.sorted { $0.order != $1.order ? $0.order > $1.order : $0.createdAt > $1.createdAt }
+        let listed = FileVersions.listed(all)
+        let active = kind.flatMap { kind in listed.contains { $0.kind == kind } ? kind : nil }
+        self.all = all
+        self.listed = listed
+        activeKind = active
+        if !query.isEmpty, let searchResults {
+            shown = FileSearchPresentation(results: searchResults).files(listed, kind: active)
+        } else {
+            shown = listed.filter { file in (active == nil || file.kind == active) && FileLinks.matches(file, body: nil, query: query) }
+        }
+        let counts = listed.reduce(into: [String: Int]()) { $0[$1.kind, default: 0] += 1 }
+        kindCounts = counts
+        let kinds = Set(counts.keys)
+        presentKinds = fileKindOrder.filter(kinds.contains) + kinds.subtracting(fileKindOrder).sorted()
+        listedIDs = listed.map(\.id)
+        allIDsKey = all.map(\.id).joined(separator: ",")
+        byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        resultsByID = Dictionary((searchResults ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+}
+
+/// 같은 입력(자료 판 번호·종류·검색어·검색 결과)이면 앞서 만든 목록 계산을 돌려준다. 화면 상태로 들고 있는 참조라
+/// 그리는 도중에 바꿔도 화면을 다시 그리게 하지 않는다(관찰하지 않는 보통 클래스).
+final class FileListCache {
+    private struct Key: Equatable {
+        let store: ObjectIdentifier
+        let revision: Int
+        let kind: String?
+        let query: String
+        let results: [FileSearchResult]?
+    }
+    private var key: Key?
+    private var cached: FileListModel?
+    private(set) var builds = 0
+
+    func model(store: ObjectIdentifier, revision: Int, files: @autoclosure () -> [FileDoc], kind: String?, query: String, results: [FileSearchResult]?) -> FileListModel {
+        let next = Key(store: store, revision: revision, kind: kind, query: query, results: results)
+        if let cached, key == next { return cached }
+        let model = FileListModel(files: files(), kind: kind, query: query, searchResults: results)
+        key = next; cached = model; builds += 1
+        return model
+    }
+}

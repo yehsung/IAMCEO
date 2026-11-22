@@ -94,6 +94,14 @@ final class AppStore: ProjectManagementStore {
     private(set) var todos: [Todo] = []
     private(set) var files: [FileDoc] = []
     private(set) var work: [WorkItem] = []
+    /// `files` 가 바뀔 때마다 오른다. 자료 화면이 목록 계산(정렬·옛 판 빼기·종류 세기)을 바뀔 때만 한 번 하려고 쓴다.
+    private(set) var filesRevision = 0
+    /// 0.2.10 창 묶음: '더 보기'로 받은 오래전에 끝낸 할 일·업무(AppStore+Window.swift). 프로젝트를 바꾸면 비운다.
+    var olderDone = OlderDoneState()
+    /// 0.2.10 창 묶음에서 빠진 옛 판 자료. 판 보기·옛 판 링크를 열 때 GET /api/files/:id/versions 로 받는다. 프로젝트를 바꾸면 비운다.
+    var extraFiles: [String: FileDoc] = [:]
+    /// 0.2.10: 서버가 보관 상태를 본문 없이 주는가(capabilities.archiveLite). 보관 자료 본문은 그때 GET /api/files/:id 로 읽는다.
+    @ObservationIgnored var serverArchiveLite = false
     /// `state` 의 프로젝트 머리 값. 쓰기 판정·제목·전달 안내는 `state` 전체 대신 이것들을 읽어, 팀원 한 명의 상태가 바뀌어도
     /// 그 값을 읽는 화면이 다시 계산되지 않게 한다. `updateStateCollections`가 값이 바뀔 때만 갱신한다.
     private(set) var stateProjectID: String?
@@ -482,7 +490,7 @@ final class AppStore: ProjectManagementStore {
         if members != (state?.members ?? []) { members = state?.members ?? [] }
         if decisions != (state?.decisions ?? []) { decisions = state?.decisions ?? [] }
         if todos != (state?.todos ?? []) { todos = state?.todos ?? [] }
-        if files != (state?.files ?? []) { files = state?.files ?? [] }
+        if files != (state?.files ?? []) { files = state?.files ?? []; filesRevision &+= 1 }
         if work != (state?.work ?? []) { work = state?.work ?? [] }
         let project = state?.project
         if stateProjectID != project?.id { stateProjectID = project?.id }
@@ -564,6 +572,7 @@ final class AppStore: ProjectManagementStore {
         settingsEdit = nil; settingsConflict = nil; todoWrites = [:]; operationResults = [:]; batchResults = [:]
         leaseReceiptOrder = [:]; absentOperations = []; announcedUnresolved = []; writeContextGeneration = UUID()
         strictWriteContract = false; syncSupported = false; realtimeSupported = false; capabilitiesLoaded = false; serverTakesRevisions = false
+        serverArchiveLite = false; resetWindowExtras()
         capabilityProbeFailed = false; seededBootstrap = nil; fullPassCursor = nil; lastSnapshotCursor = nil; pushRetryAttempt = 0
         receivedCursor = nil; appliedSnapshotCursor = nil; highestRelevantSeq = 0
         socketFailures = 0; restFailures = 0; nextSnapshotAt = .zero
@@ -825,6 +834,7 @@ final class AppStore: ProjectManagementStore {
         deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryFlights = [:]; deliveryChecking = []; deliveryRefreshPending = []
         isArchive = archived
         selectedProjectID = id
+        resetWindowExtras()
         state = mergingRecentMessageDelivery(projectCache.value(projectID: id, archived: archived))
         saveNavigation()
         writeRevisions?.members = nil; writeRevisions?.todos = nil

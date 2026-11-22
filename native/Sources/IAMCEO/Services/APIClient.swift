@@ -52,6 +52,9 @@ actor APIClient {
     private let ownsSession: Bool
     // Enable only after T8 switches every file reader to fileBody(id:).
     let liteStateEnabled: Bool
+    /// 0.2.10: 서버가 창 묶음(capabilities.windowedState)을 받으면 /api/sync 와 실시간 소켓에 window=1 을 싣는다(lite 를 켠 연결만).
+    /// 서버가 400 으로 거절하면(되돌린 옛 서버) 그 자리에서 끄고 예전 묶음으로 다시 읽는다. 화면은 이 값이 아니라 받은 묶음의 window 로 가른다.
+    private(set) var windowedState = false
     private var fileBodyCache: [String: FileDoc] = [:]
     private var fileBodyOrder: [String] = []
     /// C8: 이 기기의 Tailscale 이 켜져 있는가. Tailscale 주소로 평문 요청을 보내기 전에 본다(authorizedURL). 시험이 바꿔 넣는다.
@@ -105,6 +108,7 @@ actor APIClient {
         return file
     }
     func clearFileBodyCache() { fileBodyCache.removeAll(); fileBodyOrder.removeAll() }
+    func setWindowedState(_ enabled: Bool) { windowedState = enabled && liteStateEnabled }
     /// 0.2.7: 한 자료의 모든 판(최신 판이 먼저, 본문 없이). 옛 서버는 404 다.
     func fileVersions(id: String) async throws -> [FileDoc] {
         try await request("/api/files/\(Self.segment(id))/versions?lite=1")
@@ -126,7 +130,7 @@ actor APIClient {
             var results: [FileSearchResult] = []
             for file in files where file.projectId == projectID {
                 try Task.checkCancellation()
-                let full = archived ? file : try await fileBody(id: file.id)
+                let full = archived && !file.body.isEmpty ? file : try await fileBody(id: file.id)
                 let metadata = FileLinks.matches(file, body: "", query: query)
                 guard metadata || full.body.localizedStandardContains(query) else { continue }
                 results.append(FileSearchResult(id: file.id, match: metadata ? "title" : "body", excerpt: "", rank: results.count + 1))
@@ -252,6 +256,8 @@ actor APIClient {
         }
         var query = version == 2 ? [URLQueryItem(name: "v", value: "2")] : []
         if liteStateEnabled { query.append(URLQueryItem(name: "lite", value: "1")) }
+        // 0.2.10: 창 묶음 소켓은 업무 사건을 창으로 줄여 받는다(v2·lite 일 때만 서버가 받는다).
+        if windowedState, version == 2 { query.append(URLQueryItem(name: "window", value: "1")) }
         return try authorizedWebSocketRequest("/ws", query: query)
     }
     func terminalStreamRequest(memberID: String, mode: TerminalStreamMode, cols: Int, rows: Int, leaseID: String?, sizePolicy: TerminalSizePolicy = .fit) throws -> URLRequest {
@@ -371,6 +377,21 @@ extension APIClient: MessageHistoryService, ProjectManagementService, SyncServic
     func archiveState(projectID: String) async throws -> ProjectState {
         try await request("/api/projects/\(Self.segment(projectID))/archive/state")
     }
+    /// 0.2.10: 서버가 보관 상태 lite(capabilities.archiveLite)를 받으면 자료 본문 없이 받는다. `lite` 는 실제로 본문을 뺀 응답인가.
+    /// 옛 서버가 400 으로 거절하면 예전처럼 본문째 받는다(그때 화면은 실린 본문을 그대로 쓴다).
+    func archiveState(projectID: String, lite: Bool) async throws -> (state: ProjectState, lite: Bool) {
+        let path = "/api/projects/\(Self.segment(projectID))/archive/state"
+        guard lite else { return (try await request(path), false) }
+        do { return (try await request(path + "?lite=1"), true) }
+        catch let error as APIError where error.status == 400 && error.code == "invalid_query" { return (try await request(path), false) }
+    }
+    /// 0.2.10: 창 묶음 밖의 끝난 할 일·완료 업무. 창 묶음의 위치(todosCursor·workCursor)나 앞 쪽의 nextCursor 를 그대로 넘긴다.
+    func doneTodos(projectID: String, cursor: String, limit: Int = 50) async throws -> DonePage<Todo> {
+        try await request("/api/projects/\(Self.segment(projectID))/todos/done?cursor=\(Self.segment(cursor))&limit=\(limit)")
+    }
+    func doneWork(projectID: String, cursor: String, limit: Int = 50) async throws -> DonePage<WorkItem> {
+        try await request("/api/projects/\(Self.segment(projectID))/work/done?cursor=\(Self.segment(cursor))&limit=\(limit)")
+    }
     func capabilities() async throws -> ServerCapabilities {
         do { return try await request("/api/capabilities") }
         catch let error as APIError where error.status == 404 {
@@ -380,7 +401,14 @@ extension APIClient: MessageHistoryService, ProjectManagementService, SyncServic
         }
     }
     func sync(projectID: String?) async throws -> SyncSnapshot {
-        try await request("/api/sync" + (projectID.map { "?projectId=\(Self.segment($0))" } ?? ""))
+        let path = "/api/sync" + (projectID.map { "?projectId=\(Self.segment($0))" } ?? "")
+        guard windowedState, projectID != nil else { return try await request(path) }
+        do { return try await request(path + "&window=1") }
+        catch let error as APIError where error.status == 400 && error.code == "invalid_query" {
+            // 창 묶음을 모르는 서버(되돌린 옛 서버). 이 연결에서는 끄고(소켓도 다음 연결부터 빼고) 예전 묶음으로 읽는다.
+            windowedState = false
+            return try await request(path)
+        }
     }
     func deliveryNotices(memberID: String, before: String?, limit: Int) async throws -> DeliveryNoticePage {
         try await request("/api/members/\(Self.segment(memberID))/delivery-notices?limit=\(limit)" + (before.map { "&before=\(Self.segment($0))" } ?? ""))

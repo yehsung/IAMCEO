@@ -732,6 +732,41 @@ struct ProjectState: Codable, Sendable, Equatable {
     var messages: [Message] = []
     var files: [FileDoc] = []
     var deliveryNotices: DeliveryNotices? = nil
+    /// 0.2.10: 창 묶음을 받았을 때만 있다(옛 서버·옛 묶음은 nil). 있으면 todos·work 는 끝난 것을 최근 것만, files 는 옛 판을 뺀 채로 왔다.
+    var window: ProjectStateWindow? = nil
+}
+
+/// 0.2.10 창 묶음의 전체 수와 '더 보기' 위치(서버 ProjectStateWindow). 위치는 받은 그대로 돌려줄 뿐 풀지 않는다.
+struct ProjectStateWindow: Codable, Sendable, Equatable {
+    var doneTodos: Int = 0
+    var doneWork: Int = 0
+    var olderFileVersions: Int = 0
+    var todosCursor: String? = nil
+    var workCursor: String? = nil
+}
+
+extension ProjectStateWindow {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        doneTodos = try c.decodeIfPresent(Int.self, forKey: ModelKey("doneTodos")) ?? 0
+        doneWork = try c.decodeIfPresent(Int.self, forKey: ModelKey("doneWork")) ?? 0
+        olderFileVersions = try c.decodeIfPresent(Int.self, forKey: ModelKey("olderFileVersions")) ?? 0
+        todosCursor = try c.decodeIfPresent(String.self, forKey: ModelKey("todosCursor"))
+        workCursor = try c.decodeIfPresent(String.self, forKey: ModelKey("workCursor"))
+    }
+}
+
+/// 0.2.10: 끝난 할 일·업무를 최근 끝낸 순서로 이어 받는 쪽. 읽지 못한 항목만 버린다.
+struct DonePage<Item: Codable & Sendable & Equatable>: Codable, Sendable, Equatable {
+    var items: [Item] = []
+    var nextCursor: String? = nil
+}
+extension DonePage {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: ModelKey.self)
+        items = try c.requiredLossyArray(Item.self, forKey: ModelKey("items"))
+        nextCursor = try c.decodeIfPresent(String.self, forKey: ModelKey("nextCursor"))
+    }
 }
 extension ProjectState {
     init(from decoder: Decoder) throws {
@@ -745,6 +780,7 @@ extension ProjectState {
         messages = try c.lossyArray(Message.self, forKey: ModelKey("messages")) ?? []
         files = try c.lossyArray(FileDoc.self, forKey: ModelKey("files")) ?? []
         deliveryNotices = c.lenient(DeliveryNotices.self, forKey: ModelKey("deliveryNotices"))
+        window = c.lenient(ProjectStateWindow.self, forKey: ModelKey("window"))
     }
 }
 

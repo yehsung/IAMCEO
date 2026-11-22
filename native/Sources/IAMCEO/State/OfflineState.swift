@@ -24,6 +24,8 @@ struct LastSeenSnapshot: Codable, Sendable {
     let serverID: String?
     var bootstrap: Bootstrap
     var state: ProjectState?
+    /// 0.2.10: 상한(2MB)에 맞추느라 오래된 것(끝난 할 일·업무, 처리된 결재, 옛 판·오래된 자료)을 덜어 낸 상태인가. 예전 파일은 nil.
+    var partial: Bool? = nil
 }
 
 /// 화면이 읽는 '지금 보이는 것은 마지막으로 본 상태' 표지.
@@ -31,6 +33,8 @@ struct LastSeenInfo: Equatable, Sendable {
     let namespace: String
     let savedAt: Date
     let serverID: String?
+    /// 기기에 최근 것만 남겨 둔 상태(LastSeenSnapshot.partial).
+    var partial = false
 }
 
 /// 연결되면 보낼 글 하나. 고치면 새 ID 로 바뀐다(보내다 끊긴 옛 글과 섞이지 않게).
@@ -313,19 +317,60 @@ final class OfflineStateStore {
         }.value
     }
 
-    /// 상한을 넘으면 오래된 글을 덜고 자료 본문을 비운다. 그래도 넘으면 nil.
+    /// 덜어 낼 때 남기는 끝난 할 일·완료 업무 수(창 묶음과 같다)와 처리된 결재 수.
+    nonisolated static let trimmedDoneCount = 50
+    nonisolated static let trimmedDecisionCount = 20
+
+    /// 상한을 넘으면 오래된 것부터 차례로 덜어 낸다(0.2.10: 예전에는 글과 본문만 덜고, 그래도 넘으면 아무것도 남기지 않았다).
+    /// 1) 최근 글 40개, 자료 본문 비우기(예전과 같다). 2) 옛 판 자료, 오래전에 끝낸 할 일·업무(최근 끝낸 50개만), 처리된 결재(최근 20개만).
+    /// 3) 자료를 최근 것부터 400·200·100·50·20·0개로. 4) 끝난 것을 모두 빼고 글 10개. 2) 부터는 '일부만'(partial)으로 남기고,
+    /// 화면이 전체 수를 보이도록 창 묶음 표(window, 다음 쪽 위치 없음)를 단다. 그래도 넘으면 nil(남기지 않는다).
     nonisolated static func encodeWithinLimit(_ snapshot: LastSeenSnapshot, limit: Int = lastSeenByteLimit) -> Data? {
         let encoder = JSONEncoder()
         guard let full = try? encoder.encode(snapshot) else { return nil }
         if full.count <= limit { return full }
-        var trimmed = snapshot
-        if var state = trimmed.state {
-            state.messages = Array(state.messages.suffix(trimmedMessageCount))
-            state.files = state.files.map { var file = $0; file.body = ""; return file }
-            trimmed.state = state
+        func fit(_ state: ProjectState?, partial: Bool) -> Data? {
+            var next = snapshot
+            next.state = state; next.partial = partial ? true : nil
+            guard let data = try? encoder.encode(next), data.count <= limit else { return nil }
+            return data
         }
-        guard let smaller = try? encoder.encode(trimmed), smaller.count <= limit else { return nil }
-        return smaller
+        guard var state = snapshot.state else { return nil }
+        state.messages = Array(state.messages.suffix(trimmedMessageCount))
+        state.files = state.files.map { var file = $0; file.body = ""; return file }
+        if let data = fit(state, partial: false) { return data }
+
+        let original = state
+        let listedFiles = FileVersions.listed(original.files)
+        state.window = ProjectStateWindow(
+            doneTodos: original.window?.doneTodos ?? original.todos.filter { $0.done && $0.outcome != "dropped" }.count,
+            doneWork: original.window?.doneWork ?? original.work.filter { $0.sec == "done" }.count,
+            olderFileVersions: (original.window?.olderFileVersions ?? 0) + original.files.count - listedFiles.count,
+            todosCursor: nil, workCursor: nil)
+        func keepDone(_ count: Int) {
+            let todos = Set(DoneOrder.todos(original.todos.filter(\.done)).prefix(count).map(\.id))
+            state.todos = original.todos.filter { !$0.done || todos.contains($0.id) }
+            let work = Set(DoneOrder.work(original.work.filter { $0.sec == "done" }).prefix(count).map(\.id))
+            state.work = original.work.filter { $0.sec != "done" || work.contains($0.id) }
+            var done = 0
+            state.decisions = original.decisions.filter { decision in
+                guard decision.status != "open" else { return true }
+                done += 1
+                return done <= min(count, trimmedDecisionCount)
+            }
+        }
+        keepDone(trimmedDoneCount)
+        state.files = listedFiles
+        if let data = fit(state, partial: true) { return data }
+        let newest = listedFiles.sorted { $0.order != $1.order ? $0.order > $1.order : $0.createdAt > $1.createdAt }
+        for count in [400, 200, 100, 50, 20, 0] where count < newest.count {
+            let kept = Set(newest.prefix(count).map(\.id))
+            state.files = listedFiles.filter { kept.contains($0.id) }
+            if let data = fit(state, partial: true) { return data }
+        }
+        keepDone(0)
+        state.messages = Array(original.messages.suffix(10))
+        return fit(state, partial: true)
     }
 
     /// 지금 바로 지운다. 늦게 끝나는 저장도 막는다.

@@ -193,7 +193,7 @@ struct ComposerBar: View {
     @State private var omittedContextFileID: String?
     private var contextFile: FileDoc? {
         guard let id = FileLinks.viewedFileID(router: router), id != omittedContextFileID else { return nil }
-        return store.files.first { $0.id == id && $0.projectId == store.selectedProjectID }
+        return store.file(id: id).flatMap { $0.projectId == store.selectedProjectID ? $0 : nil }
     }
 
     private var hasMetaRow: Bool {

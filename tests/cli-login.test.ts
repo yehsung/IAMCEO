@@ -35,7 +35,11 @@ if [ "$1" = "auth" ] && [ "$2" = "login" ]; then
   printf "Paste code here if prompted > "
   read -r line
   echo "$line" > "$D/claude-pasted"
-  if [ "$line" = "${GOOD}" ]; then cp "$D/claude-status-after.json" "$D/claude-status.json"; echo "Login successful."; exit 0; fi
+  if [ "$line" = "${GOOD}" ]; then
+    cp "$D/claude-status-after.json" "$D/claude-status.json"
+    if [ -f "$D/claude-grandchild" ]; then sleep 8 & echo $! > "$D/claude-child-pid"; fi
+    echo "Login successful."; exit 0
+  fi
   echo "Login failed: That code wasn't accepted. It may be incomplete, expired, already used, or from an earlier sign-in attempt. Sign in again to get a new code." >&2
   exit 1
 fi
@@ -185,6 +189,22 @@ describe("Claude 로그인(붙여넣기 코드)", () => {
     expect(t.logs.join("\n")).not.toContain(STATE);
     // 계정 목록도 새 계정이다.
     expect((await t.logins.accounts()).find(a => a.cli === "claude")).toMatchObject({ email: "new@example.com" });
+  }, 20_000);
+
+  test("CLI 가 0 으로 끝났는데 띄운 하위 프로세스가 출력 관을 쥐고 남아도 결과는 같다: 남은 출력을 잠깐만 더 읽고 성공으로 끝내 적용한다", async () => {
+    const t = fixture({ limitMs: { claude: 5_000 } });
+    writeFileSync(join(t.dir, "claude-grandchild"), "");
+    const childPid = () => { try { return Number(readFileSync(join(t.dir, "claude-child-pid"), "utf8")); } catch { return 0; } };
+    cleanups.push(() => { const pid = childPid(); if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* 이미 끝났다 */ } } });
+    const started = await t.logins.start("claude");
+    await until("주소", () => t.logins.get(started.id).phase === "waiting");
+    const submitted = Date.now();
+    await t.logins.submitCode(started.id, GOOD);
+    const done = await until("끝", () => { const v = t.logins.get(started.id); return ["succeeded", "failed", "cancelled", "expired"].includes(v.phase) ? v : null; }, 10_000);
+    expect(done).toMatchObject({ phase: "succeeded", error: null, accountChanged: true, account: { cli: "claude", email: "new@example.com", plan: "pro" } });
+    expect(Date.now() - submitted).toBeLessThan(4_500);
+    expect(t.calls).toHaveLength(1);
+    expect(childPid() > 0 && pidAlive(childPid())).toBe(true);
   }, 20_000);
 
   test("CLI 가 코드를 거절하면 실패(다시 시작하게 한다). 적용은 부르지 않는다", async () => {

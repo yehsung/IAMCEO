@@ -59,6 +59,11 @@ const KEEP_FINISHED_MS = 10 * 60_000;
 const ACCOUNT_CACHE_MS = 60_000;
 const STATUS_TIMEOUT_MS = 15_000;
 const KILL_GRACE_MS = 2_000;
+/**
+ * 로그인 CLI 가 끝난 뒤 남은 출력을 더 읽는 시간. CLI 가 띄운 하위 프로세스가 출력 관을 물려받아 쥐고 있으면 관이 닫히지 않는다:
+ * 그때도 이만큼만 읽고 종료 코드로 판정한다(runAgy·models.ts 의 `agy models` 와 같은 보호). 보통은 끝나자마자 관이 닫혀 기다리지 않는다.
+ */
+const PIPE_DRAIN_MS = 2_000;
 const OUTPUT_LIMIT = 64 * 1024;
 
 /** 계정 지문: 같은 계정인지 견줄 때만 쓴다(메일·조직을 그대로 저장하지 않는다). 로그인하지 않았거나 모르면 null. */
@@ -262,6 +267,13 @@ export function cliEnv(base: Record<string, string | undefined>, extra: Record<s
 }
 
 function nowIso(now: number): string { return new Date(now).toISOString(); }
+
+/** 약속이 ms 안에 풀리면 그 값, 아니면 null. 타이머는 남기지 않는다. */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), Math.max(0, ms)); });
+  try { return await Promise.race([promise, late]); } finally { if (timer) clearTimeout(timer); }
+}
 
 function emptyAccount(cli: CliAccountCli, installed: boolean, now: number, loggedIn: boolean | null, problem?: string): CliAccount {
   return { cli, installed, loggedIn, email: null, organization: null, plan: null, method: null, checkedAt: nowIso(now), ...(problem ? { problem } : {}) };
@@ -609,6 +621,13 @@ export class CliLogins {
     if (s.view.phase !== "waiting" || !s.state || !s.proc) throw new CliLoginError(409, "cli_login_not_waiting");
     const normalized = s.view.cli === "gemini" ? normalizeGeminiCode(input, s.state) : normalizeClaudeCode(input, s.state);
     if (!normalized.ok) throw new CliLoginError(400, normalized.code);
+    // Gemini: 넣기 직전에 한 번 더 본다. 첫 설정·로그인 방식 물음이 떠 있으면 그 물음에 코드를 넣지 않고 로그인을 끝낸다.
+    const interactive = s.view.cli === "gemini" ? this.geminiInteractive(s) : null;
+    if (interactive) {
+      this.finish(s, "failed", { code: interactive, message: ERROR_CODES[interactive].ko });
+      void this.kill(s);
+      throw new CliLoginError(409, interactive);
+    }
     try {
       const stdin = s.proc.stdin as unknown as { write(chunk: string): number; flush?(): unknown };
       stdin.write(`${normalized.line}\n`);
@@ -669,8 +688,9 @@ export class CliLogins {
     this.log(`${s.view.cli} 로그인 ${phase} ${s.view.id}${error ? ` (${error.code})` : ""}`);
   }
 
-  private async pipe(stream: ReadableStream<Uint8Array>, into: "stdout" | "stderr", s: Session): Promise<void> {
+  private async pipe(stream: ReadableStream<Uint8Array>, into: "stdout" | "stderr", s: Session, readers: Array<ReadableStreamDefaultReader<Uint8Array>>): Promise<void> {
     const reader = stream.getReader();
+    readers.push(reader);
     const decoder = new TextDecoder();
     try {
       for (;;) {
@@ -685,9 +705,9 @@ export class CliLogins {
   }
 
   private onOutput(s: Session): void {
-    if (s.view.phase !== "starting") return;
     switch (s.view.cli) {
       case "claude": {
+        if (s.view.phase !== "starting") return;
         const parsed = parseClaudeLoginOutput(s.stdout);
         if (!parsed || !/Paste code here/i.test(s.stdout)) return;
         s.state = parsed.state;
@@ -696,34 +716,48 @@ export class CliLogins {
         return;
       }
       case "codex": {
+        if (s.view.phase !== "starting") return;
         const parsed = parseCodexDeviceOutput(s.stdout);
         if (!parsed) return;
         const expiresAt = parsed.minutes ? Math.min(Date.parse(s.view.expiresAt), this.now() + parsed.minutes * 60_000) : Date.parse(s.view.expiresAt);
         s.view = { ...s.view, phase: "waiting", url: parsed.url, userCode: parsed.userCode, expiresAt: nowIso(expiresAt) };
         return;
       }
+      // Gemini 는 waiting·verifying 에서도 본다: 그 뒤에 나온 첫 설정·로그인 방식 물음에 코드를 넣지 않는다.
       case "gemini": return this.onGeminiOutput(s);
       default: return unknownCli(s.view.cli);
     }
   }
 
   /**
-   * Antigravity CLI: 주소와 코드 물음이 나오면 waiting. 그 전에 대화형 물음(첫 설정·로그인 방식 고르기)이 보이면 키를 하나도 넣지 않고 끝낸다.
+   * Antigravity CLI: 주소와 코드 물음이 나오면 waiting. 대화형 물음(첫 설정·로그인 방식 고르기)이 보이면 키를 하나도 넣지 않고 끝낸다:
+   * starting·waiting 은 언제나(코드를 아직 넣지 않았다), 코드를 넣은 뒤(verifying)에는 agy 가 아직 떠 있을 때만(물음을 띄운 채 입력을 기다린다.
+   * 이미 끝났으면 종료 코드로 판정한다: 저장된 로그인을 글 때문에 실패로 두지 않는다).
    * 출력에서 주소를 읽지 못했는데 코드 물음은 나왔으면 가짜 open 이 받은 주소를 쓴다(그 파일이 늦게 오면 prune 이 다시 본다).
    */
   private onGeminiOutput(s: Session): void {
-    const text = `${s.stdout}\n${s.stderr}`;
-    const plain = stripAnsi(text);
-    if (GEMINI_SETUP_PROMPT.test(plain) || GEMINI_TERMINAL_ONLY.test(plain)) {
-      const code: ErrorCode = GEMINI_SETUP_PROMPT.test(plain) ? "cli_login_gemini_setup" : "cli_login_gemini_unavailable";
-      this.finish(s, "failed", { code, message: ERROR_CODES[code].ko });
+    if (!ACTIVE.has(s.view.phase) || s.ending || s.saved) return;
+    const alive = !!s.proc && s.proc.exitCode === null && s.proc.signalCode === null;
+    const interactive = s.view.phase === "verifying" && !alive ? null : this.geminiInteractive(s);
+    if (interactive) {
+      this.finish(s, "failed", { code: interactive, message: ERROR_CODES[interactive].ko });
       void this.kill(s);
       return;
     }
+    if (s.view.phase !== "starting") return;
+    const text = `${s.stdout}\n${s.stderr}`;
     const parsed = parseGeminiLoginOutput(text) ?? (geminiPromptShown(text) ? this.geminiUrlFromFile(s) : null);
     if (!parsed) return;
     s.state = parsed.state;
     s.view = { ...s.view, phase: "waiting", url: parsed.url, localUrl: null };
+  }
+
+  /** agy 의 출력에 대화형 물음이 보이면 그 실패 코드: 첫 설정(약관·데이터 수집 동의)이 먼저, 로그인 방식 고르기·Google 로그인을 못 하는 설정. 없으면 null. */
+  private geminiInteractive(s: Session): ErrorCode | null {
+    const plain = stripAnsi(`${s.stdout}\n${s.stderr}`);
+    if (GEMINI_SETUP_PROMPT.test(plain)) return "cli_login_gemini_setup";
+    if (GEMINI_TERMINAL_ONLY.test(plain)) return "cli_login_gemini_unavailable";
+    return null;
   }
 
   private geminiUrlFromFile(s: Session): { url: string; state: string } | null {
@@ -744,10 +778,14 @@ export class CliLogins {
 
   private async watch(s: Session): Promise<void> {
     const proc = s.proc!;
-    const out = this.pipe(proc.stdout as ReadableStream<Uint8Array>, "stdout", s);
-    const err = this.pipe(proc.stderr as ReadableStream<Uint8Array>, "stderr", s);
+    const readers: Array<ReadableStreamDefaultReader<Uint8Array>> = [];
+    const out = this.pipe(proc.stdout as ReadableStream<Uint8Array>, "stdout", s, readers);
+    const err = this.pipe(proc.stderr as ReadableStream<Uint8Array>, "stderr", s, readers);
     const code = await proc.exited;
-    await Promise.all([out, err]);
+    // CLI 가 띄운 하위 프로세스가 출력 관을 물려받아 쥐고 있으면 읽기가 끝나지 않는다: 남은 출력은 PIPE_DRAIN_MS 까지만 읽고 읽기를 접는다.
+    // 그러지 않으면 저장된 로그인이 '확인 중'에 묶여 시간 초과로 끝나고 팀장에게 적용되지 않는다. 판정은 아래처럼 종료 코드로 한다.
+    await within(Promise.all([out, err]), PIPE_DRAIN_MS);
+    for (const reader of readers) reader.cancel().catch(() => undefined);
     if (s.ending || !ACTIVE.has(s.view.phase)) return;
     const plainOut = stripAnsi(s.stdout), plainErr = stripAnsi(s.stderr);
     // 종료 코드 0 이면 CLI 가 새 계정을 저장했다(Claude 는 'Login successful.' 을 찍고 0 으로, 실패는 1·130 으로 끝난다).

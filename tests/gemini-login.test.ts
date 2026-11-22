@@ -62,9 +62,20 @@ if [ "$1" = "acp" ] && [ "$2" = "--login" ]; then
   else
     printf 'Open this link in a browser to log in with Google:\\n\\n  %s\\n\\nThen paste the authorization code, or the full URL of the page you land on, and press Enter:\\n' "$URL"
   fi
+  if [ -f "$D/mode-setup-late" ]; then
+    sleep 0.5; printf 'Terms of Service & Data Use\\n[x] Yes, I agree to help improve Antigravity CLI\\n'
+    read -r line; echo "$line" > "$D/agy-pasted"; exit 0
+  fi
   if ! read -r line || [ -z "$line" ]; then echo "Error: login cancelled: no authorization code was entered" >&2; exit 1; fi
   echo "$line" > "$D/agy-pasted"
-  if [ "$line" = '${CODE}' ]; then echo "Logged in as ${EMAIL}."; exit 0; fi
+  if [ -f "$D/mode-setup-after-code" ]; then
+    printf 'Terms of Service & Data Use\\n[x] Yes, I agree to help improve Antigravity CLI\\n'
+    read -r more; echo "$more" > "$D/agy-pasted-2"; exit 0
+  fi
+  if [ "$line" = '${CODE}' ]; then
+    if [ -f "$D/mode-grandchild" ]; then sleep 8 & echo $! > "$D/child-pid"; fi
+    echo "Logged in as ${EMAIL}."; exit 0
+  fi
   echo "Error: couldn't log in: oauth2: \\"invalid_grant\\" \\"Bad Request\\"" >&2
   exit 1
 fi
@@ -267,6 +278,55 @@ describe("Gemini 로그인(`agy acp --login`)", () => {
     expect(existsSync(join(t.dir, "agy-pasted"))).toBe(false);
     expect(await rejection(t.logins.submitCode(started.id, CODE))).toMatchObject({ status: 409, code: "cli_login_not_waiting" });
     expect(t.calls).toEqual([]);
+  }, 20_000);
+
+  const ENDED = new Set(["succeeded", "failed", "cancelled", "expired"]);
+  const ended = (t: { logins: CliLogins }, id: string) => { const v = t.logins.get(id); return ENDED.has(v.phase) ? v : null; };
+
+  test("주소·코드 물음을 보인 뒤(waiting)에 첫 설정 물음이 나와도 키를 넣지 않고 끝낸다: 붙여넣은 코드가 그 물음으로 가지 않는다", async () => {
+    const t = fixture();
+    writeFileSync(join(t.dir, "mode-setup-late"), "");
+    const started = await t.logins.start("gemini");
+    const failed = await until("실패", () => ended(t, started.id), 5_000);
+    // 주소를 보인 단계(waiting)를 거쳤다: 그때 받은 주소가 남아 있다.
+    expect(failed).toMatchObject({ phase: "failed", error: { code: "cli_login_gemini_setup" }, url: new URL(AUTH_URL).toString() });
+    expect(await rejection(t.logins.submitCode(started.id, CODE))).toMatchObject({ status: 409 });
+    const pid = Number(readFileSync(join(t.dir, "agy-pid"), "utf8"));
+    await until("agy 끝남", () => !pidAlive(pid));
+    expect(existsSync(join(t.dir, "agy-pasted"))).toBe(false);
+    expect(t.calls).toEqual([]);
+  }, 20_000);
+
+  test("코드를 넣은 뒤(verifying) 첫 설정 물음이 나오면 시간 초과까지 '확인 중'으로 두지 않고 끝낸다. 그 물음에도 키를 넣지 않는다", async () => {
+    const t = fixture({ limitMs: { gemini: 6_000 } });
+    writeFileSync(join(t.dir, "mode-setup-after-code"), "");
+    const started = await t.logins.start("gemini");
+    await until("주소", () => t.logins.get(started.id).phase === "waiting");
+    await t.logins.submitCode(started.id, CODE);
+    const end = await until("끝", () => ended(t, started.id), 9_000);
+    expect(end).toMatchObject({ phase: "failed", error: { code: "cli_login_gemini_setup" }, account: null });
+    const pid = Number(readFileSync(join(t.dir, "agy-pid"), "utf8"));
+    await until("agy 끝남", () => !pidAlive(pid));
+    expect(readFileSync(join(t.dir, "agy-pasted"), "utf8").trim()).toBe(CODE);
+    expect(existsSync(join(t.dir, "agy-pasted-2"))).toBe(false);
+    expect(t.calls).toEqual([]);
+  }, 20_000);
+
+  test("agy 가 0 으로 끝났는데 띄운 하위 프로세스가 출력 관을 쥐고 남아도, 잠깐만 더 읽고 종료 코드로 성공을 정해 팀장에게 적용한다", async () => {
+    const t = fixture({ limitMs: { gemini: 5_000 } });
+    writeFileSync(join(t.dir, "mode-grandchild"), "");
+    const childPid = () => { try { return Number(readFileSync(join(t.dir, "child-pid"), "utf8")); } catch { return 0; } };
+    cleanups.push(() => { const pid = childPid(); if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* 이미 끝났다 */ } } });
+    const started = await t.logins.start("gemini");
+    await until("주소", () => t.logins.get(started.id).phase === "waiting");
+    const submitted = Date.now();
+    await t.logins.submitCode(started.id, CODE);
+    const end = await until("끝", () => ended(t, started.id), 10_000);
+    expect(end).toMatchObject({ phase: "succeeded", error: null, account: { cli: "gemini", email: EMAIL } });
+    expect(Date.now() - submitted).toBeLessThan(4_500);
+    expect(t.calls).toEqual([{ cli: "gemini", after: accountIdentity("gemini", [EMAIL]), before: null }]);
+    // 하위 프로세스는 아직 떠 있다: 서버는 그것이 끝나기를 기다리지 않았다.
+    expect(childPid() > 0 && pidAlive(childPid())).toBe(true);
   }, 20_000);
 
   test("Google 계정 로그인을 못 하는 설정(API 키·ADC 등)이면 cli_login_gemini_unavailable", async () => {

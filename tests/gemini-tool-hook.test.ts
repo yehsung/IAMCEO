@@ -5,7 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GEMINI_TOOL_HOOK_LOCAL_TIMEOUT_SEC, geminiInjectDenyReason, geminiToolHookConfigFile, geminiToolHookSet } from "../server/runner/gemini-tool-hook.ts";
+import { GEMINI_TOOL_HOOK_LOCAL_TIMEOUT_SEC, GEMINI_WRITE_TOOLS, geminiInjectDenyReason, geminiToolHookConfigFile, geminiToolHookSet } from "../server/runner/gemini-tool-hook.ts";
 import { geminiHooksFile, geminiRecorderHookSet, GEMINI_HOOKS_NAME } from "../server/runner/gemini-hooks.ts";
 import { PERMISSION_HOOK_TIMEOUT_SEC } from "../server/runner/permission-hook.ts";
 import { providerLaunch } from "../server/runner/providers.ts";
@@ -178,6 +178,17 @@ function permissionLayout(url: string, token = "member-token-1") {
   const set = geminiToolHookSet({ runDir: base.run, cwd: base.project, injectDir: base.injectDir, permission: { mcpConfigFile }, totalMs: 4000, pollMs: 300 });
   return { ...base, mcpConfigFile, set, group: set.PreToolUse![0]!, command: set.PreToolUse![0]!.hooks[0]!.command };
 }
+
+describe("1.5.14 대화형 실측의 도구 이름", () => {
+  test("transcript 의 tool_calls 이름(run_command·write_file·edit_file·invoke_subagent)이 matcher 에 들고 종류가 맞다(문서의 write_to_file·replace_file_content 가 아니다)", () => {
+    // 견본 원본: agy-real 의 대화형 실측(2026-11-23) transcript.jsonl 의 tool_calls 이름. 승인 훅이 켜지고 단계를 고른 팀장의 matcher 로 본다.
+    const base = permissionLayout("http://127.0.0.1:1");
+    const tiered = geminiToolHookSet({ runDir: base.run, cwd: base.project, injectDir: base.injectDir, permission: { mcpConfigFile: base.mcpConfigFile }, tier: "flash" });
+    const matcher = new RegExp(tiered.PreToolUse![0]!.matcher);
+    for (const name of ["run_command", "write_file", "edit_file", "invoke_subagent"]) expect([name, matcher.test(name)]).toEqual([name, true]);
+    expect(GEMINI_WRITE_TOOLS.slice(0, 2)).toEqual(["write_file", "edit_file"]);
+  });
+});
 
 describe("결재함 승인(스크립트를 실제로 돌리고, 서버는 가짜)", () => {
   test("matcher 에 읽기·연결 도구·웹이 더해지고, 제한 시간은 Claude 승인 훅과 같다. 열쇠는 명령줄·설정 파일에 없다", () => {

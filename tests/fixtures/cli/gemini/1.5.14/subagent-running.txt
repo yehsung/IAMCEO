@@ -1,0 +1,50 @@
+────────────────────────────────────────────────────────────
+> Create a new file named hello.txt in the current folder containing exactly the single line: hi. Use the file writing tool. Do not run commands.
+
+● Edited 1 file (hello.txt) (ctrl+o to expand)
+
+  I have created hello.txt with the content hi.
+
+────────────────────────────────────────────────────────────
+> Edit hello.txt: replace the word hi with hello using the file edit tool. Do not run commands.
+
+● Edited 1 file (hello.txt) (ctrl+o to expand)
+
+Pending edit
+  ⎿  User declined the tool call
+
+────────────────────────────────────────────────────────────
+> Do two things in order: 1) create a new file a.txt containing x using the file writing tool; 2) then run the shell command: echo done-ae (use run_command).
+
+● Edited 1 file (a.txt)
+● Ran (echo done-ae) failed (ctrl+o to expand)
+
+Command
+  ⎿  User declined the tool call
+
+────────────────────────────────────────────────────────────
+> Do these in order: 1) create a new file b.txt containing y with the file writing tool; 2) run the shell command: ls (run_command); 3) run the shell command:
+  rm a.txt (run_command). Then say finished.
+
+● Edited 1 file (b.txt)
+● Ran (ls && rm a.txt) (ctrl+o to expand)
+
+  finished.
+
+────────────────────────────────────────────────────────────
+> /compact
+
+─────────────────────────────────────────────────────────────────── Conversation compacted ────────────────────────────────────────────────────────────────────
+                                             26 steps summarized · context 13.4k → ~14.5k (799 summary) · took 8s
+
+────────────────────────────────────────────────────────────
+> Use the invoke_subagent tool to start exactly one subagent whose task is: reply with the number 4 and nothing else. Wait for it, then tell me what it said.
+
+● Spawned 1 subagent (ctrl+o to expand)
+⣟  Delegating...
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ● Agent(self: Number Responder) · Gemini 3.8 Flash  Working · 1s
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 1%

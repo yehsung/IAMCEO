@@ -8,7 +8,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyGeminiTurnError, cleanGeminiError, GEMINI_PROBE_URL, geminiReportedText, geminiTransientLimit, geminiTurnErrorText } from "../server/gemini-errors.ts";
-import { GeminiQuotaReader, geminiExhaustedResetAt, geminiGroupAvailable, geminiGroupExhausted, geminiModelKey, geminiStatusExhausted, geminiStatusResetAt, geminiUsageGroup, parseAgyUsage, type AgyUsageRun } from "../server/gemini-quota.ts";
+import { GeminiQuotaReader, geminiBucketFamily, geminiExhaustedResetAt, geminiGroupAvailable, geminiGroupExhausted, geminiModelFamily, geminiModelKey, geminiStatusExhausted, geminiStatusResetAt, geminiStatusUsage, geminiUsageGroup, parseAgyUsage, type AgyUsageRun } from "../server/gemini-quota.ts";
 import { GEMINI_CHECKPOINT_HEAD, geminiHasModelResponse, geminiPromptTokens, geminiTranscriptPath, geminiTranscriptRoot, isGeminiCheckpoint } from "../server/runner/gemini-transcript.ts";
 import { observeCompactBoundary, type CompactBoundaryBaseline } from "../server/runner/core-context.ts";
 import { classifyTurnError } from "../server/api-outage.ts";
@@ -118,6 +118,51 @@ describe("/usage 읽기", () => {
     expect(geminiStatusExhausted({ quota: { "gemini-5h": { remainingFraction: 0.4, resetAt: null, disabled: false } } })).toBe(false);
     expect(geminiStatusExhausted({ quota: {} })).toBeNull();
     expect(geminiStatusResetAt(null)).toBeNull();
+  });
+  test("1.5.14 실측 묶음 id → 모델 갈래: gemini-5h·gemini-weekly = Gemini 모델, 3p-* = Claude·GPT-OSS, gemini-argon-* = Argon(/usage 의 bucket id 와 같다)", () => {
+    const usage = parseAgyUsage(fixture("usage.json"))!;
+    // /usage 묶음의 bucket id 와 그 묶음 모델의 갈래가 서로 맞는다(같은 이름표를 상태줄 기록에도 쓴다).
+    for (const group of usage.groups) for (const bucket of group.buckets) for (const model of group.models) expect([bucket.id, model, geminiBucketFamily(bucket.id)]).toEqual([bucket.id, model, geminiModelFamily(model)]);
+    expect(["3p-5h", "3p-weekly", "gemini-5h", "gemini-argon-wtu-weekly", "gemini-weekly", "other"].map(geminiBucketFamily)).toEqual(["third_party", "third_party", "gemini", "argon", "gemini", null]);
+    expect(["gemini-3.8-flash", "Gemini 4 Neon (High)", "gemini-pro-orchestrator-neon", "Orchestrator (Neon)", "gemini-4-argon-high", "Claude Sonnet 5.5", "claude-opus-5-5", "GPT-OSS 120B", "gpt-oss-120b", "mystery", null].map(geminiModelFamily))
+      .toEqual(["gemini", "gemini", "gemini", "gemini", "argon", "third_party", "third_party", "third_party", "third_party", null, null]);
+    // /usage 의 어느 묶음에도 없는 Orchestrator (Argon) 은 갈래를 모른다(선택지로 내지 않는다).
+    expect(["Orchestrator (Argon)", "gemini-pro-orchestrator-g1-pro"].map(geminiModelFamily)).toEqual([null, null]);
+  });
+  test("상태줄 기록의 한도: 그 팀장 모델 갈래의 묶음만 본다(Claude 묶음이 바닥나도 Gemini 모델 팀장은 한도가 아니다). 갈래를 모르면 전부", () => {
+    const at = (h: number) => new Date(Date.UTC(2026, 10, 22, h)).toISOString();
+    const record = { at: at(10), quota: {
+      "3p-5h": { remainingFraction: 0, resetAt: at(15), disabled: false }, "3p-weekly": { remainingFraction: 0.5, resetAt: at(20), disabled: false },
+      "gemini-5h": { remainingFraction: 0.9, resetAt: at(12), disabled: false }, "gemini-weekly": { remainingFraction: 0.9, resetAt: at(23), disabled: false },
+      "gemini-argon-wtu-weekly": { remainingFraction: 1, resetAt: at(22), disabled: false },
+    } };
+    expect(geminiStatusExhausted(record, ["gemini-3.8-flash", "Gemini 3.8 Flash"])).toBe(false);
+    expect(geminiStatusResetAt(record, ["Gemini 3.8 Flash"])).toBeNull();
+    expect(geminiStatusExhausted(record, ["claude-opus-5-5"])).toBe(true);
+    expect(geminiStatusResetAt(record, ["Claude Opus 5.5"])).toBe(at(15));
+    expect(geminiStatusExhausted(record, ["Gemini 4 Argon (High)"])).toBe(false);
+    // 갈래를 모르면 예전처럼 모든 묶음(늦게 풀리는 쪽).
+    expect(geminiStatusExhausted(record)).toBe(true);
+    expect(geminiStatusExhausted(record, ["mystery"])).toBe(true);
+    // Argon 묶음이 없는 요금제(Ultra)는 Gemini 묶음을 본다.
+    const ultra = { quota: { "gemini-5h": { remainingFraction: 0, resetAt: at(12), disabled: false }, "3p-5h": { remainingFraction: 1, resetAt: at(15), disabled: false } } };
+    expect(geminiStatusResetAt(ultra, ["gemini-4-argon"])).toBe(at(12));
+  });
+  test("상태줄 기록으로 만든 /usage 꼴: 갈래마다 한 묶음, 묶음의 모델은 Gemini 모델 목록에서 그 갈래의 것", () => {
+    const record = { at: "2026-11-22T10:00:00.000Z", quota: {
+      "3p-5h": { remainingFraction: 1, resetAt: "2026-11-22T15:00:00.000Z", disabled: false }, "gemini-5h": { remainingFraction: 0, resetAt: "2026-11-22T12:00:00.000Z", disabled: false },
+      "gemini-weekly": { remainingFraction: 0.4, resetAt: "2026-11-28T09:10:29.000Z", disabled: false }, "odd": { remainingFraction: 0, resetAt: null, disabled: false },
+    } };
+    const catalog = [{ value: "gemini-3.8-flash", label: "Gemini 3.8 Flash" }, { value: "gemini-4-neon", label: "Gemini 4 Neon" }, { value: "claude-opus-5-5", label: "Claude Opus 5.5" }, { value: "gpt-oss-120b", label: "GPT-OSS 120B" }, { value: "gemini-4-argon", label: "Gemini 4 Argon" }];
+    const usage = geminiStatusUsage(record, catalog)!;
+    expect(usage.groups.map(group => [group.name, group.models, group.buckets.map(bucket => bucket.id)])).toEqual([
+      ["Gemini Models", ["Gemini 3.8 Flash", "Gemini 4 Neon"], ["gemini-5h", "gemini-weekly"]],
+      ["Claude and GPT models", ["Claude Opus 5.5", "GPT-OSS 120B"], ["3p-5h"]],
+    ]);
+    expect(geminiGroupExhausted(geminiUsageGroup(usage, ["Gemini 3.8 Flash (Low)"])!)).toBe(true);
+    expect(geminiGroupAvailable(geminiUsageGroup(usage, ["claude-opus-5-5", "Claude Opus 5.5"])!)).toBe(true);
+    expect(geminiStatusUsage(null, catalog)).toBeNull();
+    expect(geminiStatusUsage({ at: record.at, quota: { odd: record.quota.odd } }, catalog)).toBeNull();
   });
   test("GeminiQuotaReader: `agy -p /usage --output-format json` 을 빈 폴더에서 띄우고, 60초 안에는 다시 띄우지 않으며, 한 번에 하나만 돈다. 실패는 예전 답을 지우지 않는다", async () => {
     const home = temp(), bin = join(home, "agy"), cwd = join(home, "run", "gemini-usage");

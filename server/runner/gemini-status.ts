@@ -4,6 +4,12 @@
 // 아래 모양으로 바꿔 <contextHome>/context/gemini/<memberId>.json 에 쓴다(임시 파일 → rename). 서버는 이 파일을 읽기만 한다:
 // 세션 id(conversationId), 문맥 %, 한도, 비용이 여기서 나온다. 계정 메일(email)은 담지 않는다.
 // 파일은 팀장마다 하나다. 어느 터미널이 쓴 기록인지는 launch 칸(띄울 때 정한 값)으로 가른다: 실행기는 지금 터미널의 값이 적힌 기록만 믿는다.
+//
+// 1.5.14 실측(agy-real, 견본 tests/fixtures/cli/gemini/1.5.14/statusline-*.json): 첫 글 전에는 conversation_id·session_id 가 빈 글이고, 첫 글을 받는 순간
+// 같은 UUID 로 채워진다. model 은 처음 1초쯤 null 이다. transcript_path 는 ~/.gemini/antigravity/brain/<id>/… 로 실제로 없는 파일을 가리킨다(실제 기록은
+// <geminiHome>/brain/<id>/.system_generated/logs/transcript.jsonl, gemini-transcript.ts): 기록에 옮기지 않는다. cost·conversation_title·artifact_count·
+// task_count·pending_input_count 는 오지 않았다. quota 묶음은 '3p-5h'·'3p-weekly'·'gemini-5h'·'gemini-argon-wtu-weekly'·'gemini-weekly'(칸 remaining_fraction·
+// reset_time·reset_in_seconds, disabled 없음, 쓰지 않은 3p-* 의 reset_time 은 매번 지금+5시간·7일로 움직인다). 묶음 id 는 /usage 의 bucket id 와 같다(gemini-quota.ts).
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
@@ -12,9 +18,12 @@ export interface GeminiStatusRecord {
   memberId: string;
   /** 쓴 시각(ISO). 터미널을 띄운 시각보다 앞선 기록은 예전 세션의 것이라 믿지 않는다. */
   at: string;
-  /** agy 의 대화 id. 첫 대화 전에는 null. */
+  /** agy 의 대화 id. 첫 대화 전에는 null(상태줄 입력은 빈 글). */
   conversationId: string | null;
-  /** agy 가 알려 준 기록 파일 경로 그대로다. 읽기 전에 쓰는 쪽이 gemini 홈 안의 경로인지 확인한다. */
+  /**
+   * 0.2.10 판부터 늘 null 이다: agy 1.5.14 의 상태줄 transcript_path 는 없는 경로(~/.gemini/antigravity/brain/…)를 가리킨다(실측). 대화 기록은 gemini 홈과
+   * 대화 id 로 찾는다(gemini-transcript.ts geminiTranscriptPath). 앞 판 래퍼가 쓴 기록에는 글이 있을 수 있다(읽기만 하고 쓰지 않는다).
+   */
   transcriptPath: string | null;
   model: { id: string | null; effort: string | null };
   /** usedPct 는 0~100. */
@@ -22,15 +31,16 @@ export interface GeminiStatusRecord {
   /** 한도 묶음 id → 남은 비율(0~1)과 초기화 시각(ISO). 남은 양만 알려 준 묶음(remaining_amount)은 remainingFraction 이 null 이다. */
   quota: Record<string, { remainingFraction: number | null; resetAt: string | null; disabled: boolean }>;
   costUsd: number | null;
+  /** 상태줄 입력의 agent_state(1.5.14 실측: initializing·authenticating·idle·working·tool_use. 승인 창이 떠 있으면 tool_use 와 tool_confirmation_pending true). */
   agentState: string | null;
   /**
-   * 도는 서브에이전트 수: 상태줄의 subagents 항목 가운데 status 가 "running" 인 것. 문서상 status 는 "running"·"completed" 둘이다.
-   * 끝난 것("completed")은 세지 않는다.
+   * 도는 서브에이전트 수: 상태줄의 subagents 항목 가운데 status 가 "running" 인 것. status 는 "running"·"completed" 둘이다(문서, 1.5.14 실측).
+   * 끝난 것("completed")은 세지 않는다: 끝난 항목은 목록에 남는다(1.5.14 실측). 항목의 name·role·model 칸은 옮기지 않는다(role 은 곧 지시 글로 바뀐다).
    */
   subagents: number;
   /**
    * 도는 것도 끝난 것도 아닌 항목의 수(status 가 없거나 문서에 없는 값). 0 이 아니면 subagents 는 정확한 수가 아니다: 그 항목이 도는 중인지 모른다
-   * (실제 상태줄 입력은 아직 본 적이 없다). null: 이 칸을 모르던 래퍼가 쓴 기록이다(그때의 subagents 는 '끝나지 않은 항목' 수였다). 역시 정확하지 않다.
+   * (1.5.14 실측에서는 0 이었다). null: 이 칸을 모르던 래퍼가 쓴 기록이다(그때의 subagents 는 '끝나지 않은 항목' 수였다). 역시 정확하지 않다.
    */
   subagentsUnknown: number | null;
   planTier: string | null;
@@ -41,12 +51,12 @@ export interface GeminiStatusRecord {
    */
   launch: string | null;
   /**
-   * agy 가 지금 든 모드: 상태줄 입력의 cycle_mode 글 그대로("auto"·"accept-edits"·"plan"), 칸이 없으면 "default"(문서: default 모드에서는 빠진다).
+   * agy 가 지금 든 모드: 상태줄 입력의 cycle_mode 글 그대로("auto"·"accept-edits"·"plan"), 칸이 없으면 "default".
+   * 1.5.14 실측(agy-real logs/m-<모드>): 매번 묻기는 칸이 없고, accept-edits·plan 은 처음부터, auto 는 띄운 뒤 2초쯤부터 칸이 온다. shift+tab 으로 바꾸면 다시 그린다.
    * null: 칸이 글이 아니거나, 이 칸을 모르던 래퍼의 기록이다(모름).
-   * UNVERIFIED-INTERACTIVE: 실제 상태줄 입력은 아직 본 적이 없다(문서 docs_cli_statusline.md 의 칸 이름). 대표의 agy 첫 설정 뒤 실제 값으로 확인한다.
    */
   cycleMode: string | null;
-  /** 상태줄 입력의 sandbox.enabled(터미널 샌드박스가 켜졌나). 모르면 null(이 칸을 모르던 래퍼의 기록 포함). UNVERIFIED-INTERACTIVE(위와 같다). */
+  /** 상태줄 입력의 sandbox.enabled(터미널 샌드박스가 켜졌나, 1.5.14 실측: auto 에서도 {enabled:false}). 모르면 null(이 칸을 모르던 래퍼의 기록 포함). */
   sandbox: boolean | null;
 }
 
@@ -73,7 +83,7 @@ export function geminiStatusPath(contextHome: string, memberId: string): string 
  * - 숫자는 유한수이고 0 이상일 때만 받는다(문맥 % 는 100 이하, 창 크기는 0 초과, 남은 비율은 0~1).
  * - 초기화 시각은 reset_time(ISO 글 또는 epoch 초·밀리초)을 ISO 로 옮기고, 없으면 now + reset_in_seconds 다.
  * - 대화 id 는 서버가 받는 세션 id 모양(영문·숫자·`_`·`-`, 128자까지)일 때만 받는다.
- * - email 을 비롯해 아래에 없는 칸은 옮기지 않는다.
+ * - email 을 비롯해 아래에 없는 칸은 옮기지 않는다. transcript_path 도 옮기지 않는다(1.5.14 는 없는 경로를 알린다: transcriptPath 는 늘 null).
  * - 서브에이전트: status 가 "running" 인 항목 수를 subagents 에, "running"·"completed" 가 아닌 항목 수를 subagentsUnknown 에 적는다.
  * - launch(넷째 인자, 없어도 된다): 상태줄 명령이 받은 띄우기 값. 모양이 다르거나 없으면 기록의 launch 는 null 이다.
  * - 모드: cycle_mode 가 없으면 "default"(agent_state 가 글인 입력일 때만, 아니면 null), 글이면 그 글(40자까지), 그 밖이면 null. sandbox.enabled 가 참·거짓이면 그 값, 아니면 null.
@@ -104,7 +114,6 @@ export function geminiStatusFromPayload(memberId: string, payload: unknown, now:
 
   const input = object(payload);
   const id = (value: unknown): string | null => (typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value) ? value : null);
-  const transcript = text(input.transcript_path, 4096);
   const model = object(input.model);
   const context = object(input.context_window);
   const windowSize = amount(context.context_window_size);
@@ -125,7 +134,7 @@ export function geminiStatusFromPayload(memberId: string, payload: unknown, now:
     memberId,
     at: now.toISOString(),
     conversationId: id(input.conversation_id) ?? id(input.session_id),
-    transcriptPath: transcript !== null && transcript.startsWith("/") ? transcript : null,
+    transcriptPath: null,
     model: { id: text(model.id, 200), effort: text(model.effort, 40) },
     context: {
       usedPct: amount(context.used_percentage, 100),

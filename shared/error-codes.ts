@@ -489,6 +489,7 @@ export const ERROR_CODES = {
   observation_start_not_ready: { ko: "띄운 뒤 60초 넘게 준비를 알리지 않았습니다. 터미널을 열어 화면을 확인해 주세요", en: "It hasn't reported ready for over 60 seconds after starting. Open the terminal and check the screen" },
   observation_login_required: { ko: "Claude 로그인이 필요합니다. 터미널에서 /login 으로 다시 로그인하면 이어 갑니다", en: "Claude needs you to sign in again. Run /login in the terminal to continue" },
   observation_gemini_setup: { ko: "Antigravity CLI의 로그인·첫 설정이 끝나지 않았습니다. 터미널을 열어 직접 끝내 주세요", en: "Antigravity CLI hasn't finished sign-in or first-run setup. Open the terminal and finish it yourself" },
+  observation_gemini_folder_trust: { ko: "Antigravity CLI가 이 폴더를 신뢰할지 묻고 있습니다. IAMCEO는 이 창에 답하지 않습니다. 터미널을 열어 직접 답해 주세요", en: "Antigravity CLI is asking whether to trust this folder. IAMCEO never answers this prompt. Open the terminal and answer it yourself" },
   // ---- 11-16 핫픽스 B: 턴은 끝났지만 Codex 가 띄운 백그라운드 프로그램이 남은 팀장(쉬는 중으로 보이지만 입력을 넣지 않는다) ----
   // 넓은 코드(member_working·archive_member_working·cli_switch_busy)는 출시된 앱이 보므로 그대로 두고 reason 칸으로 싣는다.
   sleep_background_program: { ko: "턴은 끝났지만 Codex가 띄운 백그라운드 프로그램이 아직 돌고 있어 잠재우지 않았습니다. 터미널에서 /stop 으로 닫은 뒤 잠재우거나, 그래도 잠재우면 그 프로그램도 함께 끝납니다", en: "The turn ended, but a background program that Codex started is still running, so the staff member wasn't put to sleep. Close it with /stop in the terminal first, or put the staff member to sleep anyway and that program ends too" },

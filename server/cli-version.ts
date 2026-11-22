@@ -15,8 +15,8 @@ export type { CliVersionInfo } from "../shared/types.ts";
 export const VERIFIED_CLI_VERSIONS: Record<CliProvider, string[]> = {
   claude: ["2.1.316", "2.1.319", "2.1.322", "2.1.323"],
   codex: ["0.166.0"],
-  // Antigravity CLI(`agy`). 1.5.14 에서 명령줄·훅·상태줄·MCP 를 실측했다. 화면 견본 폴더(tests/fixtures/cli/gemini/1.5.14)는 아직 없다:
-  // 실제 화면을 확인한 뒤 넣는다(견본 시험 tests/cli-fixtures.test.ts 는 그때 gemini 를 함께 보게 한다).
+  // Antigravity CLI(`agy`). 1.5.14 에서 명령줄·훅·상태줄·MCP 를 실측했고, 대표의 첫 설정 뒤 대화형 화면(입력칸·승인 창·폴더 신뢰 창·진행 줄)·상태줄 입력·
+  // 훅 입력·OSC 7501 견본을 tests/fixtures/cli/gemini/1.5.14 에 두었다(견본 시험 tests/cli-fixtures.test.ts).
   gemini: ["1.5.14"],
 };
 

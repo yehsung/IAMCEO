@@ -52,7 +52,8 @@ const RECORD: GeminiStatusRecord = {
   memberId: "m_lead1",
   at: "2026-11-21T03:00:00.000Z",
   conversationId: CONVERSATION,
-  transcriptPath: TRANSCRIPT,
+  // 0.2.10: 상태줄의 transcript_path 는 옮기지 않는다(1.5.14 실측: 없는 경로를 알린다).
+  transcriptPath: null,
   model: { id: "gemini-4-argon-high", effort: "high" },
   context: { usedPct: 4.8, windowSize: 1_000_000, inputTokens: 48_213, outputTokens: 1_902 },
   quota: {
@@ -107,6 +108,15 @@ describe("상태줄 입력 JSON → 기록", () => {
     for (const bad of ["relative/transcript.jsonl", "", "/x\0y", "/" + "p".repeat(4096), 3, null]) {
       expect(geminiStatusFromPayload("m_lead1", { transcript_path: bad }, NOW).transcriptPath).toBeNull();
     }
+  });
+
+  test("1.5.14 실측: 상태줄의 transcript_path 는 없는 경로(~/.gemini/antigravity/…)라 기록에 옮기지 않는다. 앞 판 래퍼가 적은 경로가 든 기록은 그대로 읽힌다", () => {
+    const wrong = `/Users/user/.gemini/antigravity/brain/${CONVERSATION}/.system_generated/logs/transcript.jsonl`;
+    expect(geminiStatusFromPayload("m_lead1", { transcript_path: wrong, conversation_id: CONVERSATION }, NOW).transcriptPath).toBeNull();
+    expect(geminiStatusFromPayload("m_lead1", { transcript_path: TRANSCRIPT }, NOW).transcriptPath).toBeNull();
+    const home = temp();
+    put(home, "m_lead1", { ...RECORD, transcriptPath: wrong });
+    expect(readGeminiStatus(home, "m_lead1")?.transcriptPath).toBe(wrong);
   });
 
   test("숫자는 유한수이고 범위 안일 때만 받는다. 아니면 null", () => {

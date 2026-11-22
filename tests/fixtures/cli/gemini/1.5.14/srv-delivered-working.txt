@@ -1,0 +1,19 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.14
+     ▀▀▀▀▀▀       user@example.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Low)
+   ▄▀▀    ▀▀▄     /private/tmp/iamceo-cli-fixture/work
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.
+
+  [대표 직접] "시험입니다. 도구를 쓰지 말고 pong 한 단어로만 답하세요."
+  #fcd85311-ff7a-4282-a243-d92ceccfd234
+  #iamceo_c246MKE-bVDORKyprQT3Gg
+  #iamceo_b_Tg5GsctMkXzgRFBK1Q7hIQ
+⣟  Generating...
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 0%

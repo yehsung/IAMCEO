@@ -8,8 +8,13 @@
 // - 실행 파일의 변경 기록: 일시적 오류(5xx, 분당 429, 스트림 끊김)는 agy 가 스스로 재시도하고(서버가 준 대기 최대 4분), 계정 한도(주간·개인 할당량·
 //   지출 상한·선불 잔액)는 재시도 없이 곧바로 턴을 끝낸다. 크레딧까지 바닥나면 "Your AI credits balance is too low to continue."
 // - 실행 파일 안 agy 자기 규칙(스웜 보드): `QUOTA_RE = /RESOURCE_EXHAUSTED|quota|\b429\b|exhausted your capacity|rate.?limit/i`.
-// UNVERIFIED-INTERACTIVE: 대화형 화면에서 한도·장애로 끝난 턴의 OSC 7501 보고 글(msg)과 Stop error 글은 아직 보지 못했다(대표의 agy 첫 설정 뒤 확인).
-// 아래 한도 문구는 실행 파일에 든 글이고, 장애 문구는 헤드리스 실측 글이다. 모르는 글은 '그 밖'(일반 오류)이다: 지금까지처럼 오류로 알린다(퇴보 없음).
+// - 1.5.14 대화형 실측(agy-real net2): 장애로 끝난 턴의 OSC 는 error, msg 'There was a network issue connecting to the server, please try again.'(화면의 ⚠ 줄과 같은 글),
+//   Stop 은 ERROR, error 'generating and executing: request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": unexpected EOF'
+//   로 헤드리스와 같다. 그 전 약 133초 동안 진행 줄 'Model unavailable (attempt N/9), retrying in Ns...' 를 보인다(core.ts 가 network_retry 관측으로 쓴다).
+//   처음부터 연결 없이 띄운 agy 는 첫 글에 곧바로 OSC error 'failed to construct executor: plan model not specified; you must specify a valid model' 이고
+//   훅이 하나도 돌지 않는다(모델 목록을 못 받음). 이 글은 모델 설정 오류와 구별되지 않아 '그 밖'(일반 오류)으로 둔다.
+// UNVERIFIED-INTERACTIVE: 한도로 끝난 턴의 OSC 글과 Stop error 글은 아직 보지 못했다(한도를 유도하지 못했다).
+// 아래 한도 문구는 실행 파일에 든 글이고, 장애 문구는 실측 글이다. 모르는 글은 '그 밖'(일반 오류)이다: 지금까지처럼 오류로 알린다(퇴보 없음).
 import type { TurnErrorKind } from "./api-outage.ts";
 
 /** agy 가 모델·한도·계정을 묻는 곳(실측 프록시 기록). 장애 탐침이 Gemini 팀장이 있을 때 이 주소에 닿는지 본다(어떤 HTTP 답이든 닿은 것이다). */

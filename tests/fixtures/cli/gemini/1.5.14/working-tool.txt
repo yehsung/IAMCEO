@@ -1,0 +1,19 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.14
+     ▀▀▀▀▀▀       user@example.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Low)
+   ▄▀▀    ▀▀▄     /private/tmp/iamceo-cli-fixture/work
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Write a 600-word essay about lighthouses. Do not use any tools.
+
+────────────────────────────────────────────────────────────
+> Run the shell command: ls -la . (use the run_command tool) and report the output briefly.
+
+● Ran (ls -la .) (ctrl+o to expand)
+⡿  Running command...
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 1%

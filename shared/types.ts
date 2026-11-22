@@ -96,10 +96,12 @@ export type BlockedReason = "permission" | "selection" | "setup" | "usage_limit"
  * trust_dialog_unrecognized: 폴더 신뢰 창으로 보이지만 정확히 읽지 못했다. start_not_ready: 띄운 뒤 60초 넘게 준비를 알리지 않았다.
  * login_required(11-16): Claude 의 턴이 로그인(계정) 오류로 끝났다(blockedReason setup). 터미널에서 /login 으로 다시 로그인해 다음 턴이 돌면 풀린다.
  * gemini_setup(0.2.10): Antigravity CLI 가 로그인·첫 설정(약관·데이터 수집 동의)에서 막혀 있다고 알렸다(blockedReason setup). 사람만 끝낼 수 있다: 서버는 그 화면에 키를 보내지 않는다.
+ * gemini_folder_trust(0.2.10): Antigravity CLI 가 폴더 신뢰 창에서 기다린다(blockedReason setup, agy 1.5.14 는 도구 승인과 같은 permission 으로 알린다).
+ *   IAMCEO 는 trustedWorkspaces 로 이 창을 피하지만, 뜨면 대표가 터미널에서 답한다: 서버는 그 창에 키(멈춤 Esc 포함)를 보내지 않는다.
  * 이 값을 모르는 출시 앱은 막힘을 예전처럼 보이고 설명에 관측 메모(statusObservation.error.note)를 쓴다.
  */
-export type BlockedCode = "trust_dialog_unrecognized" | "start_not_ready" | "login_required" | "gemini_setup";
-export const BLOCKED_CODES: readonly BlockedCode[] = ["trust_dialog_unrecognized", "start_not_ready", "login_required", "gemini_setup"];
+export type BlockedCode = "trust_dialog_unrecognized" | "start_not_ready" | "login_required" | "gemini_setup" | "gemini_folder_trust";
+export const BLOCKED_CODES: readonly BlockedCode[] = ["trust_dialog_unrecognized", "start_not_ready", "login_required", "gemini_setup", "gemini_folder_trust"];
 export interface StatusObservation {
   source: Backend | "manual";
   observedAt: string | null;

@@ -467,6 +467,47 @@ describe("readGeminiTurnStop: 지금 끝난 턴의 Stop", () => {
     expect(readGeminiTurnStop(watch, eventsDir, CONV)).toBeNull();
     expect(readGeminiTurnStop(watch, eventsDir, CONV, true)).toMatchObject({ error: "before invocation" });
   });
+  test("1.5.14 실측 순서: 서브에이전트가 도는 동안 부모 Stop(fullyIdle false) → 서브에이전트가 끝난 뒤 부모 PreInvocation(0)·Stop(fullyIdle true)", () => {
+    // 견본 tests/fixtures/cli/gemini/1.5.14/hooks.jsonl 17~25줄의 차례(대화 id 는 바꿈). 부모 턴의 끝은 마지막 Stop 이다.
+    const sub = "aaaaaaaa-2222-4222-8222-000000000002";
+    const parentTurn = (add: (entry: Record<string, unknown>) => void) => {
+      add({ event: "PreInvocation", invocation: 0, markers: [] });
+      add({ event: "PreInvocation", invocation: 1, markers: [] });
+      add({ event: "SessionStart", conversationId: sub });
+      add({ event: "PreInvocation", conversationId: sub, invocation: 0, markers: [] });
+      add({ event: "Stop", reason: "NO_TOOL_CALL", fullyIdle: false, failed: false });
+      add({ event: "PreInvocation", conversationId: sub, invocation: 1, markers: [] });
+      add({ event: "PreInvocation", invocation: 0, markers: [] });
+      add({ event: "Stop", conversationId: sub, reason: "ERROR", fullyIdle: true, failed: true, error: "sub failed" });
+      add({ event: "Stop", reason: "NO_TOOL_CALL", fullyIdle: true, failed: false });
+    };
+    const known = setupWatch();
+    parentTurn(known.add);
+    expect(readGeminiTurnStop(known.watch, known.eventsDir, CONV)).toMatchObject({ reason: "NO_TOOL_CALL", fullyIdle: true, conversationId: CONV });
+    // 대화 id 를 모르는 터미널도 마지막 PreInvocation(부모)의 대화로 묶는다: 서브에이전트의 Stop(ERROR)을 부모 턴의 끝으로 읽지 않는다(예전에는 읽었다).
+    const unknown = setupWatch();
+    parentTurn(unknown.add);
+    expect(readGeminiTurnStop(unknown.watch, unknown.eventsDir, null)).toMatchObject({ reason: "NO_TOOL_CALL", fullyIdle: true, conversationId: CONV });
+  });
+  test("같은 PreInvocation 뒤에 fullyIdle false 와 true 가 함께 있으면 true 가 턴의 끝이다. false 뿐이면 그것이다", () => {
+    const { eventsDir, watch, add } = setupWatch();
+    add({ event: "PreInvocation", invocation: 0, markers: [] });
+    add({ event: "Stop", reason: "NO_TOOL_CALL", fullyIdle: false, failed: false });
+    expect(readGeminiTurnStop(watch, eventsDir, CONV)).toMatchObject({ fullyIdle: false });
+    add({ event: "Stop", reason: "ERROR", fullyIdle: true, failed: true, error: "later" });
+    expect(readGeminiTurnStop(watch, eventsDir, CONV)).toMatchObject({ reason: "ERROR", fullyIdle: true, error: "later" });
+  });
+  test("1.5.14 실측: Esc 중단·승인 거절로 끝난 턴에는 Stop 이 없다 → null(오류로도 미완으로도 읽지 않는다)", () => {
+    const { eventsDir, watch, add } = setupWatch();
+    add({ event: "PreInvocation", invocation: 0, markers: [] });
+    expect(readGeminiTurnStop(watch, eventsDir, CONV)).toBeNull();
+    expect(readGeminiTurnStop(watch, eventsDir, CONV, true)).toBeNull();
+    clearGeminiTurn(watch);
+    // 다음 턴은 그 뒤의 줄만 본다.
+    add({ event: "PreInvocation", invocation: 0, markers: [] });
+    add({ event: "Stop", reason: "NO_TOOL_CALL", fullyIdle: true, failed: false });
+    expect(readGeminiTurnStop(watch, eventsDir, CONV)).toMatchObject({ reason: "NO_TOOL_CALL" });
+  });
   test("훅을 넣지 않는 환경·남이 쓸 수 있는 파일이면 읽지 않는다", () => {
     expect(geminiTurnWatch(null, "m_one")).toBeNull();
     expect(geminiTurnWatch("/x", "../bad")).toBeNull();

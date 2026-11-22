@@ -5,8 +5,11 @@
 //   command.data.groups[] = { name, description: "Models within this group: Gemini 4 Neon, …, Gemini 3.8 Flash", buckets: [{ id, window, remaining_fraction, reset_time }] }.
 //   한 묶음의 모델은 주간·5시간 한도를 함께 쓴다(설명 글). 계정 메일은 들어 있지 않다. 연결이 없으면 exit 1 + status "ERROR".
 //   "Gemini 4 Argon" 묶음처럼 모델 목록 글이 없는 묶음은 묶음 이름이 곧 모델 이름이다.
-// - 상태줄 입력의 quota 는 묶음 id → { remaining_fraction, reset_time, reset_in_seconds } 다(문서). 상태줄 기록(gemini-status.ts)이 이미 옮겨 둔다.
-//   UNVERIFIED-INTERACTIVE: 실제 상태줄 입력의 quota 키 목록·reset_time 꼴은 대화형 화면이 있어야 본다(문서·/usage 의 id 와 같을 것으로 본다).
+// - 상태줄 입력의 quota 는 묶음 id → { remaining_fraction, reset_time, reset_in_seconds } 다. 상태줄 기록(gemini-status.ts)이 이미 옮겨 둔다.
+//   1.5.14 대화형 실측(agy-real statusline-*.json): 키는 '3p-5h'·'3p-weekly'·'gemini-5h'·'gemini-argon-wtu-weekly'·'gemini-weekly' 로 /usage 의 bucket id 와 같고,
+//   reset_time 은 '2026-11-22T19:37:31Z' 꼴, disabled 칸은 없다. 쓰지 않은 3p-* 의 reset_time 은 매번 지금+5시간·7일로 움직인다(다 쓴 칸의 시각만 쓴다).
+//   그래서 /usage 없이도 묶음 id 로 모델 갈래를 안다(geminiBucketFamily): gemini-5h·gemini-weekly = Gemini 모델, 3p-* = Claude·GPT 모델,
+//   gemini-argon-* = Gemini 4 Argon(Pro 요금제에서 따로, Ultra 는 큰 Gemini 묶음에 든다는 /usage 설명).
 // 서버는 Gemini 팀장이 한도로 멈췄을 때만 /usage 를 띄운다(60초 안에 다시 묻지 않는다). 시험 모드에서는 만들지 않는다(createOrchestrator).
 import { mkdirSync } from "node:fs";
 import { resolveCliExecutable } from "./config.ts";
@@ -82,6 +85,75 @@ export function geminiGroupAvailable(group: AgyUsageGroup): boolean {
   return group.buckets.length > 0 && group.buckets.every(bucket => bucket.remainingFraction !== null && bucket.remainingFraction > 0);
 }
 
+/** 한도 묶음의 모델 갈래(위 머리말). gemini: Gemini 모델(Neon·Hydrogen·Orchestrator·3.8 Flash), argon: Gemini 4 Argon, third_party: Claude·GPT-OSS. */
+export type GeminiQuotaFamily = "gemini" | "argon" | "third_party";
+const FAMILY_NAMES: Record<GeminiQuotaFamily, string> = { gemini: "Gemini Models", argon: "Gemini 4 Argon", third_party: "Claude and GPT models" };
+
+/** 묶음 id 의 갈래(1.5.14 실측의 id 모양). 모르는 id 는 null. */
+export function geminiBucketFamily(id: string): GeminiQuotaFamily | null {
+  const key = id.trim().toLowerCase();
+  if (key.startsWith("3p-")) return "third_party";
+  if (key.startsWith("gemini-argon")) return "argon";
+  if (key.startsWith("gemini-")) return "gemini";
+  return null;
+}
+
+/**
+ * 모델 이름(표시 이름·id)의 갈래. Claude·GPT 는 third_party, Argon 은 argon, 그 밖의 Gemini 는 gemini. 모르면 null.
+ * Orchestrator 는 /usage 가 Gemini 묶음에 둔 'Orchestrator (Neon)' 만 gemini 다(Argon 쪽 Orchestrator 는 어느 묶음에도 없다: 모른다).
+ */
+export function geminiModelFamily(name: string | null | undefined): GeminiQuotaFamily | null {
+  if (typeof name !== "string") return null;
+  const key = name.trim().toLowerCase();
+  if (/^(?:claude|gpt)/.test(key)) return "third_party";
+  if (key.includes("orchestrator")) return /\bneon\b/.test(key) ? "gemini" : null;
+  if (/\bargon\b/.test(key)) return "argon";
+  if (key.startsWith("gemini")) return "gemini";
+  return null;
+}
+
+/** 이 이름들 가운데 갈래를 아는 첫 이름의 갈래(앞의 이름이 더 믿을 만하다). */
+function familyOf(names: readonly (string | null | undefined)[]): GeminiQuotaFamily | null {
+  for (const name of names) {
+    const family = geminiModelFamily(name);
+    if (family) return family;
+  }
+  return null;
+}
+
+type StatusBucket = GeminiStatusRecord["quota"][string];
+/**
+ * 상태줄 기록의 묶음 가운데 이 모델 이름들의 갈래 것. 갈래를 모르거나 기록에 그 갈래 묶음이 없으면 전부다(예전처럼: 어느 묶음인지 모를 때).
+ * Argon 묶음이 없으면(Ultra 요금제) Gemini 묶음이다.
+ */
+function scopedBuckets(record: Pick<GeminiStatusRecord, "quota">, names: readonly (string | null | undefined)[]): StatusBucket[] {
+  const entries = Object.entries(record.quota).filter(([, bucket]) => !bucket.disabled);
+  const family = familyOf(names);
+  if (!family) return entries.map(([, bucket]) => bucket);
+  for (const wanted of family === "argon" ? ["argon", "gemini"] as const : [family]) {
+    const mine = entries.filter(([id]) => geminiBucketFamily(id) === wanted);
+    if (mine.length) return mine.map(([, bucket]) => bucket);
+  }
+  return entries.map(([, bucket]) => bucket);
+}
+
+/**
+ * 상태줄 기록의 묶음으로 만든 /usage 꼴(갈래마다 한 묶음). /usage 를 못 읽었을 때(시험 모드·실패) 한도 카드의 모델 선택지·막힌 모델에 쓴다.
+ * 묶음의 모델은 Gemini 모델 목록(catalog) 가운데 그 갈래의 것이다. 기록이 없거나 갈래를 아는 묶음이 없으면 null.
+ */
+export function geminiStatusUsage(record: Pick<GeminiStatusRecord, "quota" | "at"> | null, catalog: readonly { value: string; label: string }[]): AgyUsage | null {
+  if (!record) return null;
+  const groups: AgyUsageGroup[] = [];
+  for (const family of ["gemini", "third_party", "argon"] as const) {
+    const buckets = Object.entries(record.quota).filter(([id, bucket]) => !bucket.disabled && geminiBucketFamily(id) === family)
+      .map(([id, bucket]): AgyUsageBucket => ({ id, window: /5h$/i.test(id) ? "5h" : /weekly$/i.test(id) ? "weekly" : null, remainingFraction: bucket.remainingFraction, resetAt: bucket.resetAt }));
+    if (!buckets.length) continue;
+    const models = catalog.filter(option => (geminiModelFamily(option.label) ?? geminiModelFamily(option.value)) === family).map(option => option.label);
+    groups.push({ name: FAMILY_NAMES[family], models, buckets });
+  }
+  return groups.length ? { at: record.at, groups } : null;
+}
+
 /** 다 쓴 칸들의 초기화 시각 가운데 가장 늦은 것(주간·5시간이 함께 바닥이면 늦은 쪽에야 풀린다). 다 쓴 칸이 없거나 시각을 모르면 null. */
 export function geminiExhaustedResetAt(buckets: { remainingFraction: number | null; resetAt: string | null }[]): string | null {
   const times = buckets.filter(bucket => bucket.remainingFraction !== null && bucket.remainingFraction <= 0 && bucket.resetAt).map(bucket => bucket.resetAt!).sort();
@@ -89,17 +161,17 @@ export function geminiExhaustedResetAt(buckets: { remainingFraction: number | nu
 }
 
 /**
- * 상태줄 기록의 한도 묶음으로 본 초기화 시각: 다 쓴 칸 가운데 가장 늦은 시각(어느 묶음이 이 팀장의 모델 것인지 모를 때 쓰는 대신 길: 늦게 풀리는 쪽으로).
- * 기록이 없거나 다 쓴 칸이 없으면 null.
+ * 상태줄 기록의 한도 묶음으로 본 초기화 시각: 이 팀장 모델(names)의 갈래 묶음에서 다 쓴 칸 가운데 가장 늦은 시각. 갈래를 모르면 모든 묶음에서 본다
+ * (어느 묶음이 이 팀장의 모델 것인지 모를 때 쓰는 대신 길: 늦게 풀리는 쪽으로). 기록이 없거나 다 쓴 칸이 없으면 null.
  */
-export function geminiStatusResetAt(record: Pick<GeminiStatusRecord, "quota"> | null): string | null {
+export function geminiStatusResetAt(record: Pick<GeminiStatusRecord, "quota"> | null, names: readonly (string | null | undefined)[] = []): string | null {
   if (!record) return null;
-  return geminiExhaustedResetAt(Object.values(record.quota).filter(bucket => !bucket.disabled));
+  return geminiExhaustedResetAt(scopedBuckets(record, names));
 }
 
-/** 상태줄 기록이 알리는 한도 묶음 가운데 다 쓴 것이 있는가. 묶음을 하나도 모르면 null(모름). */
-export function geminiStatusExhausted(record: Pick<GeminiStatusRecord, "quota"> | null): boolean | null {
-  const buckets = record ? Object.values(record.quota).filter(bucket => !bucket.disabled && bucket.remainingFraction !== null) : [];
+/** 상태줄 기록이 알리는 한도 묶음(이 팀장 모델의 갈래, 모르면 전부) 가운데 다 쓴 것이 있는가. 묶음을 하나도 모르면 null(모름). */
+export function geminiStatusExhausted(record: Pick<GeminiStatusRecord, "quota"> | null, names: readonly (string | null | undefined)[] = []): boolean | null {
+  const buckets = record ? scopedBuckets(record, names).filter(bucket => bucket.remainingFraction !== null) : [];
   if (!buckets.length) return null;
   return buckets.some(bucket => bucket.remainingFraction! <= 0);
 }

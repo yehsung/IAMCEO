@@ -177,7 +177,8 @@ struct BlockedGuide: Sendable, Equatable {
     init?(_ member: Member) {
         guard member.status == "blocked" else { return nil }
         switch member.blockedCode {
-        case "trust_dialog_unrecognized":
+        // gemini_folder_trust(0.2.10): Antigravity CLI's own folder-trust prompt, recognized but never answered by the server.
+        case "trust_dialog_unrecognized", "gemini_folder_trust":
             label = String(localized: "폴더 신뢰 확인 필요")
             // Named after the session's own CLI, as the first-run choice names them; an unknown kind is left unnamed
             // rather than called Claude Code.

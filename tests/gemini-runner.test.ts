@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { CoreRunner, codexExecutionPreference, geminiMayHaveConversed, type CoreCompactState, type CoreRunnerDeps } from "../server/runner/core.ts";
 import { CoreError } from "../server/runner/core-client.ts";
 import { geminiStatusFromPayload, geminiStatusPath, readGeminiStatus } from "../server/runner/gemini-status.ts";
-import { GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE } from "../server/runner/gemini-screen.ts";
+import { GEMINI_FOLDER_TRUST_CODE, GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE } from "../server/runner/gemini-screen.ts";
 import { geminiHookEventsDir, geminiHooksRecordTurns } from "../server/runner/gemini-hooks.ts";
 import { GEMINI_LAUNCH_LABEL } from "../server/runner/providers.ts";
 import { geminiStatusLineLaunch } from "../server/runner/gemini-statusline.ts";
@@ -1085,6 +1085,90 @@ describe("로그인·첫 설정 막힘: 알리기만 하고 키를 보내지 않
       const other = await until("막힘 알림", () => g.events.findLast(e => e.type === "status" && e.status === "blocked")) as Extract<RunnerEvent, { type: "status" }>;
       expect(other).toMatchObject({ blockedReason: "selection", observation: { error: null } });
     }
+  });
+});
+
+/** agy 1.5.14 실측 화면 견본(tests/fixtures/cli/gemini/1.5.14). */
+const realScreen = (name: string) => readFileSync(join(import.meta.dir, "fixtures", "cli", "gemini", "1.5.14", `${name}.txt`), "utf8");
+
+describe("1.5.14 실측: 폴더 신뢰 창은 대표가 볼 창이다", () => {
+  test.each([
+    ["OSC 글(풀린 글)", { state: "blocked", kind: "permission", app: "antigravity", msg: "Trust this folder?" }],
+    ["OSC 글(base64)", { state: "blocked", kind: "permission", app: "antigravity", msg: Buffer.from("Trust this folder?").toString("base64") }],
+    ["OSC 글이 다르다(화면으로 안다)", { state: "blocked", kind: "permission", app: "antigravity", msg: "Confirm" }],
+    ["상태 보고가 아직 없다(화면으로 안다)", null],
+  ])("%s → 도구 승인이 아니다: 막힘 사유 setup·관측 gemini_folder_trust, 전달 보류, 승인·멈춤 키를 보내지 않는다", async (_name, status) => {
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    f.core.setStatus("m_gem1", status);
+    f.core.setScreen("m_gem1", realScreen("folder-trust"));
+    const blocked = await until("막힘 알림", () => f.events.findLast(e => e.type === "status" && e.status === "blocked")) as Extract<RunnerEvent, { type: "status" }>;
+    expect(blocked).toMatchObject({ status: "blocked", blockedReason: "setup", observation: { error: { code: GEMINI_FOLDER_TRUST_CODE } } });
+    expect(blocked.observation!.error!.note).toBe(`Antigravity CLI가 이 폴더를 신뢰할지 묻고 있습니다. IAMCEO는 이 창에 답하지 않습니다. 터미널을 열어 직접 답해 주세요: ${f.member.cwd}`);
+    expect(await f.runner.approval(live)).toBeNull();
+    expect(await f.runner.answerApproval(live, "any-fingerprint", 1)).toEqual({ ok: false, reason: "unrecognized" });
+    expect(await f.runner.send(live, "지시", f.opts)).toMatchObject({ ok: false, deliveryEffect: "not_written" });
+    // 예전에는 permission 이라 멈춤 키(Esc)를 보냈다: 그 키가 이 창의 답('No, exit')일 수 있다.
+    const stopped = await rejection(f.runner.interrupt(live));
+    expect((stopped as CoreError).kind).toBe("no_turn");
+    expect(f.core.count("terminal.interrupt")).toBe(0);
+    expect(f.core.keys).toEqual([]);
+    expect(f.core.turns("m_gem1")).toEqual([]);
+    // 대표가 터미널에서 답해 쉬는 중이 되면 메모가 사라진다.
+    f.core.setStatus("m_gem1", { state: "idle", app: "antigravity" });
+    f.core.setScreen("m_gem1", null);
+    await until("쉬는 중", () => f.runner.observationState("m_gem1")?.setupError === null);
+  });
+  test("도구 승인 창(같은 permission)은 지금처럼 승인 대기이고 멈춤 키가 간다(Esc = 거절하고 턴을 끝낸다)", async () => {
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    f.core.setStatus("m_gem1", { state: "blocked", kind: "permission", app: "antigravity", msg: "Approve Bash: ls -la ." });
+    f.core.setScreen("m_gem1", realScreen("approval-command"));
+    const blocked = await until("막힘 알림", () => f.events.findLast(e => e.type === "status" && e.status === "blocked")) as Extract<RunnerEvent, { type: "status" }>;
+    expect(blocked).toMatchObject({ blockedReason: "permission", observation: { error: null } });
+    await f.runner.interrupt(live);
+    expect(f.core.count("terminal.interrupt")).toBe(1);
+  });
+});
+
+describe("1.5.14 실측: 재시도 진행 줄은 Claude 의 응답 대기와 같은 관측(network_retry)이다", () => {
+  test("'Model unavailable (attempt N/9), retrying in Ns...' 가 보이는 동안 network_retry, 사라지면 지운다", async () => {
+    const f = await setup();
+    await f.runner.start(f.member, f.opts);
+    f.core.setStatus("m_gem1", { state: "working", app: "antigravity" });
+    f.core.setScreen("m_gem1", realScreen("network-retry"));
+    const retry = await until("재시도 관측", () => f.events.findLast(e => e.type === "status" && e.observation?.error?.code === "network_retry")) as Extract<RunnerEvent, { type: "status" }>;
+    expect(retry).toMatchObject({ status: "working", blockedReason: null, observation: { error: { code: "network_retry", note: "API 연결 복구를 기다리며 CLI가 재시도하고 있습니다" } } });
+    f.core.setScreen("m_gem1", realScreen("working-first"));
+    await until("재시도 끝", () => f.runner.observationState("m_gem1")?.setupError === null);
+    // 대화 위쪽(지난 글)에만 그 줄이 남은 화면은 재시도가 아니다.
+    expect(f.events.filter(e => e.type === "status" && e.observation?.error?.code === "network_retry")).toHaveLength(1);
+  });
+});
+
+describe("1.5.14 실측: OSC 턴 끝(done·idle·error)과 Stop 훅", () => {
+  test("Esc 로 멈춘 턴은 done 없이 idle 이고 Stop 이 없다: 오류로 끝난 턴이 아니다. 정상 끝(done)·장애(error + Stop ERROR)는 각각 맞게 끝낸다", async () => {
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    await turn(f, live, "첫 턴");
+    expect(ofType(f.events, "turn_end").at(-1)).toMatchObject({ isError: false });
+    // 멈춘 턴: 가짜 agy 는 실제처럼 idle 로 알리고 Stop 을 쓰지 않는다.
+    const ended = ofType(f.events, "turn_end").length;
+    expect(await f.runner.send(live, "오래 걸리는 일 @fake:hold", f.opts)).toMatchObject({ ok: true });
+    await until("일하는 중", () => f.core.terminalOf("m_gem1")?.status?.state === "working");
+    await f.runner.interrupt(live);
+    await until("멈춘 턴 끝", () => ofType(f.events, "turn_end").length > ended);
+    expect(f.core.terminalOf("m_gem1")?.status?.state).toBe("idle");
+    expect(ofType(f.events, "turn_end").at(-1)).toMatchObject({ isError: false });
+    expect(ofType(f.events, "turn_end").at(-1)!.errorText).toBeUndefined();
+    // 장애: OSC error(msg) + Stop ERROR → 오류 글은 둘을 잇는다.
+    const before = ofType(f.events, "turn_end").length;
+    expect(await f.runner.send(live, "@fake:error=network @fake:oscmsg=There%20was%20a%20network%20issue%20connecting%20to%20the%20server%2C%20please%20try%20again. @fake:stoperror=generating%20and%20executing%3A%20request%20failed%3A%20unexpected%20EOF 일", f.opts)).toMatchObject({ ok: true });
+    await until("장애 턴 끝", () => ofType(f.events, "turn_end").length > before);
+    expect(ofType(f.events, "turn_end").at(-1)).toMatchObject({ isError: true, errorText: "There was a network issue connecting to the server, please try again. · generating and executing: request failed: unexpected EOF" });
   });
 });
 

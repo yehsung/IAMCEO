@@ -8,7 +8,10 @@
 // - 모델 호출(source MODEL)의 input_tokens + cache_read_tokens 가 그 호출의 프롬프트 크기다(실측: 압축 전 35,797 → 압축 뒤 12,984).
 //   result.usage·상태줄의 total_* 는 대화 전체 누적이라 압축 뒤에도 줄지 않는다(그래서 문맥 크기는 이 줄로 잰다).
 // 이 경로와 줄 모양은 공개 문서가 아니라 agy 자기 프롬프트·체크포인트 본문에 적힌 것이다. 판이 바뀌어 못 찾으면 '모름'으로 닫힌다(fail closed).
-// UNVERIFIED-INTERACTIVE: 대화형 프로세스가 오래 쓰는 동안에도 같은 파일에 곧바로 덧붙는지는 대표의 첫 설정 뒤 확인한다(헤드리스는 실행마다 새 프로세스).
+// 1.5.14 대화형 실측(agy-real, 견본 tests/fixtures/cli/gemini/1.5.14/transcript-compact.jsonl): 한 대화형 프로세스가 20분 넘게 도는 동안 같은 파일에 단계마다
+// 이어 붙었고(step_index 가 압축 뒤에도 이어진다), 맨 /compact 는 USER_INPUT('<USER_REQUEST>\n/compact\n</USER_REQUEST>…') 뒤에 CHECKPOINT 줄을 남겼다.
+// transcript_full.jsonl 도 내용이 같다. 상태줄의 transcript_path 는 없는 경로라 쓰지 않는다(gemini-status.ts).
+// UNVERIFIED-INTERACTIVE: 그 줄이 OSC done 보고보다 먼저 쓰이는지(같은 inode 로 곧바로 덧붙는지)는 따로 재지 않았다(압축 끝은 쉬는 중 + CHECKPOINT 를 함께 본다).
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { providerLogPath } from "./delivery-evidence.ts";

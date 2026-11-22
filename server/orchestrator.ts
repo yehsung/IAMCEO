@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { GeminiModelsRefresher, geminiModelsCachePath, ModelCatalogReader, type GeminiModelsRefresherOptions } from "./models.ts";
 import { CONTROL_UNKNOWN_NOTE, CORE_RECONNECT_HELD_NOTE, HOLD_NOTES, REOPEN_RETRY_NOTE, startingUnknownNote, stopCheckHeldNote } from "./hold-codes.ts";
 import { classifyGeminiTurnError, geminiTransientLimit } from "./gemini-errors.ts";
-import { GeminiQuotaReader, geminiExhaustedResetAt, geminiGroupAvailable, geminiGroupExhausted, geminiModelKey, geminiStatusExhausted, geminiStatusResetAt, geminiUsageGroup } from "./gemini-quota.ts";
+import { GeminiQuotaReader, geminiExhaustedResetAt, geminiGroupAvailable, geminiGroupExhausted, geminiModelKey, geminiStatusExhausted, geminiStatusResetAt, geminiStatusUsage, geminiUsageGroup, type AgyUsage } from "./gemini-quota.ts";
 import { readGeminiStatus, type GeminiStatusRecord } from "./runner/gemini-status.ts";
 import { geminiTranscriptPath, geminiTranscriptRoot } from "./runner/gemini-transcript.ts";
 import { defaultGeminiHome } from "./config.ts";
@@ -2760,8 +2760,8 @@ export class Orchestrator implements OrchestratorApi {
   /** 이 팀장이 이 글로 한도에 걸렸을 때 막힌 모델 값(소문자): 쓰던 모델(설정)과 글에 이름이 나온 모델. 카드가 blockedModels 로 기억한다. */
   private usageBlockedModels(member: Member, raw: string): string[] {
     const model = this.desiredConfig(member).model;
-    // Gemini: 한도는 모델 묶음마다다. 그 팀장 모델의 묶음이 바닥났으면 그 묶음의 모델이 모두 막힌다(/usage 를 읽었을 때).
-    const group = member.cli === "gemini" ? geminiUsageGroup(this.geminiQuota?.latest() ?? null, this.geminiModelNames(member)) : null;
+    // Gemini: 한도는 모델 묶음마다다. 그 팀장 모델의 묶음이 바닥났으면 그 묶음의 모델이 모두 막힌다(/usage, 없으면 상태줄 기록의 묶음).
+    const group = member.cli === "gemini" ? geminiUsageGroup(this.geminiUsageView([member.id]), this.geminiModelNames(member)) : null;
     const siblings = group && geminiGroupExhausted(group) ? this.geminiCatalogIn(group.models) : [];
     return [...new Set([...(model ? [model.toLowerCase()] : []), ...this.catalogValuesNamed(member.cli, limitedModelName(raw)), ...siblings])];
   }
@@ -2785,6 +2785,19 @@ export class Orchestrator implements OrchestratorApi {
     return names;
   }
 
+  /**
+   * Gemini 한도 묶음: 최근 /usage(운영, 30분 안), 없으면 이 팀장들의 상태줄 기록 가운데 가장 최근 것(30분 안)의 묶음으로 만든 것이다.
+   * 1.5.14 실측: 상태줄 quota 의 키는 /usage 의 bucket id 와 같아 묶음 id 로 모델 갈래를 안다(gemini-quota.ts geminiStatusUsage). 둘 다 없으면 null.
+   */
+  private geminiUsageView(memberIds: string[]): AgyUsage | null {
+    const usage = this.geminiQuota?.latest() ?? null;
+    if (usage) return usage;
+    const fresh = Date.now() - 30 * 60_000;
+    const records = memberIds.map(id => readGeminiStatus(this.config.home, id)).filter((record): record is GeminiStatusRecord => !!record && Date.parse(record.at) >= fresh)
+      .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+    return geminiStatusUsage(records[0] ?? null, this.models.read().gemini.models);
+  }
+
   /** 묶음의 모델 표시 이름들에 맞는 Gemini 목록의 값(소문자). */
   private geminiCatalogIn(models: string[]): string[] {
     const keys = new Set(models.map(geminiModelKey));
@@ -2792,11 +2805,11 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /**
-   * Gemini 팀장의 한도가 그 모델 묶음에만 걸린 것인가(카드의 모델 선택지를 낼지): 최근 /usage 에서 그 팀장 모델의 묶음이 바닥났고,
-   * 남은 묶음(모든 칸이 0 보다 큰 것)에 목록의 모델이 하나라도 있다. /usage 를 모르면 아니다(계정 전체 한도처럼 기다리기만 한다).
+   * Gemini 팀장의 한도가 그 모델 묶음에만 걸린 것인가(카드의 모델 선택지를 낼지): 최근 /usage(없으면 상태줄 기록의 묶음)에서 그 팀장 모델의 묶음이
+   * 바닥났고, 남은 묶음(모든 칸이 0 보다 큰 것)에 목록의 모델이 하나라도 있다. 묶음을 모르면 아니다(계정 전체 한도처럼 기다리기만 한다).
    */
   private geminiLimitScoped(memberId: string): boolean {
-    const usage = this.geminiQuota?.latest() ?? null;
+    const usage = this.geminiUsageView([memberId]);
     const member = this.store.getMember(memberId);
     if (!usage || !member) return false;
     const mine = geminiUsageGroup(usage, this.geminiModelNames(member));
@@ -2804,11 +2817,12 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /**
-   * Gemini 한도 카드의 모델 선택지: 최근 /usage 에서 남은 묶음(모든 칸이 0 보다 큰 것)에 든 목록의 모델 가운데 카드에서 막힌 모델을 뺀 것.
-   * 묶음을 모르는 모델은 내지 않는다(고른 뒤 곧바로 다시 걸릴 수 있다). /usage 를 모르면 [](이어가기만).
+   * Gemini 한도 카드의 모델 선택지: 최근 /usage(없으면 카드 팀장들의 상태줄 기록의 묶음)에서 남은 묶음(모든 칸이 0 보다 큰 것)에 든 목록의 모델 가운데
+   * 카드에서 막힌 모델을 뺀 것. Gemini 모델 ↔ gemini-*, Claude·GPT-OSS ↔ 3p-*, Argon ↔ gemini-argon-* 다. 묶음을 모르는 모델은 내지 않는다
+   * (고른 뒤 곧바로 다시 걸릴 수 있다). 묶음을 모르면 [](이어가기만).
    */
   private geminiUsageChoices(limited: { memberId: string; raw: string }[], blocked: string[]): (DecisionOption & { model: string })[] {
-    const usage = this.geminiQuota?.latest() ?? null;
+    const usage = this.geminiUsageView(limited.map(entry => entry.memberId));
     if (!usage) return [];
     const excluded = new Set(blocked.map(model => model.toLowerCase()));
     for (const entry of limited) {
@@ -2823,12 +2837,13 @@ export class Orchestrator implements OrchestratorApi {
   /**
    * Gemini 팀장의 사용 한도. 보류부터 건다(전달이 곧바로 멈춘다). 초기화 시각은 차례로
    * ① /usage(운영에서만, 뒤에서 읽는다): 그 팀장 모델의 묶음에서 다 쓴 칸의 가장 늦은 시각 → noteUsageReset 으로 넣는다.
-   * ② /usage 가 없거나 못 읽거나 묶음을 못 찾으면: 상태줄 기록의 다 쓴 칸 가운데 가장 늦은 시각(어느 묶음인지 몰라 늦게 풀리는 쪽).
+   * ② /usage 가 없거나 못 읽거나 묶음을 못 찾으면: 상태줄 기록에서 그 팀장 모델 갈래의 묶음(gemini-*·3p-*·gemini-argon-*)의 다 쓴 칸 가운데 가장 늦은 시각
+   *    (갈래를 모르면 모든 묶음에서, 늦게 풀리는 쪽).
    * ③ 글 속 시각(parseUsageReset) → ④ 모름: 한 시간 뒤부터 간격을 벌려 다시 이어 본다(이르게 이어 가도 agy 는 할당량 오류를 곧바로 돌려준다).
    * 크레딧 설정(useG1Credits·AI Credit Overages)은 건드리지 않는다: 켜 두었으면 agy 가 한도에서 멈추지 않고 크레딧으로 이어 간다(유료 선택은 대표 몫).
    */
   private geminiUsageFailure(member: Member, errorText: string, errorKey: string | undefined, status: GeminiStatusRecord | null): void {
-    this.apiRecovery.usageFailure(member, errorText, null, errorKey, { resetsAt: this.geminiQuota ? null : geminiStatusResetAt(status) });
+    this.apiRecovery.usageFailure(member, errorText, null, errorKey, { resetsAt: this.geminiQuota ? null : geminiStatusResetAt(status, this.geminiModelNames(member)) });
     const quota = this.geminiQuota;
     if (!quota) return;
     void quota.read().then(usage => {
@@ -2836,7 +2851,7 @@ export class Orchestrator implements OrchestratorApi {
       const current = this.store.getMember(member.id);
       if (!current || !this.apiRecovery.usageLimited(member.id)) return;
       const group = geminiUsageGroup(usage, this.geminiModelNames(current));
-      const at = (group ? geminiExhaustedResetAt(group.buckets) : null) ?? geminiStatusResetAt(readGeminiStatus(this.config.home, member.id));
+      const at = (group ? geminiExhaustedResetAt(group.buckets) : null) ?? geminiStatusResetAt(readGeminiStatus(this.config.home, member.id), this.geminiModelNames(current));
       if (at) this.apiRecovery.noteUsageReset(member.id, at);
     }).catch(error => console.warn("Gemini 사용 한도 초기화 시각을 읽지 못했습니다:", (error as Error).message));
   }
@@ -5900,6 +5915,8 @@ export class Orchestrator implements OrchestratorApi {
     if (member.blockedCode === "trust_dialog_unrecognized") return this.notifyInbox(textRef("notice.check_needed.title", { name: member.name }), textRef("notice.trust_unreadable"));
     // 0.2.10: Antigravity CLI 의 로그인·첫 설정(약관·데이터 수집 동의)은 승인 창이 아니다. 사람이 터미널에서 직접 끝낸다(서버는 그 화면에 키를 보내지 않는다).
     if (member.blockedCode === "gemini_setup") return this.notifyInbox(textRef("notice.check_needed.title", { name: member.name }), textRef("notice.gemini_setup"));
+    // 0.2.10: Antigravity CLI 의 폴더 신뢰 창도 승인 창으로 알리지 않는다(도구 승인과 같은 permission 으로 오지만 대표가 터미널에서 답하는 창이다).
+    if (member.blockedCode === "gemini_folder_trust") return this.notifyInbox(textRef("notice.check_needed.title", { name: member.name }), textRef("notice.gemini_folder_trust"));
     // 핫픽스 C: 로그인(계정) 오류로 막힌 팀장은 승인 창이 아니다. 오류 턴 끝이 이미 기존 오류 알림(대화의 오류 글, 오류 푸시)으로 알렸다.
     if (member.blockedCode === "login_required") return;
     // K(E2): 이 승인 창은 도구 승인 카드로 이미 알렸다(또는 방금 답했다). 같은 일을 두 번 알리지 않는다.
@@ -6023,10 +6040,10 @@ export class Orchestrator implements OrchestratorApi {
 
   private async onTurnError(member: Member, errorText: string, errorKey?: string): Promise<void> {
     let kind = this.turnErrorKind(member, errorText);
-    // Gemini: 429·rate limit·RESOURCE_EXHAUSTED 만 말하는 글인데 상태줄 기록의 한도 묶음이 하나도 바닥나지 않았으면 잠깐의 용량 제한이다
-    // (agy 가 이미 4분까지 기다렸다): 한도 보류가 아니라 장애로 다룬다(탐침으로 돌아오면 이어 간다).
+    // Gemini: 429·rate limit·RESOURCE_EXHAUSTED 만 말하는 글인데 상태줄 기록의 한도 묶음(그 팀장 모델의 갈래, 모르면 전부)이 하나도 바닥나지 않았으면
+    // 잠깐의 용량 제한이다(agy 가 이미 4분까지 기다렸다): 한도 보류가 아니라 장애로 다룬다(탐침으로 돌아오면 이어 간다).
     const status = member.cli === "gemini" ? readGeminiStatus(this.config.home, member.id) : null;
-    if (member.cli === "gemini" && kind === "usage_limit" && geminiTransientLimit(errorText) && geminiStatusExhausted(status) === false) kind = "network";
+    if (member.cli === "gemini" && kind === "usage_limit" && geminiTransientLimit(errorText) && geminiStatusExhausted(status, this.geminiModelNames(member)) === false) kind = "network";
     if (kind === "network") { this.apiRecovery.networkFailure(member, true, errorKey); return; }
     this.apiRecovery.finishNetwork(member.id);
     if (kind === "usage_limit" && member.cli === "gemini") { this.geminiUsageFailure(member, errorText, errorKey, status); return; }

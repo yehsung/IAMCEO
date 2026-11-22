@@ -1,0 +1,15 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.14
+     ▀▀▀▀▀▀       user@example.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Low)
+   ▄▀▀    ▀▀▄     /private/tmp/iamceo-cli-fixture/work
+  ▄▀▀      ▀▀▄
+
+
+ ┃ Introducing Gemini 4 Neon
+ ┃ Our best balance of intelligence, cost, and latency. Get building today with Neon.
+ ┃ esc to dismiss
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> hello draft one line
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 0%

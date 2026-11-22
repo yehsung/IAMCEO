@@ -20,6 +20,15 @@
 // - 모델 호출 직전(PreInvocation)의 lastUserInput 에 든 전달 표지가 '그 글이 CLI 에 들어갔다'는 수신 증거다(readGeminiDeliveryEvidence).
 // - 그 줄의 conversationId 가 대화 id 의 둘째 근거다(readGeminiHookConversation): 상태줄 기록에서 id 를 얻지 못했을 때, 서버가 그 터미널에 넣은
 //   전달 묶음의 표지가 든 줄만 그 터미널의 대화로 묶는다. 훅 입력의 conversationId 는 실제 agy(1.5.14)로 확인했다.
+//
+// 1.5.14 대화형 실측(agy-real, 견본 tests/fixtures/cli/gemini/1.5.14/hooks.jsonl):
+// - Stop 은 정상 끝(NO_TOOL_CALL), 맨 /compact(TERMINAL_CUSTOM_HOOK), 장애(ERROR + error 글)에만 온다. Esc 중단·승인 거절·명령 취소에는 Stop 이 없다
+//   (그 턴의 OSC 는 done 없이 working → idle). 그래서 Stop 이 없는 턴을 오류로도 미완으로도 읽지 않는다(readGeminiTurnStop 은 null).
+// - 서브에이전트의 SessionStart·PreInvocation·Stop 이 같은 파일에 다른 conversationId 로 섞인다. 서브에이전트의 lastUserInput 은 빈 글이다(표지 없음).
+// - 서브에이전트가 도는 중에 부모가 한 번 멈추면 부모 Stop 이 fullyIdle false 로 오고(OSC 는 working 그대로), 서브에이전트가 끝난 뒤 부모 PreInvocation
+//   (invocationNum 0, 같은 lastUserInput)과 Stop fullyIdle true 가 다시 온다. 턴의 끝은 마지막 것이다(readGeminiTurnStop).
+// - 훅 입력에는 문서에 없는 cwd·hookEventName·initialNumSteps·invocationNum·executionNum·continuationActive 가 있고, transcriptPath 는
+//   <geminiHome>/brain/<id>/.system_generated/logs/transcript_full.jsonl(맞는 경로)이다. 이 기록은 그 칸들을 남기지 않는다.
 import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import type { DeliveryEvidence } from "../../shared/types.ts";
@@ -242,7 +251,7 @@ export interface GeminiHookRecord {
   markers?: string[];
   chars?: number | null;
   truncated?: boolean;
-  /** Stop: terminationReason(NO_TOOL_CALL=정상, ERROR, USER_CANCELED, MAX_INVOCATIONS …). 모르는 모양이면 other. */
+  /** Stop: terminationReason(1.5.14 실측: NO_TOOL_CALL=정상, TERMINAL_CUSTOM_HOOK=맨 /compact, ERROR. 문서: USER_CANCELED, MAX_INVOCATIONS …). 모르는 모양이면 other. */
   reason?: string;
   fullyIdle?: boolean | null;
   /** Stop: 오류 글이 있었다. */
@@ -419,9 +428,11 @@ export function geminiTurnWatch(eventsDir: string | null, memberId: string): Gem
 
 /**
  * 지금 끝난 턴의 Stop 기록. 새로 덧붙은 줄을 읽어 pending 에 더한 뒤, 이 대화(conversationId 를 둘 다 알면 같아야 한다)의 줄 가운데
- * 마지막 PreInvocation 뒤의 첫 Stop 이다: 앞 턴의 Stop 이 늦게 덧붙었어도 이 턴의 모델 호출(PreInvocation) 앞에 있으므로 섞이지 않는다.
+ * 마지막 PreInvocation 뒤의 Stop 이다: 앞 턴의 Stop 이 늦게 덧붙었어도 이 턴의 모델 호출(PreInvocation) 앞에 있으므로 섞이지 않는다.
+ * 그 가운데 fullyIdle 이 false 가 아닌 첫 Stop 을 고른다(서브에이전트가 도는 동안 부모가 낸 fullyIdle false 는 턴의 끝이 아니다, 1.5.14 실측).
+ * 그런 Stop 이 없으면 첫 Stop 이다. 대화 id 를 모르면 마지막 PreInvocation 의 대화 id 로 묶는다(서브에이전트의 Stop 을 부모 턴의 끝으로 읽지 않게).
  * PreInvocation 이 하나도 없으면(모델을 부르기 전에 끝난 턴, 훅이 없었던 줄) anyStop 일 때만 마지막 Stop 이다.
- * 서브에이전트의 줄(다른 대화 id)은 보지 않는다. 사건 폴더·파일이 이 사용자 것이 아니거나 남이 쓸 수 있으면 읽지 않는다. 던지지 않는다.
+ * Stop 이 없는 턴(Esc 중단·승인 거절, 1.5.14 실측)은 null 이다. 사건 폴더·파일이 이 사용자 것이 아니거나 남이 쓸 수 있으면 읽지 않는다. 던지지 않는다.
  */
 export function readGeminiTurnStop(watch: GeminiTurnWatch | null, eventsDir: string | null, conversationId: string | null, anyStop = false): GeminiHookRecord | null {
   if (!watch || !eventsDir || !hookEventsTrusted(eventsDir, watch.reader.memberId)) return null;
@@ -435,7 +446,11 @@ export function readGeminiTurnStop(watch: GeminiTurnWatch | null, eventsDir: str
   if (watch.pending.length > TURN_PENDING_MAX) watch.pending.splice(0, watch.pending.length - TURN_PENDING_MAX);
   const mine = watch.pending.filter(record => !conversationId || !record.conversationId || record.conversationId === conversationId);
   const pre = mine.findLastIndex(record => record.event === "PreInvocation");
-  if (pre >= 0) return mine.slice(pre + 1).find(record => record.event === "Stop") ?? null;
+  if (pre >= 0) {
+    const turn = conversationId ?? mine[pre]!.conversationId;
+    const stops = mine.slice(pre + 1).filter(record => record.event === "Stop" && (!turn || !record.conversationId || record.conversationId === turn));
+    return stops.find(record => record.fullyIdle !== false) ?? stops[0] ?? null;
+  }
   return anyStop ? mine.findLast(record => record.event === "Stop") ?? null : null;
 }
 

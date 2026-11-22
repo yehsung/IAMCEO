@@ -14,7 +14,7 @@ import { cleanText, clipUtf16 } from "../text.ts";
 import { defaultGeminiHome } from "../config.ts";
 import { childEnv } from "./env.ts";
 import { claudeQuietScreen, inputText, screenContextPct } from "./claude-screen.ts";
-import { GEMINI_SELECTED_OPTION, GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE, geminiDraft, geminiSetupBlocked, geminiTurnToStop } from "./gemini-screen.ts";
+import { GEMINI_FOLDER_TRUST_CODE, GEMINI_SELECTED_OPTION, GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE, geminiDraft, geminiFolderTrust, geminiRetry, geminiSetupBlocked, geminiTurnToStop } from "./gemini-screen.ts";
 import { geminiStatusPath, readGeminiStatus, type GeminiStatusRecord } from "./gemini-status.ts";
 import { clearGeminiTurn, geminiHookEventsDir, geminiHookLastWrite, geminiHooksRecordTurns, geminiTurnWatch, parseGeminiHookLine, readGeminiDeliveryEvidence, readGeminiHookConversation, readGeminiTurnStop, type GeminiHookConversationWatch, type GeminiHookRecord, type GeminiTurnWatch } from "./gemini-hooks.ts";
 import { geminiHasModelResponse, geminiPromptTokens, geminiTranscriptPath, geminiTranscriptRoot } from "./gemini-transcript.ts";
@@ -312,8 +312,8 @@ export function geminiMayHaveConversed(terminal: Pick<CoreTerminal, "turn" | "st
   const state = terminal.status?.state;
   // 보고가 아예 없으면(뜨는 중에 사라짐) 대화도 없다. idle·done 은 쉬는 중이다.
   if (state === undefined || state === "idle" || state === "done") return false;
-  // 로그인·첫 설정 화면에서는 아직 대화를 시작할 수 없다.
-  if (geminiSetupBlocked(terminal.status)) return false;
+  // 로그인·첫 설정 화면과 폴더 신뢰 창(띄운 직후, 첫 글 전)에서는 아직 대화를 시작할 수 없다.
+  if (geminiSetupBlocked(terminal.status) || geminiFolderTrust(terminal.status)) return false;
   // 그 밖(working·승인 창·error)은 턴이 돌았거나 도는 중일 수 있다.
   return true;
 }
@@ -750,12 +750,13 @@ export class CoreRunner implements FullRunner {
     if (track.lost || background || claude?.kind === "background" || claude?.kind === "error") status = "idle";
     // 로그인(계정) 오류로 끝난 턴: 다시 로그인해 다음 턴이 돌 때까지 막힘으로 보이고 전달은 보류한다.
     if (claude?.kind === "login") status = "blocked";
-    // 사용 한도 메뉴·API 재시도·오류 줄의 화면 문구는 Claude·Codex 에서 본 것뿐이다. Antigravity CLI 화면에는 대지 않는다(OSC 의 error·blocked 보고만 따른다).
-    // UNVERIFIED-INTERACTIVE: agy 가 한도 소진 때 대화형 메뉴(크레딧 쓰기·모델 바꾸기 등)를 띄우는지, 재시도 중 'Model unavailable (attempt N/10), retrying in Ns'
-    // 같은 줄을 보이는지 모른다. 메뉴가 뜨면 OSC 막힘으로 보여 한도 이어가기는 '쉬는 중 아님'으로 미뤄지고 어떤 키도 가지 않는다(Gemini 의 usageLimitSnapshot 은 menu null).
+    // 사용 한도 메뉴·오류 줄의 화면 문구는 Claude·Codex 에서 본 것뿐이다. Antigravity CLI 화면에는 대지 않는다(OSC 의 error·blocked 보고만 따른다).
+    // UNVERIFIED-INTERACTIVE: agy 가 한도 소진 때 대화형 메뉴(크레딧 쓰기·모델 바꾸기 등)를 띄우는지 모른다(11-23 실측에서 한도를 유도하지 못했다).
+    // 메뉴가 뜨면 OSC 막힘으로 보여 한도 이어가기는 '쉬는 중 아님'으로 미뤄지고 어떤 키도 가지 않는다(Gemini 의 usageLimitSnapshot 은 menu null).
+    // API 재시도 화면은 CLI 마다 판독기가 따로다(retryScreen): agy 는 1.5.14 실측의 진행 줄 'Model unavailable (attempt N/9), retrying in Ns...' 다.
     const wording = screenWordingKnown(providerFor(track.member));
     const usage = wording && screen !== null && state !== "working" ? usageLimitMenu(screen) : null;
-    const retry = wording && state === "working" && (screen === null ? track.setupError?.code === "network_retry" : networkRetryScreen(screen));
+    const retry = state === "working" && (screen === null ? track.setupError?.code === "network_retry" : retryScreen(providerFor(track.member), screen));
     if (initial && state === "error" && !track.compact) {
       // Antigravity CLI 의 보고 글은 base64 일 수 있다(1.5.14 원시 보고). 풀어서 쓴다. 붙기 전의 훅 기록은 보지 않는다(이 터미널의 턴인지 모른다).
       track.lastError = usage?.raw ?? (providerFor(track.member) === "gemini" ? geminiTurnErrorText({ oscMsg: terminal.status?.msg }) : terminal.status?.msg || "CLI reported an error");
@@ -777,8 +778,10 @@ export class CoreRunner implements FullRunner {
       this.validateTrack(track);
       track.endedTurn = terminal.turn ?? track.endedTurn;
       track.pending = false;
-      // UNVERIFIED-INTERACTIVE: 재시도를 다 쓰고 끝난 턴을 agy 가 OSC 7501 로 error 라고 알리는지(문서 1.4.0: "done, or failed") done 이라고 알리는지는
-      // 대화형 화면에서 보지 못했다. done·idle 로 알렸어도 그 턴의 Stop 이 ERROR 면 오류로 끝난 턴으로 본다(이어가기 판단이 OSC 보고 모양에 매이지 않게).
+      // 1.5.14 실측(agy-real net2): 재시도를 다 쓰고 끝난 턴은 OSC error(msg 'There was a network issue connecting to the server, please try again.',
+      // 상태줄 agent_state 는 idle)와 Stop ERROR(error 글)다. 정상 끝은 done(msg 는 답 첫 줄), Esc 중단·승인 거절은 done 없이 idle 이고 Stop 이 없다:
+      // 그런 턴은 아래에서 오류가 아니다(Stop 이 없으면 geminiFailed 는 null). done·idle 로 알렸어도 그 턴의 Stop 이 ERROR 면 오류로 끝난 턴으로 본다
+      // (이어가기 판단이 OSC 보고 모양에 매이지 않게. 대화형에서 그런 턴은 아직 못 봤다).
       const geminiFailed = gemini && state !== "error" && !usage && stop?.reason === "ERROR" ? geminiTurnErrorText({ stopError: stop.error ?? null }) : null;
       clearGeminiTurn(track.geminiTurn);
       // An idle report never clears an unresolved external write fence.
@@ -802,24 +805,28 @@ export class CoreRunner implements FullRunner {
     const setup = screen !== null && !usage && status === "blocked" ? folderTrust(providerFor(track.member), screen, track.member.cwd) : null;
     // Antigravity CLI 가 로그인·첫 설정(약관·데이터 수집 동의)에서 막혀 있다고 알렸다. 사람만 끝낼 수 있다: 키를 보내지 않고 알리기만 한다.
     const geminiSetup = providerFor(track.member) === "gemini" && terminal.state === "live" && geminiSetupBlocked(terminal.status);
+    // Antigravity CLI 의 폴더 신뢰 창(1.5.14 실측: OSC 는 도구 승인과 같은 blocked·permission, msg 'Trust this folder?'). IAMCEO 는 trustedWorkspaces 로
+    // 이 창을 피하지만 뜨면 대표가 볼 창이다: 도구 승인으로 세지 않고(blockedReason setup), 키를 보내지 않고(멈춤 Esc 도 interrupt 가 거절한다) 알리기만 한다.
+    const geminiTrust = providerFor(track.member) === "gemini" && terminal.state === "live" && status === "blocked" && !geminiSetup && geminiFolderTrust(terminal.status, screen);
     // Labels for the owner only; neither sends a key. A dialog that merely reads like folder trust is never answered.
-    const unreported = status === "blocked" && !usage && !setup && !reported;
+    const unreported = status === "blocked" && !usage && !setup && !geminiTrust && !reported;
     const trustLike = unreported && screen !== null && trustDialogLike(screen, providerFor(track.member));
     const notReady = unreported && !trustLike && (terminal.turn ?? 0) === 0 && Date.now() - Date.parse(track.bindingSince) >= (this.deps.startNotReadyMs ?? 60_000);
     // 0.2.6 Y: 정해진 메모는 오류 표의 대표 문장(observation_<code>). 앱은 영어 화면에서 코드로 영어 문장을 고른다(폴더는 ': ' 뒤 그대로).
     track.setupError = usage ? { code: "usage_limit", note: usage.raw } : claude?.kind === "login" ? { code: "login_required", note: ERROR_CODES.observation_login_required.ko }
       : geminiSetup ? { code: GEMINI_SETUP_CODE, note: GEMINI_SETUP_NOTE }
+      : geminiTrust ? { code: GEMINI_FOLDER_TRUST_CODE, note: `${ERROR_CODES.observation_gemini_folder_trust.ko}: ${track.member.cwd}` }
       : retry ? { code: "network_retry", note: ERROR_CODES.observation_network_retry.ko } : setup ? { code: "folder_trust", note: `${ERROR_CODES.observation_folder_trust.ko}: ${track.member.cwd}` }
       : trustLike ? { code: "trust_dialog_unrecognized", note: `${ERROR_CODES.observation_trust_dialog_unrecognized.ko}: ${track.member.cwd}` }
       : notReady ? { code: "start_not_ready", note: ERROR_CODES.observation_start_not_ready.ko } : null;
     if (usage) { status = "blocked"; track.pending = false; }
-    const blockedReason = usage ? "usage_limit" : setup || claude?.kind === "login" || geminiSetup ? "setup" : state === "blocked" ? BLOCKED_KINDS[terminal.status?.kind || ""] ?? "status_unknown" : status === "blocked" ? "status_unknown" : null;
+    const blockedReason = usage ? "usage_limit" : setup || claude?.kind === "login" || geminiSetup || geminiTrust ? "setup" : state === "blocked" ? BLOCKED_KINDS[terminal.status?.kind || ""] ?? "status_unknown" : status === "blocked" ? "status_unknown" : null;
     if (state === "error" || claude?.kind === "error") {
       if (track.statusTimer) clearTimeout(track.statusTimer);
       track.statusTimer = null; track.pendingStatus = null;
     }
     // 백그라운드 터미널 상태에 들고 날 때도 쉬는 중을 다시 알린다: 나올 때의 알림이 미뤄 둔 전달을 곧바로 다시 밀게 한다.
-    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry, trustLike ? "trust_dialog_unrecognized" : notReady ? "start_not_ready" : null, ...(background ? ["codex_background"] : []), ...(claude ? [`claude_${claude.kind}`] : []), ...(geminiSetup ? [GEMINI_SETUP_CODE] : [])]);
+    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry, trustLike ? "trust_dialog_unrecognized" : notReady ? "start_not_ready" : null, ...(background ? ["codex_background"] : []), ...(claude ? [`claude_${claude.kind}`] : []), ...(geminiSetup ? [GEMINI_SETUP_CODE] : []), ...(geminiTrust ? [GEMINI_FOLDER_TRUST_CODE] : [])]);
     // While the end of a silent turn is being watched (SILENT_SETTLE_MS) nothing is blocked yet: publishing it sent the
     // owner an approval alert for a dialog that does not exist. The next observation decides.
     if (silent && !track.lost && !track.failure && blockedReason === "status_unknown") return;
@@ -899,7 +906,8 @@ export class CoreRunner implements FullRunner {
    * Antigravity CLI 의 턴 끝 문맥 크기.
    * - 먼저 대화 기록(transcript.jsonl)의 마지막 모델 호출 크기(input_tokens + cache_read_tokens)와 상태줄이 알려 준 창 크기(context_window_size)다:
    *   토큰 수와 함께 정확한 값으로 싣는다(자동 압축의 근거가 된다). 실측(헤드리스): 압축 뒤 첫 호출의 크기가 35,797 → 12,984 로 준다.
-   *   상태줄의 used_percentage·total_* 는 문서 예시상 대화 전체의 누적이라 압축 뒤에도 줄지 않을 수 있다(UNVERIFIED-INTERACTIVE: 압축 전후 상태줄 값).
+   *   1.5.14 실측(agy-real logs/trust/statusline.jsonl): 상태줄의 total_input_tokens(used_percentage 의 분자)는 누적이 아니라 압축 뒤 첫 모델 호출에서
+   *   줄었다(16,552 → 15,070). 그러나 압축이 끝난 직후(쉬는 중이 된 순간)의 상태줄은 아직 압축 전 값이라(16,552 그대로) 기록을 먼저 쓴다.
    * - 기록을 읽지 못하면 예전처럼 상태줄 기록의 context.usedPct·windowSize 다. 턴이 끝날 무렵의 기록(끝나기 2초 전 이후에 쓴 것)이면 창 크기와 함께
    *   정확한 % 로, 그보다 오래된 기록이면 % 만 싣는다(토큰 수는 싣지 않는다). 이 대화의 기록이 아니거나 % 가 없으면 재지 않는다.
    */
@@ -964,7 +972,9 @@ export class CoreRunner implements FullRunner {
    * Antigravity CLI 터미널이 실제로 든 모드(이 터미널의 상태줄 기록의 cycleMode·sandbox)가 자리 잡으면 gemini_mode 사건을 낸다. 값이 바뀔 때만 낸다.
    * default(칸 없음)는 띄운 뒤 GEMINI_MODE_SETTLE_MS 가 지나 쓰인 기록일 때만 믿는다: agy 는 로그인·실험 플래그를 받은 뒤에야 auto 로 바뀐다
    * (1.5.14 헤드리스 로그: 시작 몇 초 뒤 `SetCycleMode called: auto`). 그 전의 기록은 아직 default 일 수 있다.
-   * UNVERIFIED-INTERACTIVE: 대화형 화면의 상태줄 입력(cycle_mode·sandbox·agent_state 값, 모드가 바뀔 때 상태줄을 다시 그리는지)은 아직 보지 못했다(문서 기준).
+   * 1.5.14 실측(agy-real logs/m-<모드>/statusline.jsonl): agent_state 는 initializing·authenticating → idle → working·tool_use, cycle_mode 는 매번 묻기에서 칸이 없고
+   * accept-edits·plan 은 처음부터, auto(--settings agentMode auto·플래그 없음·--dangerously-skip-permissions)는 띄운 뒤 2초쯤에 칸이 생긴다. shift+tab 으로
+   * 모드를 바꾸면 상태줄을 다시 그린다(default → accept-edits → auto → plan → default). sandbox 는 auto 에서도 {enabled:false} 였다.
    */
   private observeGeminiMode(track: Track): void {
     if (providerFor(track.member) !== "gemini") return;
@@ -1852,10 +1862,11 @@ export class CoreRunner implements FullRunner {
    * 답한다(문서·실측) — IAMCEO 의 초점 글('이어갈 일: …')을 붙이면 팀장이 그것을 지시로 받아 일을 시작하므로 붙이지 않는다. 표지·실행 선호 줄도 앞에
    * 붙이지 않는다("Only a leading /compact triggers compaction"). 끝은 대화 기록의 CHECKPOINT 줄로 판정한다(observeCompactBoundary).
    * 답이 하나도 없는 대화에는 넣지 않는다: 헤드리스에서는 '/compact' 를 보통 글처럼 모델에 보낸 뒤(도구 실행까지) 압축했다.
-   * UNVERIFIED-INTERACTIVE(Gemini, 대표의 agy 첫 설정 뒤 확인): 붙여 넣은 '/compact' + Enter 가 슬래시 명령 팔레트에 먹히지 않고 한 번에 제출되는지,
-   * 압축 중 화면('Compacting conversation… (esc to cancel)')에서 OSC 가 working 을 알리는지(아니면 '중단'의 Esc 가 가지 않고 phase 만 닫힌다),
-   * 대화형에서 답 없는 대화의 'Nothing to compact yet.'(문서)이 어디에 보이는지, Esc 로 멈춘 뒤 입력칸에 '/compact' 가 되돌아오는지
-   * (되돌아오면 전달이 입력칸 글로 막힌다: clearCompactDraft 는 지금 Claude 만 지운다).
+   * Gemini 1.5.14 실측(agy-real compact): 붙여 넣은 '/compact' + Enter(서버와 같은 길)가 메뉴에 먹히지 않고 곧바로 압축으로 들어갔다. 압축 중에는
+   * 지난 입력 상자 '> /compact' 밑에 '⣷  Compacting conversation… (0s · esc to cancel)' 가 붙고 입력칸은 빈 칸, OSC 는 working 이다('중단'의 Esc 가 간다).
+   * 끝나면 OSC done(msg 'Task complete'), Stop 훅 TERMINAL_CUSTOM_HOOK, transcript.jsonl 에 CHECKPOINT 줄이 생긴다.
+   * UNVERIFIED-INTERACTIVE(Gemini): 대화형에서 답 없는 대화의 'Nothing to compact yet.'(문서)이 어디에 보이는지, 압축 중 Esc 뒤의 화면('Compaction cancelled…')과
+   * 입력칸에 '/compact' 가 되돌아오는지(되돌아오면 전달이 입력칸 글로 막힌다: clearCompactDraft 는 지금 Claude 만 지운다)는 아직 보지 못했다.
    */
   async compact(member: RunnerMember, focus: string, _opts: StartOpts): Promise<SendResult> {
     const provider = providerFor(member);
@@ -1878,7 +1889,7 @@ export class CoreRunner implements FullRunner {
       if (provider === "gemini" && geminiSetupBlocked(terminal.status)) return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: "Antigravity CLI is waiting for sign-in or first-run setup" };
       const epoch = track.epoch;
       const screen = await this.screen(member);
-      // UNVERIFIED-INTERACTIVE(Gemini): 입력칸 판독(geminiDraft)은 문서 그림 기준이다. 빈 칸으로 읽힐 때만 넣는다(모르면 null → 넣지 않는다).
+      // Gemini: 입력칸 판독(geminiDraft)은 1.5.14 실측 화면 기준이다(tests/fixtures/cli/gemini/1.5.14). 빈 칸으로 읽힐 때만 넣는다(모르면 null → 넣지 않는다).
       if (composerDraft(provider, screen) !== "") return { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written" };
       const home = this.providerHome(member);
       const path = provider === "gemini" ? this.geminiTranscript(track) : this.logPath(track);
@@ -1994,7 +2005,8 @@ export class CoreRunner implements FullRunner {
   /**
    * Antigravity CLI 의 압축 끝 훅: 압축을 넣기 직전의 사건 파일 자리(hookMark) 뒤, 넣은 뒤 시각의, 같은 대화의 PreInvocation(compact: 맨 '/compact' 를 받음)
    * 다음 Stop(TERMINAL_CUSTOM_HOOK). 헤드리스 실측: 맨 /compact 는 PreInvocation 한 번 뒤 PostInvocation 없이 Stop TERMINAL_CUSTOM_HOOK 으로 끝났다(5번 모두).
-   * UNVERIFIED-INTERACTIVE: 대화형 화면에서도 같은 훅이 오는지는 첫 설정 뒤 확인한다. 대화 기록의 CHECKPOINT 를 읽지 못할 때만 쓰는 둘째 근거다.
+   * 1.5.14 대화형 실측(agy-real fixtures hooks.jsonl)도 같다: PreInvocation(lastUserInput '/compact') 다음 Stop(TERMINAL_CUSTOM_HOOK). 대화 기록의 CHECKPOINT 를
+   * 읽지 못할 때만 쓰는 둘째 근거다.
    */
   private geminiCompactEndHook(track: Track, operation: CoreCompactState, code: string): boolean {
     if (!this.geminiHookEvents || ["session_changed", "session_conflict"].includes(code)) return false;
@@ -2107,9 +2119,15 @@ export class CoreRunner implements FullRunner {
       // Antigravity CLI 가 로그인·첫 설정(약관·데이터 수집 동의)에서 기다리는 중이면 멈출 턴이 없다. 멈춤 키(Esc)는 그 동의 창에 대한 답이 될 수 있다:
       // 이 화면에는 서버가 어떤 키도 보내지 않는다(사람이 이 Mac 의 터미널에서 끝낸다).
       if (providerFor(member) === "gemini" && terminal.state === "live" && geminiSetupBlocked(terminal.status)) throw new CoreError("no_turn", "No turn to stop: Antigravity CLI is waiting for sign-in or first-run setup in its own terminal", false, "not_written");
-      // 그 밖에도 멈출 턴이 확실할 때만 보낸다(gemini-screen.ts geminiTurnToStop): 상태 보고가 아직 없거나 무엇을 묻는지 모르는 막힘이면
-      // 그 화면이 동의 창일 수 있다(agy 가 문구를 바꾸거나 보고가 늦어도 키가 가지 않게).
-      if (providerFor(member) === "gemini" && terminal.state === "live" && !geminiTurnToStop(terminal.status, !!track?.pending)) throw new CoreError("no_turn", "No turn to stop: Antigravity CLI is not in a turn that an interrupt key can stop", false, "not_written");
+      // 폴더 신뢰 창도 같다(1.5.14 실측: 도구 승인과 같은 blocked·permission 으로 알린다). 그 창의 Esc 는 'No, exit' 일 수 있다: 대표가 터미널에서 답한다.
+      // 보고 글로 못 가리는 경우(글이 바뀜)를 위해 막힘이면 화면도 읽어 본다.
+      if (providerFor(member) === "gemini" && terminal.state === "live") {
+        const screen = terminal.status?.state === "blocked" || !terminal.status ? await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 }).then(r => r.text, () => null) : null;
+        if (geminiFolderTrust(terminal.status, screen)) throw new CoreError("no_turn", "No turn to stop: Antigravity CLI is asking whether to trust this folder in its own terminal", false, "not_written");
+        // 그 밖에도 멈출 턴이 확실할 때만 보낸다(gemini-screen.ts geminiTurnToStop): 상태 보고가 아직 없거나 무엇을 묻는지 모르는 막힘이면
+        // 그 화면이 동의 창일 수 있다(agy 가 문구를 바꾸거나 보고가 늦어도 키가 가지 않게).
+        if (!geminiTurnToStop(terminal.status, !!track?.pending, screen)) throw new CoreError("no_turn", "No turn to stop: Antigravity CLI is not in a turn that an interrupt key can stop", false, "not_written");
+      }
       if (track) this.bump(track);
       const result = await this.call<{ outcome: string }>("terminal.interrupt", { terminal: terminal.address, timeout: 3 }, 6000);
       if (!["stopped", "exited"].includes(result.outcome)) throw new CoreError("not_stopped", `CLI interrupt outcome: ${result.outcome}`);
@@ -2534,8 +2552,8 @@ export function screenTurnError(screen: string): string | null {
  */
 export function trustDialogLike(screen: string, provider: CoreProvider): boolean {
   if (composerDraft(provider, screen) !== null) return false;
-  // Antigravity CLI 의 창은 고른 줄을 `> 1. …` 로 그린다(문서 그림). 안내에만 쓴다.
-  return provider === "gemini" ? looksLikeFolderTrust(screen, GEMINI_SELECTED_OPTION) : looksLikeFolderTrust(screen);
+  // Antigravity CLI 의 승인 창은 고른 줄을 `> 1. …` 로, 폴더 신뢰 창은 번호 없이 `> Yes, I trust this folder` 로 그린다(1.5.14 실측). 안내에만 쓴다.
+  return provider === "gemini" ? looksLikeFolderTrust(screen, GEMINI_SELECTED_OPTION) || geminiFolderTrust(null, screen) : looksLikeFolderTrust(screen);
 }
 
 /**
@@ -2565,13 +2583,27 @@ function folderTrust(provider: CoreProvider, screen: string, cwd: string): Retur
 }
 
 /**
- * 화면 문구로 하는 판정(사용 한도 메뉴, API 재시도 줄, 턴 끝의 오류 줄)을 이 CLI 에 대도 되는가. 그 문구들은 Claude·Codex 화면에서 본 것이다.
- * Antigravity CLI 의 한도·오류 화면은 아직 본 적이 없어 대지 않는다(OSC 의 error·blocked 보고만 따른다).
+ * 화면 문구로 하는 판정(사용 한도 메뉴, 턴 끝의 오류 줄)을 이 CLI 에 대도 되는가. 그 문구들은 Claude·Codex 화면에서 본 것이다.
+ * Antigravity CLI 의 한도 화면은 아직 본 적이 없어 대지 않는다(OSC 의 error·blocked 보고만 따른다). 턴 끝의 오류는 OSC error 의 msg 와 Stop 훅의 error 로 안다
+ * (1.5.14 실측: 화면의 `⚠ There was a network issue …` 줄과 OSC msg 가 같은 글이다). API 재시도 화면은 retryScreen 이 CLI 마다 따로 읽는다.
  */
 function screenWordingKnown(provider: CoreProvider): boolean {
   switch (provider) {
     case "claude": case "codex": return true;
     case "gemini": return false;
+    default: { const unlisted: never = provider; void unlisted; return false; }
+  }
+}
+
+/**
+ * CLI 가 API 에 닿지 못해 스스로 다시 하는 중인 화면인가(관측 network_retry → 지휘가 networkRetryNoticeMs 동안 이어지면 장애로 연다).
+ * Claude·Codex 는 `Waiting for API response … check your network`(networkRetryScreen), Antigravity CLI 는 입력칸 바로 위의 진행 줄
+ * `Model unavailable (attempt N/9), retrying in Ns...`(1.5.14 실측, geminiRetry)다.
+ */
+function retryScreen(provider: CoreProvider, screen: string): boolean {
+  switch (provider) {
+    case "claude": case "codex": return networkRetryScreen(screen);
+    case "gemini": return geminiRetry(screen) !== null;
     default: { const unlisted: never = provider; void unlisted; return false; }
   }
 }

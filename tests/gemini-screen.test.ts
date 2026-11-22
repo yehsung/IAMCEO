@@ -1,9 +1,11 @@
-// Antigravity CLI(agy) 화면 판독(server/runner/gemini-screen.ts): 입력칸, 승인 창 모양, 로그인·첫 설정 막힘.
+// Antigravity CLI(agy) 화면 판독(server/runner/gemini-screen.ts): 입력칸, 진행 줄(재시도), 승인 창·폴더 신뢰 창 모양, 로그인·첫 설정 막힘.
 //
-// 아래 화면 견본은 실제 agy 화면을 받아 옮긴 것이 아니다. 공식 문서의 그림(입력칸 위·아래 가로줄, `> ` 입력 줄, 그 아래 상태줄,
-// `Accept this file edit?` 승인 창)과 agy 1.5.14 실행 파일의 문구를 바탕으로 손으로 만든 것이다. 실제 화면으로 보정하면 견본도 바꾼다.
+// 위쪽 describe 들의 화면은 손으로 만든 모양 시험이다(입력칸 위·아래 가로줄, `> ` 입력 줄, 그 아래 상태줄). 아래 '1.5.14 실측 화면' 은
+// 대표가 첫 설정을 마친 실제 agy 의 대화형 화면 견본(tests/fixtures/cli/gemini/1.5.14, 견본 시험 tests/cli-fixtures.test.ts)을 그대로 읽는다.
 import { describe, expect, test } from "bun:test";
-import { GEMINI_PLACEHOLDERS, GEMINI_SETUP_MESSAGES, geminiDraft, geminiSetupBlocked, geminiTurnToStop } from "../server/runner/gemini-screen.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { GEMINI_PLACEHOLDERS, GEMINI_SETUP_MESSAGES, geminiApprovalDialog, geminiDraft, geminiFolderTrust, geminiProgress, geminiRetry, geminiSetupBlocked, geminiTurnToStop } from "../server/runner/gemini-screen.ts";
 import { composerDraft, trustDialogLike, codexDraft } from "../server/runner/core.ts";
 import { inputText } from "../server/runner/claude-screen.ts";
 import { looksLikeFolderTrust } from "../server/runner/core-approval.ts";
@@ -188,3 +190,111 @@ describe("geminiTurnToStop: 멈춤 키를 보내도 되는 때", () => {
     expect(geminiTurnToStop({ state: "done" }, false)).toBe(false);
   });
 });
+
+const REAL = join(import.meta.dir, "fixtures", "cli", "gemini", "1.5.14");
+const real = (name: string) => readFileSync(join(REAL, `${name}.txt`), "utf8");
+const FULL = "─".repeat(160);
+const BOX = "─".repeat(60);
+const BAR = "IAMCEO · Gemini 3.8 Flash (Low) · ctx 0%";
+
+describe("1.5.14 실측 화면: 입력칸", () => {
+  test("일하는 중·압축 중·재시도 중에도 지난 입력 상자(60칸 가로줄 + `> 글`)와 그 밑의 진행 줄을 입력칸으로 읽지 않는다: 입력칸은 빈 칸이다", () => {
+    // 예전 판독(문서 그림 기준)은 이 다섯 화면에서 null 이었다(입력칸 위 가로줄 위로 이어 붙은 지난 입력 상자를 초안 속 가로줄로 읽음).
+    for (const name of ["working-first", "working-tool", "compacting", "network-retry", "srv-delivered-working"]) expect([name, geminiDraft(real(name))]).toEqual([name, ""]);
+  });
+  test("서브에이전트 줄이 입력칸 아래 가로줄과 또 하나의 가로줄 사이에 끼어도 진짜 입력칸을 찾는다(도는 중·부모 턴이 끝난 뒤 남은 줄)", () => {
+    expect(geminiDraft(real("subagent-running"))).toBe("");
+    expect(geminiDraft(real("subagent-done-panel"))).toBe("");
+  });
+  test("모드별 빈 입력칸: 매번 묻기는 자리표시 글 없이 `>`, 나머지는 자리표시 글. 기본 바닥줄(`? for shortcuts`)도 같다", () => {
+    for (const name of ["idle-default", "idle-accept-edits", "idle-auto", "idle-plan", "idle-announcement", "idle-default-statusline", "idle-auto-default-statusline", "srv-idle"]) expect([name, geminiDraft(real(name))]).toEqual([name, ""]);
+  });
+  test("초안: 한 줄, 두 칸 들여 이어진 여러 줄, 지운 뒤, 메뉴를 닫은 `/comp`", () => {
+    expect(geminiDraft(real("draft-oneline"))).toBe("hello draft one line");
+    expect(geminiDraft(real("draft-multiline"))).toBe("hello draft one linefirst pasted line\nsecond pasted line\nthird pasted line");
+    expect(geminiDraft(real("draft-cleared"))).toBe("");
+    expect(geminiDraft(real("slash-draft"))).toBe("/comp");
+  });
+  test("턴이 끝난 화면(답·중단·거절·압축 끝·장애)은 빈 칸, 승인·신뢰 창·메뉴·끝난 화면은 null", () => {
+    for (const name of ["done-reply", "interrupted", "declined", "compacted", "network-error", "offline-start-error"]) expect([name, geminiDraft(real(name))]).toEqual([name, ""]);
+    for (const name of ["approval-command", "approval-create", "approval-edit", "approval-edit-reject-selected", "srv-approval", "folder-trust", "slash-menu", "exit-resume"]) expect([name, geminiDraft(real(name))]).toEqual([name, null]);
+  });
+  test("진행 줄과 재시도: 입력칸 바로 위의 줄만 본다", () => {
+    expect(geminiProgress(real("working-first"))).toBe("Generating...");
+    expect(geminiProgress(real("compacting"))).toBe("Compacting conversation… (0s · esc to cancel)");
+    expect(geminiProgress(real("subagent-running"))).toBe("Delegating...");
+    expect(geminiRetry(real("network-retry"))).toEqual({ attempt: 3, max: 9, seconds: 9 });
+    for (const name of ["working-first", "compacting", "idle-default", "network-error", "approval-command"]) expect([name, geminiRetry(real(name))]).toEqual([name, null]);
+    expect(geminiProgress(real("idle-default"))).toBeNull();
+    // 재시도 줄이 대화 위쪽(지난 글)에만 있으면 지금 재시도 중이 아니다.
+    expect(geminiRetry([BOX, "> hi", "⣽  Model unavailable (attempt 1/9), retrying in 2s...", "", "  hello", "", FULL, ">", FULL, BAR, ""].join("\n"))).toBeNull();
+  });
+});
+
+describe("모양 시험: 전체 너비 가로줄 짝", () => {
+  test("가로줄 너비는 바닥줄 바로 위 가로줄로 정한다(80칸 화면)", () => {
+    const rule = "─".repeat(80);
+    expect(geminiDraft([BOX, "> 지난 지시", "⣻  Generating...", rule, ">", rule, BAR, ""].join("\n"))).toBe("");
+    expect(geminiDraft([BOX, "> 지난 지시", rule, "> 쓰던 글", rule, BAR, ""].join("\n"))).toBe("쓰던 글");
+    // 위·아래 가로줄 너비가 다르면 입력칸이 아니다.
+    expect(geminiDraft([rule, ">", "─".repeat(79), BAR, ""].join("\n"))).toBeNull();
+    // 가로줄이 들여 쓰였으면(초안 속 줄) 입력칸 가로줄이 아니다.
+    expect(geminiDraft([FULL, ">", `  ${FULL.slice(2)}`, BAR, ""].join("\n"))).toBeNull();
+  });
+  test("초안에 붙여 넣은 가로줄은 두 칸 들여 쓰여 입력칸 가로줄로 읽히지 않는다", () => {
+    expect(geminiDraft([FULL, "> 표", `  ${"─".repeat(158)}`, "  > 인용", FULL, BAR, ""].join("\n"))).toBe(`표\n${"─".repeat(158)}\n> 인용`);
+  });
+  test("60칸 화면: 지난 입력 상자와 입력칸 가로줄 너비가 같으면, 진행 줄이 사이에 있을 때만 지난 글로 본다", () => {
+    expect(geminiDraft([BOX, "> 지난 지시", "⣻  Generating...", BOX, ">", BOX, BAR, ""].join("\n"))).toBe("");
+    // 진행 줄도 빈 줄도 없이 같은 너비 가로줄 + `>` 줄이 이어 붙으면 어느 쪽이 입력칸인지 모른다.
+    expect(geminiDraft([BOX, "> 지난 지시", BOX, ">", BOX, BAR, ""].join("\n"))).toBeNull();
+  });
+  test("서브에이전트 줄: 위가 같은 너비 가로줄이어야 하고, 그 꼴이 아닌 줄이 끼면 모른다", () => {
+    const agent = "  ● Agent(self: Number Responder) · Gemini 3.8 Flash  Working · 1s";
+    expect(geminiDraft([FULL, "> 쓰던 글", FULL, agent, "  ● Agent(research: Finder) · Gemini 3.8 Flash  Working · 3s", FULL, BAR, ""].join("\n"))).toBe("쓰던 글");
+    expect(geminiDraft([FULL, ">", FULL, agent, BAR, ""].join("\n"))).toBeNull();
+    expect(geminiDraft([FULL, ">", FULL, agent, "  1 more agent", FULL, BAR, ""].join("\n"))).toBeNull();
+    // 초안의 마지막 줄이 서브에이전트 줄처럼 보여도 그 위가 가로줄이 아니면 초안이다.
+    expect(geminiDraft([FULL, "> 메모", agent, FULL, BAR, ""].join("\n"))).toBeNull();
+  });
+});
+
+describe("1.5.14 실측 화면: 승인 창(안내용 판독, 키를 보내지 않는다)", () => {
+  test("명령·새 파일·고치기 창의 제목·물음·선택지·고른 줄·안내 줄", () => {
+    expect(geminiApprovalDialog(real("approval-command"))).toEqual({ title: "Command", question: "Run this command?", options: ["Yes, run command", "Yes, and always allow in this conversation for commands that start with 'ls'", "Yes, and always allow for commands that start with 'ls' (Persist to settings.json)", "No, cancel"], selected: 0, hint: "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command" });
+    expect(geminiApprovalDialog(real("approval-create"))).toEqual({ title: "Create file", question: "Allow creation of this file?", options: ["Yes, allow creation", "No, deny creation"], selected: 0, hint: "↑/↓ Navigate · f full diff" });
+    expect(geminiApprovalDialog(real("approval-edit-reject-selected"))).toEqual({ title: "Pending edit", question: "Accept this file edit?", options: ["Yes, accept this change", "No, reject this change"], selected: 1, hint: "↑/↓ Navigate · tab Amend · f full diff" });
+  });
+  test("입력칸·메뉴·신뢰 창은 승인 창이 아니다", () => {
+    for (const name of ["idle-default", "working-first", "slash-menu", "folder-trust", "declined"]) expect([name, geminiApprovalDialog(real(name))]).toEqual([name, null]);
+  });
+});
+
+describe("1.5.14 실측: 폴더 신뢰 창은 대표가 볼 창이다(멈춤 키를 보내지 않는다)", () => {
+  const trust = { state: "blocked", kind: "permission", msg: "Trust this folder?" };
+  test("OSC 는 도구 승인과 같은 blocked·permission 이지만 글로 가린다(풀린 글·base64 둘 다)", () => {
+    expect(geminiFolderTrust(trust)).toBe(true);
+    expect(geminiFolderTrust({ ...trust, msg: Buffer.from("Trust this folder?").toString("base64") })).toBe(true);
+    // 예전 판정은 permission 이면 멈춤 키를 보냈다: 그 Esc 가 이 창의 답(No, exit)이 될 수 있었다.
+    expect(geminiTurnToStop(trust, false)).toBe(false);
+    expect(geminiTurnToStop(trust, true)).toBe(false);
+    expect(geminiTurnToStop({ ...trust, msg: Buffer.from("Trust this folder?").toString("base64") }, false)).toBe(false);
+    // 도구 승인 창은 그대로 멈출 수 있다(Esc = 거절하고 턴을 끝낸다, 1.5.14 실측).
+    expect(geminiTurnToStop({ state: "blocked", kind: "permission", msg: "Approve Bash: ls -la ." }, false)).toBe(true);
+    expect(geminiFolderTrust({ state: "blocked", kind: "permission", msg: "Approve Bash: ls -la ." })).toBe(false);
+    expect(geminiFolderTrust({ state: "idle", msg: "Trust this folder?" })).toBe(false);
+  });
+  test("보고 글이 다르거나 없어도 화면으로 알아본다(입력칸이 보이면 아니다)", () => {
+    const screen = real("folder-trust");
+    expect(geminiFolderTrust({ state: "blocked", kind: "permission", msg: "Confirm" }, screen)).toBe(true);
+    expect(geminiFolderTrust(null, screen)).toBe(true);
+    expect(geminiTurnToStop({ state: "blocked", kind: "permission" }, false, screen)).toBe(false);
+    expect(geminiTurnToStop({ state: "blocked", kind: "permission" }, false, real("approval-command"))).toBe(true);
+    expect(geminiFolderTrust({ state: "working" }, screen)).toBe(false);
+    expect(geminiFolderTrust({ state: "blocked", kind: "permission" }, real("approval-command"))).toBe(false);
+    // 대화에 신뢰 물음 글이 남아 있어도 입력칸이 보이면 창이 아니다.
+    expect(geminiFolderTrust({ state: "blocked", kind: "permission" }, [BOX, "> Do you trust the contents of this project?", "", "Do you trust the contents of this project?", "> Yes, I trust this folder", "", FULL, ">", FULL, BAR, ""].join("\n"))).toBe(false);
+    expect(trustDialogLike(screen, "gemini")).toBe(true);
+  });
+});
+

@@ -280,6 +280,7 @@ export const SERVER_TEXTS = {
   "notice.check_needed.title": { ko: "{name} 확인 필요", en: "{name} needs a check" },
   "notice.trust_unreadable": { ko: "폴더 신뢰 확인 창을 읽지 못했습니다. 터미널을 열어 직접 답해 주세요", en: "Couldn't read the folder trust prompt. Open the terminal and answer it yourself" },
   "notice.gemini_setup": { ko: "Antigravity CLI의 로그인·첫 설정이 끝나지 않았습니다. 터미널을 열어 직접 끝내 주세요", en: "Antigravity CLI hasn't finished sign-in or first-run setup. Open the terminal and finish it yourself" },
+  "notice.gemini_folder_trust": { ko: "Antigravity CLI가 이 폴더를 신뢰할지 묻고 있습니다. IAMCEO는 이 창에 답하지 않으니 터미널을 열어 직접 답해 주세요", en: "Antigravity CLI is asking whether to trust this folder. IAMCEO never answers it, so open the terminal and answer it yourself" },
   "notice.approval_prompt": { ko: "승인 창 앞에서 멈췄습니다", en: "Stopped at an approval prompt" },
   "notice.approval_summary": { ko: "{summary} · 결재함에서 승인·거절할 수 있습니다", en: "{summary} · you can approve or deny it in the Inbox" },
   "notice.tool_permission.title": { ko: "{name} 도구 승인", en: "{name} tool approval" },

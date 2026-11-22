@@ -1243,6 +1243,35 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
     expect(t.runner.startsOf(created.id).at(-1)!.opts.resume).toBe(true);
   });
 
+  test("/usage 를 못 읽으면 상태줄 기록의 묶음(1.5.14 실측 id)으로 같은 선택지를 낸다: Gemini 모델 ↔ gemini-*, Claude·GPT-OSS ↔ 3p-*, Argon ↔ gemini-argon-*", async () => {
+    // 시험 모드처럼 /usage 읽기가 없다(geminiQuota 없음). 상태줄 입력은 실측 견본 그대로에 gemini-5h 만 바닥낸 것이다.
+    const t = setup();
+    writeGeminiModelsCache(geminiModelsCachePath(t.config.home), [
+      { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash", efforts: ["low", "medium", "high"] },
+      { value: "gemini-4-neon", label: "Gemini 4 Neon", efforts: ["low", "medium", "high", "xhigh"] },
+      { value: "gemini-pro-orchestrator-neon", label: "Orchestrator (Neon)", efforts: [] },
+      { value: "gemini-4-argon", label: "Gemini 4 Argon", efforts: ["low", "medium", "high"] },
+      { value: "gemini-pro-orchestrator-g1-pro", label: "Orchestrator (Argon)", efforts: [] },
+      { value: "claude-opus-5-5", label: "Claude Opus 5.5", efforts: ["low", "medium", "high"] },
+      { value: "gpt-oss-120b", label: "GPT-OSS 120B", efforts: ["medium"] },
+    ], new Date());
+    const created = await t.add("자료 조사", "research", { cli: "gemini", modelOverride: "gemini-3.8-flash" });
+    const payload = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "cli", "gemini", "1.5.14", "statusline-after.json"), "utf8"));
+    const reset = new Date(Date.now() + 2 * 3_600_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    payload.quota["gemini-5h"] = { remaining_fraction: 0, reset_time: reset, reset_in_seconds: 7200 };
+    payload.quota["3p-5h"] = { ...payload.quota["3p-5h"], reset_time: new Date(Date.now() + 5 * 3_600_000).toISOString().replace(/\.\d{3}Z$/, "Z") };
+    mkdirSync(join(t.config.home, "context", "gemini"), { recursive: true });
+    writeFileSync(geminiStatusPath(t.config.home, created.id), JSON.stringify(geminiStatusFromPayload(created.id, payload, new Date())));
+    await t.orch.assign(t.project.id, "research", { text: "자료 찾기" });
+    await until("전달", () => t.runner.sent.some(s => s.memberId === created.id));
+    t.runner.fail(created.id, "You have exhausted your quota on this model.");
+    // 초기화 시각은 그 팀장 모델 갈래(gemini-*)의 다 쓴 칸이다(3p-* 의 움직이는 시각이 아니다).
+    await until("초기화 시각", () => t.store.listDecisions(t.project.id).find(d => d.usageLimit)?.usageLimit?.resetsAt === new Date(reset).toISOString());
+    await t.orch.apiRecovery.tick();
+    const card = t.store.listDecisions(t.project.id).find(d => d.usageLimit)!;
+    expect(card.options.map(o => o.k)).toEqual(["model:gemini-4-argon", "model:claude-opus-5-5", "model:gpt-oss-120b", "resume"]);
+  });
+
   test("사용 한도 카드의 CLI 이름: Gemini 는 'Gemini' 다(예전에는 Claude 가 아니면 모두 'Codex'). CLI 마다 카드가 따로다", async () => {
     const t = setup();
     const gemini = await t.add("자료 조사", "research", { cli: "gemini" });

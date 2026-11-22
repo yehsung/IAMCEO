@@ -1,0 +1,776 @@
+{
+  "provider": "gemini",
+  "version": "1.5.14",
+  "source": "2026-11-23 00:14~00:44 실측(대표가 첫 설정을 마친 이 Mac 의 agy 1.5.14). 격리 herdr-core 0.1.18(160x50, terminal.read lines 0)에 IAMCEO providers.ts geminiLaunch 모양의 인자(--add-dir <주입 폴더> --settings <geminiSettings 모양> --model gemini-3.8-flash --effort low)로 띄웠고 바닥줄은 IAMCEO 상태줄 래퍼 줄이다(입력 JSON 은 statusline-*.json 으로 따로 남김). srv-* 는 격리 IAMCEO 서버(wave12 2bcc677, 실제 agy)의 GET /api/members/:id/screen. hooks.jsonl 은 agy 가 훅 명령에 준 입력 원본({event, input})이다. osc7501.txt 는 agy 가 낸 OSC 7501 본문(ESC ] 7501 ; … BEL 의 가운데)이다. 바꾼 것: 작업 폴더 → /private/tmp/iamceo-cli-fixture/work, 홈 → /Users/user, 계정 메일 → user@example.com, agy 대화 id·오류 id → 가짜 UUID(aaaaaaaa-…·eeeeeeee-…), OSC msg 안의 임시 폴더 경로 → 견본 폴더(원래는 약 100자에서 …로 잘림). screen 의 osc 는 그 화면 때의 herdr-core terminal.get status(msg 는 풀린 글)다.",
+  "fixtures": [
+    {
+      "file": "idle-default.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "매번 묻기(agentMode \"\")로 갓 띄운 화면. 자리표시 글이 없다: 입력 줄은 `>` 하나. 바닥줄은 IAMCEO 상태줄 래퍼 한 줄.",
+      "expect": {
+        "draft": "",
+        "progress": null,
+        "retry": null,
+        "folderTrust": false,
+        "folderTrustFromScreen": false,
+        "approval": null
+      }
+    },
+    {
+      "file": "idle-accept-edits.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "agentMode accept-edits 로 띄움. 자리표시 글이 그대로 보인다.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "idle-auto.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "agentMode auto(--settings). --mode auto·--dangerously-skip-permissions·agentMode 없음도 같은 화면(상태줄 cycle_mode auto).",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "idle-plan.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "agentMode plan.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "idle-announcement.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "첫 실행의 안내 상자(┃ … esc to dismiss)가 입력칸 위에 붙은 화면. 빈 입력칸에서 Esc 를 누르면 하나씩 닫히고(두 개: Gemini 4 Neon 소개 → Auto 기본 모드 안내) 닫힘은 전역에 남는다(다음 실행부터 안 보임).",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "idle-default-statusline.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "상태줄 명령 없이 띄웠을 때 agy 기본 바닥줄: `? for shortcuts` … 오른쪽 끝 `Gemini 3.8 Flash · low`(매번 묻기는 모드 글 없음).",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "idle-auto-default-statusline.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "기본 바닥줄 + auto: 오른쪽이 `auto · Gemini 3.8 Flash · low`.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "draft-oneline.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "한 줄 초안(타이핑).",
+      "expect": {
+        "draft": "hello draft one line"
+      }
+    },
+    {
+      "file": "draft-multiline.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "한 줄 초안 뒤에 세 줄을 bracketed paste. 이어진 줄은 두 칸 들여 쓴다.",
+      "expect": {
+        "draft": "hello draft one linefirst pasted line\nsecond pasted line\nthird pasted line"
+      }
+    },
+    {
+      "file": "draft-cleared.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "Esc 두 번을 한 번에(terminal.keys [esc, esc]) 보내 지운 뒤. 1초 간격의 Esc 두 번은 지우지 못했다.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "slash-menu.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "'/' 를 친 명령 메뉴. 입력칸 아래에 메뉴와 `↑/↓ Navigate · enter Select · tab Complete` 가 붙는다.",
+      "expect": {
+        "draft": null,
+        "approval": null,
+        "folderTrust": false
+      }
+    },
+    {
+      "file": "slash-draft.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "'/comp' 메뉴를 Esc 로 닫은 뒤. 이 상태의 Esc 는 메뉴를 다시 열 뿐 지우지 않는다(백스페이스로만 지워짐).",
+      "expect": {
+        "draft": "/comp"
+      }
+    },
+    {
+      "file": "working-first.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "working"
+      },
+      "note": "글을 넣은 직후 일하는 중. 지난 입력 상자(60칸 가로줄 + `> 글`) 바로 아래 `⣻  Generating...`. 'esc to cancel' 글은 없다. 입력칸은 비어 보인다.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Generating...",
+        "retry": null
+      }
+    },
+    {
+      "file": "working-tool.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "working"
+      },
+      "note": "승인 뒤 명령이 도는 중(`⡿  Running command...`).",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Running command..."
+      }
+    },
+    {
+      "file": "interrupted.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "일하는 중 Esc → `⎿  Interrupted · What should Antigravity CLI do instead?`. OSC 는 done 없이 곧바로 idle. Stop 훅은 오지 않는다.",
+      "expect": {
+        "draft": "",
+        "turnToStop": false
+      }
+    },
+    {
+      "file": "done-reply.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "done",
+        "msg": "I have created [hello.txt](file:///private/tmp/iamceo-cli-fixture/work/hello.txt) with the content `hi`."
+      },
+      "note": "턴이 정상으로 끝난 화면. OSC 는 idle 이 아니라 done(msg=답의 첫 줄).",
+      "expect": {
+        "draft": "",
+        "turnToStop": false
+      }
+    },
+    {
+      "file": "approval-command.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "blocked",
+        "kind": "permission",
+        "msg": "Approve Bash: ls -la ."
+      },
+      "note": "매번 묻기의 run_command 승인 창. OSC blocked/permission msg 'Approve Bash: ls -la .'. 입력칸이 사라지고 선택지 아래 안내 줄 + IAMCEO 상태줄.",
+      "expect": {
+        "draft": null,
+        "turnToStop": true,
+        "approval": {
+          "title": "Command",
+          "question": "Run this command?",
+          "options": [
+            "Yes, run command",
+            "Yes, and always allow in this conversation for commands that start with 'ls'",
+            "Yes, and always allow for commands that start with 'ls' (Persist to settings.json)",
+            "No, cancel"
+          ],
+          "selected": 0,
+          "hint": "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command"
+        },
+        "folderTrust": false,
+        "folderTrustFromScreen": false,
+        "setupBlocked": false,
+        "trustDialogLike": false
+      }
+    },
+    {
+      "file": "approval-create.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "blocked",
+        "kind": "permission",
+        "msg": "Approve Edit: Write: /private/tmp/iamceo-cli-fixture/work/hello.txt"
+      },
+      "note": "write_file(새 파일) 승인 창. OSC msg 'Approve Edit: Write: <경로…>'(약 100자에서 …로 자름).",
+      "expect": {
+        "draft": null,
+        "turnToStop": true,
+        "approval": {
+          "title": "Create file",
+          "question": "Allow creation of this file?",
+          "options": [
+            "Yes, allow creation",
+            "No, deny creation"
+          ],
+          "selected": 0,
+          "hint": "↑/↓ Navigate · f full diff"
+        }
+      }
+    },
+    {
+      "file": "approval-edit.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "blocked",
+        "kind": "permission",
+        "msg": "Approve Edit: Write: /private/tmp/iamceo-cli-fixture/work/hello.txt"
+      },
+      "note": "edit_file 승인 창. 질문 위에 `shift+tab to auto-approve file edits`.",
+      "expect": {
+        "draft": null,
+        "turnToStop": true,
+        "approval": {
+          "title": "Pending edit",
+          "question": "Accept this file edit?",
+          "options": [
+            "Yes, accept this change",
+            "No, reject this change"
+          ],
+          "selected": 0,
+          "hint": "↑/↓ Navigate · f full diff"
+        }
+      }
+    },
+    {
+      "file": "approval-edit-reject-selected.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "blocked",
+        "kind": "permission",
+        "msg": "Approve Edit: Write: /private/tmp/iamceo-cli-fixture/work/hello.txt"
+      },
+      "note": "↓ 로 2번을 고른 화면. 안내 줄에 `tab Amend` 가 더해진다.",
+      "expect": {
+        "draft": null,
+        "turnToStop": true,
+        "approval": {
+          "title": "Pending edit",
+          "question": "Accept this file edit?",
+          "options": [
+            "Yes, accept this change",
+            "No, reject this change"
+          ],
+          "selected": 1,
+          "hint": "↑/↓ Navigate · tab Amend · f full diff"
+        }
+      }
+    },
+    {
+      "file": "declined.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "거절(2) 뒤: `⎿  User declined the tool call` + Interrupted. 턴이 끝나고 OSC idle(done 아님). Stop 훅 없음. 명령 창의 4(No, cancel)·Esc 도 같은 모양.",
+      "expect": {
+        "draft": "",
+        "turnToStop": false
+      }
+    },
+    {
+      "file": "folder-trust.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "blocked",
+        "kind": "permission",
+        "msg": "Trust this folder?"
+      },
+      "note": "신뢰 목록에 없는 폴더에서 처음 띄울 때. OSC blocked/permission msg 'Trust this folder?'. Enter=신뢰(전역 settings.json trustedWorkspaces 에 cwd 가 더해짐, --add-dir 폴더는 묻지 않음). IAMCEO 는 --settings trustedWorkspaces 로 이 창을 피한다.",
+      "expect": {
+        "draft": null,
+        "folderTrust": true,
+        "turnToStop": false,
+        "approval": null,
+        "setupBlocked": false,
+        "trustDialogLike": true,
+        "folderTrustFromScreen": true
+      }
+    },
+    {
+      "file": "compacting.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "/compact(붙여넣기+Enter) 압축 중: `⣷  Compacting conversation… (0s · esc to cancel)`.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Compacting conversation… (0s · esc to cancel)",
+        "retry": null
+      }
+    },
+    {
+      "file": "compacted.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "done",
+        "msg": "Task complete"
+      },
+      "note": "압축 끝: `── Conversation compacted ──` 가운데 정렬 구분선 + `26 steps summarized · context 13.4k → ~14.5k (799 summary) · took 8s`(가운데 정렬). OSC done msg 'Task complete'. Stop 훅 terminationReason TERMINAL_CUSTOM_HOOK.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "subagent-running.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "서브에이전트가 도는 동안 입력칸 아래 가로줄 사이에 서브에이전트 줄(`● Agent(self: Number Responder) · Gemini 3.8 Flash  Working · 1s`)이 끼고 그 아래 상태줄.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Delegating..."
+      }
+    },
+    {
+      "file": "subagent-done-panel.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "done",
+        "msg": "The subagent replied with:"
+      },
+      "note": "부모 턴은 done 인데 서브에이전트 줄이 아직 남은 화면(Generating · 6s). 몇 초 뒤 사라진다.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "network-retry.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "working"
+      },
+      "note": "API 연결을 끊었을 때(CONNECT 프록시 차단) 재시도: `⣻  Model unavailable (attempt 3/9), retrying in 9s...`. OSC working.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Model unavailable (attempt 3/9), retrying in 9s...",
+        "retry": {
+          "attempt": 3,
+          "max": 9,
+          "seconds": 9
+        }
+      }
+    },
+    {
+      "file": "network-error.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "error",
+        "msg": "There was a network issue connecting to the server, please try again."
+      },
+      "note": "9번 재시도(약 133초) 뒤: `⚠ There was a network issue connecting to the server, please try again.` + `Error ID: …`. OSC error(msg 같은 글). Stop 훅 ERROR.",
+      "expect": {
+        "draft": "",
+        "turnToStop": false
+      }
+    },
+    {
+      "file": "offline-start-error.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "error",
+        "msg": "failed to construct executor: plan model not specified; you must specify a valid model"
+      },
+      "note": "처음부터 네트워크가 막힌 채 띄우고 글을 넣으면 곧바로 `⚠ failed to construct executor: plan model not specified; you must specify a valid model`. 훅 없음. 배너에 요금제·모델 줄이 없고 바닥줄은 `IAMCEO · ctx 0%`.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "exit-resume.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": null,
+      "note": "ctrl+c 두 번으로 끝낸 뒤 `Resume with -c (or command below):` / `agy --conversation=<id>`. ctrl+d 는 끝내지 않았다.",
+      "expect": {
+        "draft": null
+      }
+    },
+    {
+      "file": "srv-idle.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "idle"
+      },
+      "note": "격리 IAMCEO 서버(wave12 2bcc677)가 띄운 Gemini 팀장의 GET /api/members/:id/screen(권한 default). 신뢰 창 없음.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "srv-delivered-working.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "working"
+      },
+      "note": "서버가 전달 묶음을 붙여넣기+Enter 로 넣은 직후(표지 #iamceo_… 가 지난 입력 상자 안에 보인다).",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Generating..."
+      }
+    },
+    {
+      "file": "srv-approval.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "blocked",
+        "kind": "permission",
+        "msg": "Approve Bash: pwd"
+      },
+      "note": "서버가 띄운 팀장의 run_command 승인 창. 서버는 blockedReason permission, GET approval 은 null(1차는 터미널에서 답).",
+      "expect": {
+        "draft": null,
+        "turnToStop": true,
+        "approval": {
+          "title": "Command",
+          "question": "Run this command?",
+          "options": [
+            "Yes, run command",
+            "Yes, and always allow in this conversation for commands that start with 'pwd'",
+            "Yes, and always allow for commands that start with 'pwd' (Persist to settings.json)",
+            "No, cancel"
+          ],
+          "selected": 0,
+          "hint": "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command"
+        },
+        "folderTrust": false
+      }
+    },
+    {
+      "file": "statusline-before.json",
+      "kind": "statusline",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "첫 글 전: conversation_id·session_id 빈 글, transcript_path 는 ~/.gemini/antigravity/brain/.system_generated/logs/transcript.jsonl(대화 id 없음), cycle_mode 없음(매번 묻기), quota 묶음 다섯(3p-5h, 3p-weekly, gemini-5h, gemini-argon-wtu-weekly, gemini-weekly), cost·subagents 없음, email 은 user@example.com 으로 바꿈.",
+      "expect": {
+        "conversationId": null,
+        "cycleMode": "default",
+        "agentState": "idle",
+        "transcriptPath": null,
+        "subagents": 0,
+        "costUsd": null,
+        "quotaBuckets": [
+          "3p-5h",
+          "3p-weekly",
+          "gemini-5h",
+          "gemini-argon-wtu-weekly",
+          "gemini-weekly"
+        ],
+        "quotaFamilies": {
+          "3p-5h": "third_party",
+          "3p-weekly": "third_party",
+          "gemini-5h": "gemini",
+          "gemini-argon-wtu-weekly": "argon",
+          "gemini-weekly": "gemini"
+        }
+      }
+    },
+    {
+      "file": "statusline-after.json",
+      "kind": "statusline",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "첫 글 뒤: conversation_id=session_id, transcript_path 가 ~/.gemini/antigravity/brain/<id>/… 를 가리키나 실제 파일은 ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl 에 있다(상태줄 값이 틀림). current_usage 가 생김. cost 는 끝까지 오지 않음.",
+      "expect": {
+        "conversationId": "aaaaaaaa-1111-4111-8111-000000000001",
+        "transcriptPath": null,
+        "cycleMode": "default",
+        "agentState": "idle",
+        "subagents": 0,
+        "subagentsUnknown": 0,
+        "costUsd": null,
+        "emailKept": false
+      }
+    },
+    {
+      "file": "statusline-subagents.jsonl",
+      "kind": "statusline",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "서브에이전트 항목: {name, role, model, status}. model 칸은 문서에 없다. role 은 처음엔 역할 이름, 곧 지시 글로 바뀐다. running → completed. 끝난 항목은 목록에 남는다.",
+      "expect": {
+        "subagents": [
+          1,
+          0
+        ],
+        "subagentsUnknown": [
+          0,
+          0
+        ],
+        "agentState": [
+          "working",
+          "idle"
+        ]
+      }
+    },
+    {
+      "file": "statusline-approval.json",
+      "kind": "statusline",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "승인 창이 떠 있는 동안: agent_state tool_use, tool_confirmation_pending true.",
+      "expect": {
+        "agentState": "tool_use",
+        "cycleMode": "default"
+      }
+    },
+    {
+      "file": "hooks.jsonl",
+      "kind": "log",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "SessionStart·PreInvocation·Stop 원본 입력(훅은 IAMCEO 와 같은 세 사건, 출력 {}). Stop 은 정상 끝(NO_TOOL_CALL)·/compact(TERMINAL_CUSTOM_HOOK)·네트워크 장애(ERROR, error 글)에만 왔고, Esc 중단·승인 거절·명령 취소에는 오지 않았다. 서브에이전트의 SessionStart·PreInvocation·Stop 도 같은 파일에 다른 conversationId 로 섞인다. 서브에이전트가 도는 중 부모 턴이 끝나면 Stop fullyIdle false, 서브에이전트가 끝난 뒤 부모가 다시 PreInvocation(invocationNum 0) → Stop fullyIdle true.",
+      "expect": {
+        "stopReasons": [
+          "NO_TOOL_CALL",
+          "TERMINAL_CUSTOM_HOOK",
+          "ERROR"
+        ],
+        "conversations": 3,
+        "parentTurnStop": {
+          "reason": "NO_TOOL_CALL",
+          "fullyIdle": true,
+          "conversationId": "aaaaaaaa-1111-4111-8111-000000000001"
+        },
+        "unknownConversationTurnStop": {
+          "reason": "NO_TOOL_CALL",
+          "fullyIdle": true,
+          "conversationId": "aaaaaaaa-1111-4111-8111-000000000001"
+        },
+        "errorStopKind": "network",
+        "compactEnd": true
+      }
+    },
+    {
+      "file": "transcript-compact.jsonl",
+      "kind": "log",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl 의 압축 앞뒤 네 줄: 마지막 답(PLANNER_RESPONSE) → USER_INPUT '<USER_REQUEST>\\n/compact\\n</USER_REQUEST>…' → {source SYSTEM, type CHECKPOINT, status DONE, input_tokens, cache_read_tokens, output_tokens, truncated_fields:[content], content '# Resuming from a compaction…'} → 다음 사용자 글. step_index 는 압축 뒤에도 이어진다. transcript_full.jsonl 도 같은 내용.",
+      "expect": {
+        "compactOutcome": "succeeded",
+        "promptTokens": null,
+        "hasModelResponse": true
+      }
+    },
+    {
+      "file": "osc7501.txt",
+      "kind": "osc",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "agy 가 낸 OSC 7501 본문(ESC ] 7501 ; … BEL). 꼴은 state=<s>[:kind=<k>]:app=antigravity[:msg=<base64>]. 상태 순서: idle → working → blocked(permission) → working → done(msg=답 첫 줄) / Esc·거절 뒤에는 done 없이 idle. 붙을 때(attach) core 가 마지막 보고를 ST 로 다시 보낸다. herdr-core terminal.get 의 status.msg 는 base64 를 푼 글이다.",
+      "expect": {
+        "states": [
+          "idle",
+          "working",
+          "idle",
+          "working",
+          "blocked",
+          "working",
+          "done",
+          "working",
+          "blocked",
+          "working",
+          "done",
+          "working",
+          "blocked",
+          "working",
+          "idle",
+          "working",
+          "blocked",
+          "working",
+          "idle",
+          "working",
+          "done",
+          "idle",
+          "working",
+          "done",
+          "working",
+          "done",
+          "idle",
+          "working",
+          "blocked",
+          "idle",
+          "idle"
+        ],
+        "blockedMessages": [
+          "Approve Bash: ls -la .",
+          "Approve Edit: Write: /private/tmp/iamceo-cli-fixture/work/hello.txt",
+          "Approve Edit: Write: /private/tmp/iamceo-cli-fixture/work/hello.txt",
+          "Approve Bash: echo done-ae",
+          "Approve Bash: pwd"
+        ],
+        "doneMessages": [
+          "### Directory Listing Output",
+          "I have created [hello.txt](file:///private/tmp/iamceo-cli-fixture/work/hello.txt) with the content `hi`.",
+          "finished.",
+          "Task complete",
+          "The subagent replied with:"
+        ],
+        "turnToStop": [
+          false,
+          true,
+          false,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          true,
+          false,
+          true,
+          false,
+          false,
+          true,
+          false,
+          true,
+          false,
+          false,
+          true,
+          true,
+          false,
+          false
+        ]
+      }
+    }
+  ]
+}

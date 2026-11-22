@@ -39,11 +39,15 @@ const METHODS = ["terminal.run", "terminal.list", "terminal.get", "terminal.read
 const RULE = "─".repeat(40);
 /** Claude 의 빈 입력칸이 보이는 화면. 위에 대화가 쌓이고 아래에 입력칸이 있다. */
 export const composerScreen = (history = "", draft = "") => `${history}\n${RULE}\n❯ ${draft}\n${RULE}\n  ? for shortcuts\n`;
+/** 가짜 agy 터미널의 너비(전체 너비 가로줄)와 지난 입력 상자의 가로줄(1.5.14 실측: 60칸). */
+const GEMINI_RULE = "─".repeat(80);
+const GEMINI_BOX = "─".repeat(60);
 /**
- * Antigravity CLI(agy)의 입력칸이 보이는 화면: 가로줄 사이의 `> ` 줄과 그 아래 IAMCEO 상태줄.
- * 실제 화면을 옮긴 것이 아니라 문서 그림의 모양이다(server/runner/gemini-screen.ts 가 읽는 모양과 같다).
+ * Antigravity CLI(agy)의 입력칸이 보이는 화면(1.5.14 실측 모양, tests/fixtures/cli/gemini/1.5.14): 전체 너비 가로줄 사이의 `> ` 줄과 그 아래 IAMCEO 상태줄.
+ * 위에는 지난 입력 상자(60칸 가로줄 + `> 글`)와 답이 쌓이고, 일하는 중이면 입력칸 바로 위에 진행 줄(`⣻  Generating...`)이 붙는다.
  */
-export const geminiComposerScreen = (history = "", draft = "", status = "IAMCEO · fake-model") => `${history}\n${RULE}\n> ${draft}\n${RULE}\n${status}\n`;
+export const geminiComposerScreen = (history = "", draft = "", status = "IAMCEO · fake-model", progress: string | null = null) =>
+  `${history}${progress ? `${progress}\n` : "\n"}${GEMINI_RULE}\n> ${draft}\n${GEMINI_RULE}\n${status}\n`;
 
 /**
  * core 에서만 생기는 턴: 깨우는 지시를 받고도 보고(완료·막힘·질문 post, 열린 결재) 없이 끝난 실행에 서버가 한 번 보내는 '보고 보완' 요청.
@@ -177,7 +181,7 @@ export async function startFakeCore(options: FakeCoreOptions) {
   const decode = (value: string | undefined): string | undefined => { if (value === undefined) return undefined; try { return decodeURIComponent(value); } catch { return value; } };
 
   const flagOf = (argv: string[], name: string) => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] ?? null : null; };
-  const render = (holder: Holder) => holder.screen ?? (holder.run.cli === "gemini" ? geminiComposerScreen(holder.history, holder.draft) : composerScreen(holder.history, holder.draft));
+  const render = (holder: Holder) => holder.screen ?? (holder.run.cli === "gemini" ? geminiComposerScreen(holder.history, holder.draft, undefined, holder.turn ? "⣻  Generating..." : null) : composerScreen(holder.history, holder.draft));
   const conversationFile = (id: string) => options.geminiHome ? join(options.geminiHome, "conversations", `${id}.db`) : null;
   /**
    * 가짜 agy 의 상태줄: 실제 agy 가 상태줄 명령에 주는 JSON 을 서버와 같은 규칙(geminiStatusFromPayload)으로 기록 파일에 쓴다.
@@ -296,7 +300,7 @@ export async function startFakeCore(options: FakeCoreOptions) {
         geminiHook(holder, { event: "PreInvocation", invocation: 0, markers: [], chars: prompt.length, compact: true });
         geminiTranscript(holder, { source: "SYSTEM", type: "SYSTEM_MESSAGE", content: "The following is a <SYSTEM_MESSAGE> not actually sent by the user." });
         if (mode === "checkpoint") geminiTranscript(holder, { source: "SYSTEM", type: "CHECKPOINT", input_tokens: 3068, cache_read_tokens: 7755, output_tokens: 409, content: "# Resuming from a compaction\n\nYou are continuing work on the task described above." });
-        holder.history += `${holder.history ? "\n" : ""}> /compact\n`;
+        holder.history += `${holder.history ? "\n" : ""}${GEMINI_BOX}\n> /compact\n`;
         geminiHook(holder, { event: "Stop", reason: "TERMINAL_CUSTOM_HOOK", fullyIdle: true, failed: false });
         return;
       }
@@ -305,7 +309,8 @@ export async function startFakeCore(options: FakeCoreOptions) {
     }
     // 받은 글이 세션 기록에 남는다. CoreRunner 의 수신 확인(전달 표지 찾기)이 이 줄을 읽는다.
     record(holder, { type: "user", message: { role: "user", content: prompt } });
-    holder.history += `${holder.history ? "\n" : ""}${gemini ? ">" : "❯"} ${prompt}\n`;
+    // agy 는 넣은 글을 지난 입력 상자(60칸 가로줄 + `> 글`, 이어진 줄은 두 칸 들여)로 남긴다(1.5.14 실측).
+    holder.history += gemini ? `${holder.history ? "\n" : ""}${GEMINI_BOX}\n> ${prompt.split("\n").join("\n  ")}\n` : `${holder.history ? "\n" : ""}❯ ${prompt}\n`;
     // 아래 두 명령은 Claude 의 것이다. agy 는 그런 명령을 모른다: 보통 글로 받는다(서버가 잘못 넣으면 시험에서 드러난다).
     if (!gemini && prompt.startsWith("/compact")) {
       record(holder, { type: "system", subtype: "compact_boundary", content: "Conversation compacted", compactMetadata: { trigger: "manual", preTokens: 150_000 } });
@@ -333,7 +338,7 @@ export async function startFakeCore(options: FakeCoreOptions) {
     // 문맥 사용량은 답 한 줄의 usage 로 남는다(턴 끝에 CoreRunner 가 세션 기록의 꼬리를 읽는다).
     record(holder, { type: "assistant", message: { id: `msg_${crypto.randomUUID()}`, model: "fake-model", role: "assistant", content: text ? [{ type: "text", text }] : [],
       usage: { input_tokens: 10, cache_read_input_tokens: Math.max(0, tokens - 10), cache_creation_input_tokens: 0, output_tokens: 5 } } });
-    if (text) holder.history += `⏺ ${text}\n`;
+    if (text) holder.history += gemini ? `\n  ${text}\n` : `⏺ ${text}\n`;
     await sleep(Number(directives.get("delay") ?? 0));
     if (directives.has("hang")) await sleep(600_000);
     if (directives.has("hold")) {
@@ -447,7 +452,9 @@ export async function startFakeCore(options: FakeCoreOptions) {
     if (call.method === "terminal.interrupt") {
       const turn = holder.turn;
       if (turn && /@fake:ignore-sigint\b/.test(`${state.directives} ${turn.prompt}`)) return { result: { outcome: "timeout" } };
-      if (turn) { holder.abort?.abort(new Error("interrupted")); finish(holder, turn, "interrupted", { state: options.endState ?? "done" }); }
+      // agy 는 Esc 로 멈춘 턴을 done 없이 곧바로 idle 로 알리고 Stop 훅을 돌리지 않는다(1.5.14 실측). 화면에는 'Interrupted' 줄이 남는다.
+      if (turn && holder.run.cli === "gemini") holder.history += "  ⎿  Interrupted · What should Antigravity CLI do instead?\n";
+      if (turn) { holder.abort?.abort(new Error("interrupted")); finish(holder, turn, "interrupted", holder.run.cli === "gemini" ? { state: "idle", app: "antigravity" } : { state: options.endState ?? "done" }); }
       return { result: { outcome: "stopped", key: "esc" } };
     }
     if (call.method === "terminal.kill") {

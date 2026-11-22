@@ -49,6 +49,20 @@ import UIKit
         XCTAssertEqual(RankSettingsCLI.codex.efforts, ["minimal", "low", "medium", "high", "xhigh"])
     }
 
+    /// agy 1.5.14 실측: 폴더 신뢰 창은 도구 승인과 같은 permission 으로 온다. 서버는 그 창을 blockedCode gemini_folder_trust(blockedReason setup)로 알리고
+    /// 키를 보내지 않는다. 앱은 승인 카드가 아니라 '터미널 열어 직접 답하기' 안내를 보인다(이미 있는 문구 그대로, CLI 이름은 Antigravity CLI).
+    func testGeminiFolderTrustPromptGuidesToTheTerminal() throws {
+        let observed = StatusObservation(source: "core", freshness: "fresh", ownership: "verified", error: ObservationError(code: "gemini_folder_trust", note: "Antigravity CLI가 이 폴더를 신뢰할지 묻고 있습니다"))
+        var member = Member(id: "m", backend: "core", status: "blocked", blockedReason: "setup", statusObservation: observed)
+        member.cli = "gemini"; member.blockedCode = "gemini_folder_trust"
+        let guide = try XCTUnwrap(BlockedGuide(member))
+        XCTAssertEqual(guide.label, "폴더 신뢰 확인 필요")
+        XCTAssertEqual(guide.explanation, "Antigravity CLI가 이 폴더를 신뢰할지 묻고 있습니다. 터미널에서 직접 답해 주세요.")
+        XCTAssertEqual(guide.actionTitle, "터미널 열어 직접 답하기")
+        XCTAssertFalse(member.hasFolderTrustApproval, "Claude·Codex 의 폴더 신뢰 승인(서버가 답하는 창)으로 보이지 않는다")
+        XCTAssertTrue(MemberStatusInfo(member).needsMe)
+    }
+
     func testFeaturesThatDifferByCLI() {
         // 앱에서 로그인: 0.2.10 부터 Gemini 도 된다(사용 한도 카드의 '다른 계정으로 로그인' 단추가 이 값으로 갈린다).
         XCTAssertEqual(RankSettingsCLI.allCases.map(\.signsInFromApp), [true, true, true])

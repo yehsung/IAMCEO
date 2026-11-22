@@ -413,7 +413,7 @@ describe("결재함 승인: 실제 훅 스크립트 → 실제 서버(/agent/per
     const answer = await fetch(`${base}/api/decisions/${card.id}/answer`, { method: "POST", headers: { Authorization: `Bearer ${config.accessCode}`, "Content-Type": "application/json" }, body: JSON.stringify({ choice: "allow" }) });
     expect(answer.status).toBe(200);
     // agy 1.5.14 는 overwrite 의 Cwd 를 적용하지 않는다(실측). 명령 글 앞의 cd 로 프로젝트에서 돈다. 카드에는 모델이 쓴 글(bun test)만 보인다.
-    const inWork = `cd '${isolated.paths.work.replace(/'/g, "'\\''")}' && {\nbun test\n}`;
+    const inWork = `cd '${isolated.paths.work.replace(/'/g, "'\\''")}' && {\nbun test\n\n}`;
     expect(JSON.parse(await output)).toEqual({ decision: "auto_approve", overwrite: { CommandLine: inWork } });
     expect(await child.exited).toBe(0);
     // auto 로 바꾸면 같은 명령은 카드 없이 agy 에 맡긴다(cd 를 붙인 명령 글만).

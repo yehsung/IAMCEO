@@ -3,9 +3,9 @@
 // 1) 작업 폴더. agy 는 작업 공간(실행 폴더 + --add-dir 폴더)을 경로 글자 순으로 정렬해 첫째를 '현재 폴더'로 쓴다(1.5.14 실측 8회 일치:
 //    훅 입력의 cwd·workspacePaths[0], run_command 의 기본 폴더, "현재 폴더에 만들어" 의 파일 자리). IAMCEO 주입 폴더(<홈>/run/<id>.gemini/agy/<id>)는
 //    홈의 `.iamceo`('.' 은 영문자보다 앞) 때문에 대개 프로젝트보다 앞서, 고치지 않으면 팀장의 산출물·명령이 주입 폴더에서 돈다. 그래서
-//    - run_command 는 명령 글 앞에 `cd '<폴더>' && {⏎ … ⏎}` 를 붙여 바꿔 쓴다(overwrite CommandLine, 얕은 병합: agy 가 모델에게 "Changed: CommandLine" 을
+//    - run_command 는 명령 글을 `cd '<폴더>' && {⏎ … ⏎⏎}` 로 감싸 바꿔 쓴다(overwrite CommandLine, 얕은 병합: agy 가 모델에게 "Changed: CommandLine" 을
 //      알린다). 폴더는 모델이 준 Cwd 가 주입 폴더 밖의 절대 경로면 그것, 없거나 주입 폴더 안이면 프로젝트다. 묶음({ }과 줄바꿈)은 원래 명령의 `;`·`&`·
-//      끝 주석·here-document 가 cd 와 갈라지지 않게 한다. 이미 있는 지속 터미널을 다시 쓰는 호출(RequestedTerminalID)은 건드리지 않는다.
+//      끝 주석·here-document·끝 백슬래시가 cd 와 갈라지지 않게 한다(닫는 줄 없는 here-document 는 알려진 한계). 이미 있는 지속 터미널을 다시 쓰는 호출(RequestedTerminalID)은 건드리지 않는다.
 //      1.5.14 실측(11-23, 헤드리스 대화 41d563a0 와 격리 서버 대화형): overwrite 의 Cwd 는 'Changed: Cwd' 를 알리기만 하고 적용되지 않는다(모델의
 //      run_command 인자에도 Cwd 칸이 없다: CommandLine·WaitMsBeforeAsync·toolSummary). CommandLine 바꿔 쓰기는 적용된다. 예전(2bcc677)의 Cwd 바꿔 쓰기로
 //      프로젝트에서 돈 것처럼 보인 헤드리스 e3·e5 는 모델이 명령 안에서 스스로 cd 한 것이었다.
@@ -133,8 +133,11 @@ try {
     const given = typeof cwd === 'string' && cwd.trim() !== '';
     // 모델이 준 폴더가 주입 폴더 밖의 절대 경로면 그 폴더로(agy 가 Cwd 를 무시해도 모델이 뜻한 자리에서 돈다), 없거나 주입 폴더 안이면 프로젝트로.
     const target = given && absText(cwd) && !inInject(cwd) ? resolve(cwd) : config.cwd;
+    // 앞을 cd 로 고정해도 agy 의 '이 글자로 시작하는 명령 항상 허용'이 'cd' 가 되지는 않는다(1.5.14 실측: 바꿔 쓴 명령의 그 선택지는 원래 명령의 첫머리 'python3 -c "' 였다).
     const head = 'cd ' + shq(target) + ' && {\n';
-    if (!command.startsWith(head)) overwrite.CommandLine = head + command + '\n}';
+    // 닫는 } 앞에 빈 줄을 하나 더 둔다: 원래 명령이 끝 백슬래시(줄 잇기)로 끝나면 그 빈 줄이 이어질 줄이 되어 } 를 먹지 않는다.
+    // 닫는 줄이 없는 here-document 는 } 까지 먹어 문법 오류가 된다(모델 쪽 오류라 두는 알려진 한계). eval 로 감싸지 않는다: agy 창에 보이는 명령과 '항상 허용'의 기준이 바뀐다.
+    if (!command.startsWith(head)) overwrite.CommandLine = head + command + '\n\n}';
     if (given && inInject(cwd)) overwrite.Cwd = config.cwd;
     shown.Cwd = target;
   }

@@ -10,7 +10,8 @@
 //   reset_time 은 '2026-11-22T19:37:31Z' 꼴, disabled 칸은 없다. 쓰지 않은 3p-* 의 reset_time 은 매번 지금+5시간·7일로 움직인다(다 쓴 칸의 시각만 쓴다).
 //   그래서 /usage 없이도 묶음 id 로 모델 갈래를 안다(geminiBucketFamily): gemini-5h·gemini-weekly = Gemini 모델, 3p-* = Claude·GPT 모델,
 //   gemini-argon-* = Gemini 4 Argon(Pro 요금제에서 따로, Ultra 는 큰 Gemini 묶음에 든다는 /usage 설명).
-// 서버는 Gemini 팀장이 한도로 멈췄을 때만 /usage 를 띄운다(60초 안에 다시 묻지 않는다). 시험 모드에서는 만들지 않는다(createOrchestrator).
+// 서버는 Gemini 팀장이 한도로 멈췄을 때만 /usage 를 띄운다. 한도가 날 때마다 새로 읽는다(그 앞에 읽은 답에는 방금 바닥난 묶음이 없다: read(true)). 한 번에 하나만 돈다.
+// 시험 모드에서는 만들지 않는다(createOrchestrator).
 import { mkdirSync } from "node:fs";
 import { resolveCliExecutable } from "./config.ts";
 import { withoutGeminiRemote } from "./runner/env.ts";
@@ -223,8 +224,8 @@ export interface GeminiQuotaReaderOptions {
 }
 
 /**
- * `/usage` 읽기. 한 번에 하나만 띄우고, 성공한 답은 cacheMs(60초) 동안 다시 띄우지 않고 쓴다. 실패(실행 파일 없음·시간 초과·오류 종료·모양이 다름)는
- * null 이고 예전 답을 지우지 않는다. 던지지 않는다.
+ * `/usage` 읽기. 한 번에 하나만 띄우고, 성공한 답은 cacheMs(60초) 동안 다시 띄우지 않고 쓴다(read(true) 는 이 부름 뒤에 띄운 읽기를 기다린다).
+ * 실패(실행 파일 없음·시간 초과·오류 종료·모양이 다름)는 null 이고 예전 답을 지우지 않는다. 던지지 않는다.
  */
 export class GeminiQuotaReader {
   private last: AgyUsage | null = null;
@@ -239,9 +240,21 @@ export class GeminiQuotaReader {
     return this.last && this.now() - this.lastAt <= maxAgeMs ? this.last : null;
   }
 
+  /**
+   * force: 이 부름 뒤에 띄운 읽기의 답(새 한도가 났을 때: 그 앞에 읽은 답에는 방금 바닥난 묶음이 없다). 캐시를 쓰지 않고, 이미 도는 읽기는 이 부름 앞에
+   * 띄운 것이라 끝나기를 기다렸다가 새로 띄운다. 그 사이 다른 부름이 이미 새로 띄웠으면 그것을 함께 기다린다: 어느 때든 한 번에 하나만 돈다.
+   * force 가 아니면 cacheMs 안의 답을 쓰고, 도는 읽기가 있으면 그것을 함께 기다린다.
+   */
   read(force = false): Promise<AgyUsage | null> {
     if (this.stopped) return Promise.resolve(null);
     if (!force && this.last && this.now() - this.lastAt < (this.options.cacheMs ?? GEMINI_USAGE_CACHE_MS)) return Promise.resolve(this.last);
+    // running 은 끝날 때(finally) 비워진 뒤에 풀리므로, 기다린 뒤의 start() 는 새로 띄우거나 그 뒤에 띄운 읽기에 붙는다.
+    if (force && this.running) return this.running.then(() => this.start());
+    return this.start();
+  }
+
+  private start(): Promise<AgyUsage | null> {
+    if (this.stopped) return Promise.resolve(null);
     return this.running ??= (async (): Promise<AgyUsage | null> => {
       let bin: string | null = null;
       try { bin = this.options.bin ? resolveCliExecutable(this.options.bin) : null; } catch { bin = null; }

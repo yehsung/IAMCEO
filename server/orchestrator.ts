@@ -2836,7 +2836,7 @@ export class Orchestrator implements OrchestratorApi {
 
   /**
    * Gemini 팀장의 사용 한도. 보류부터 건다(전달이 곧바로 멈춘다). 초기화 시각은 차례로
-   * ① /usage(운영에서만, 뒤에서 읽는다): 그 팀장 모델의 묶음에서 다 쓴 칸의 가장 늦은 시각 → noteUsageReset 으로 넣는다.
+   * ① /usage(운영에서만, 뒤에서 새로 읽는다): 그 팀장 모델의 묶음에서 다 쓴 칸의 가장 늦은 시각 → noteUsageReset 으로 넣는다.
    * ② /usage 가 없거나 못 읽거나 묶음을 못 찾으면: 상태줄 기록에서 그 팀장 모델 갈래의 묶음(gemini-*·3p-*·gemini-argon-*)의 다 쓴 칸 가운데 가장 늦은 시각
    *    (갈래를 모르면 정하지 않는다: 다른 갈래 칸의 늦은 시각을 빌리면 며칠 동안 이어 보지 않는다).
    * ③ 글 속 시각(parseUsageReset) → ④ 모름: 한 시간 뒤부터 간격을 벌려 다시 이어 본다(이르게 이어 가도 agy 는 할당량 오류를 곧바로 돌려준다).
@@ -2846,7 +2846,9 @@ export class Orchestrator implements OrchestratorApi {
     this.apiRecovery.usageFailure(member, errorText, null, errorKey, { resetsAt: this.geminiQuota ? null : geminiStatusResetAt(status, this.geminiModelNames(member)) });
     const quota = this.geminiQuota;
     if (!quota) return;
-    void quota.read().then(usage => {
+    // 새로 읽는다: 앞 팀장의 한도 때 읽어 둔 답(60초 캐시)에는 이 팀장의 묶음이 아직 바닥나지 않았을 수 있다. 그 답으로는 초기화 시각을 못 정하고,
+    // 카드는 30분 동안 그 답(latest)으로 바닥난 묶음의 모델을 선택지로 낸다(검토 지적). 한 번에 하나만 도는 규칙은 GeminiQuotaReader 가 지킨다.
+    void quota.read(true).then(usage => {
       if (this.closed) return;
       const current = this.store.getMember(member.id);
       if (!current || !this.apiRecovery.usageLimited(member.id)) return;

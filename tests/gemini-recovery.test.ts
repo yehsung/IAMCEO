@@ -241,6 +241,48 @@ describe("/usage 읽기", () => {
     reader.stop();
     expect(await reader.read(true)).toBeNull();
   });
+  test("read(true): 이 부름 뒤에 띄운 읽기의 답이다. 캐시를 쓰지 않고, 이미 도는 읽기(이 부름 앞에 띄운 것)는 끝나기를 기다렸다 새로 띄운다. 그래도 한 번에 하나만 돈다", async () => {
+    const home = temp(), bin = join(home, "agy"), cwd = join(home, "run", "gemini-usage");
+    writeFileSync(bin, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    let now = 1_000_000;
+    let running = 0, most = 0, spawns = 0;
+    const gates: (() => void)[] = [];
+    const reader = new GeminiQuotaReader({ bin, cwd, now: () => now, spawn: async () => {
+      spawns++; running++; most = Math.max(most, running);
+      await new Promise<void>(resolve => gates.push(resolve));
+      running--;
+      return { exitCode: 0, stdout: fixture("usage.json") };
+    } });
+    const settle = () => Bun.sleep(5);
+    // 캐시가 있어도 force 는 새로 띄운다.
+    const first = reader.read();
+    await settle(); gates.shift()!();
+    expect(await first).not.toBeNull();
+    const cachedForce = reader.read(true);
+    await settle();
+    expect(spawns).toBe(2);
+    gates.shift()!();
+    await cachedForce;
+    // 도는 중에 온 read(true) 둘: 도는 것이 끝나기를 기다렸다가 새 읽기 하나를 함께 기다린다. 보통 read() 는 도는 것에 붙는다.
+    const early = reader.read(true);
+    await settle();
+    expect(spawns).toBe(3);
+    now += 61_000;
+    const joined = reader.read();
+    const [late1, late2] = [reader.read(true), reader.read(true)];
+    await settle();
+    expect(spawns).toBe(3);
+    gates.shift()!();
+    expect(await early).not.toBeNull();
+    expect(await joined).toBe(await early);
+    await settle();
+    expect(spawns).toBe(4);
+    gates.shift()!();
+    expect(await late1).toBe(await late2);
+    expect(await late1).not.toBe(await early);
+    expect(most).toBe(1);
+    expect(spawns).toBe(4);
+  });
   test("GeminiQuotaReader 의 `agy -p /usage` 는 SSH_CLIENT·SSH_TTY·SSH_CONNECTION 을 빼고 띄운다(서버를 SSH 에서 띄웠어도 폰 로그인·팀장과 같은 키체인 계정을 읽는다). SSH_AUTH_SOCK 등 나머지는 그대로다", async () => {
     const home = temp(), bin = join(home, "agy"), envFile = join(home, "env.txt"), reply = join(home, "usage.json"), script = join(home, "read-usage.ts");
     writeFileSync(reply, fixture("usage.json"));

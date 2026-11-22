@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Bus } from "../server/bus.ts";
 import { openDb } from "../server/db.ts";
 import {
-  GEMINI_MODELS_REFRESH_MS, GEMINI_MODELS_RETRY_STEPS_MS, GEMINI_MODELS_TIMEOUT_MS, GeminiModelsRefresher, geminiModelsCachePath, ModelCatalogReader, parseAgyModels, refreshGeminiModels, writeGeminiModelsCache,
+  agyEnvWithoutSsh, GEMINI_MODELS_REFRESH_MS, GEMINI_MODELS_RETRY_STEPS_MS, GEMINI_MODELS_TIMEOUT_MS, GeminiModelsRefresher, geminiModelsCachePath, ModelCatalogReader, parseAgyModels, refreshGeminiModels, writeGeminiModelsCache,
   type AgyModelsRun, type ModelOption,
 } from "../server/models.ts";
 import { Store } from "../server/store.ts";
@@ -435,6 +435,25 @@ describe("refreshGeminiModels: 캐시 갱신", () => {
     expect(await refreshGeminiModels({ bin: slow, cachePath, timeoutMs: 150 })).toEqual({ ok: false, reason: "timeout" });
     expect(Date.now() - started).toBeLessThan(3000);
     expect(readFileSync(cachePath, "utf8")).toBe(written);
+  });
+
+  test("SSH 세션에서 띄운 서버라도 `agy models` 에는 SSH_CLIENT·SSH_TTY·SSH_CONNECTION 을 넘기지 않는다(넘기면 키체인이 아닌 토큰 파일을 읽는다)", async () => {
+    const root = tempRoot();
+    const envFile = join(root, "seen-env");
+    const bin = fakeBin(root, `#!/bin/sh\nenv > '${envFile}'\nprintf 'gemini-4-neon-high\\tGemini 4 Neon (High)\\n'\n`, "agy-env");
+    // 서버 프로세스의 환경 자체에 SSH 값이 있는 경우: 기본 실행(가짜를 넣지 않음)을 그 환경의 하위 bun 에서 돌린다.
+    const script = join(root, "refresh.ts");
+    writeFileSync(script, `import { refreshGeminiModels } from ${JSON.stringify(join(import.meta.dir, "..", "server", "models.ts"))};\nconsole.log(JSON.stringify(await refreshGeminiModels({ bin: process.argv[2]!, cachePath: process.argv[3]! })));\n`);
+    const ssh = { SSH_CLIENT: "10.0.0.1 5555 22", SSH_TTY: "/dev/ttys009", SSH_CONNECTION: "10.0.0.1 5555 10.0.0.2 22" };
+    const child = Bun.spawn([process.execPath, script, bin, join(root, "gemini-models.json")], { env: { ...process.env, ...ssh, MARK_KEPT: "kept" }, stdout: "pipe", stderr: "pipe" });
+    const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    expect([await child.exited, err]).toEqual([0, ""]);
+    expect(JSON.parse(out.trim().split("\n").at(-1)!)).toEqual({ ok: true, count: 1 });
+    const seen = readFileSync(envFile, "utf8").split("\n");
+    for (const key of Object.keys(ssh)) expect([key, seen.some(line => line.startsWith(`${key}=`))]).toEqual([key, false]);
+    // 나머지 환경은 그대로 넘긴다.
+    expect(seen).toContain("MARK_KEPT=kept");
+    expect(agyEnvWithoutSsh({ PATH: "/usr/bin", HOME: "/h", ...ssh, OTHER: undefined })).toEqual({ PATH: "/usr/bin", HOME: "/h" });
   });
 });
 

@@ -25,7 +25,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { LEGACY_CLI_ACCOUNT_CLIS, type CliAccount, type CliAccountCli, type CliLogin, type CliLoginApplied, type CliLoginPhase } from "../shared/types.ts";
 import { ERROR_CODES, type ErrorCode } from "../shared/error-codes.ts";
-import { parseAgyModels } from "./models.ts";
+import { AGY_FILE_TOKEN_ENV, parseAgyModels } from "./models.ts";
 import { childEnv } from "./runner/env.ts";
 
 /**
@@ -390,7 +390,8 @@ export function geminiOpenShim(runDir: string): string {
  */
 export function geminiCliEnv(base: Record<string, string | undefined>, runDir: string, extra: Record<string, string | undefined> = {}, username?: () => string): Record<string, string> {
   const path = [geminiOpenShim(runDir), base.PATH || "/usr/bin:/bin:/usr/sbin:/sbin"].join(":");
-  return cliEnv(base, { PATH: path, SSH_CLIENT: undefined, SSH_TTY: undefined, SSH_CONNECTION: undefined, BROWSER: undefined, ...extra }, username);
+  const noSsh = Object.fromEntries(AGY_FILE_TOKEN_ENV.map(key => [key, undefined]));
+  return cliEnv(base, { PATH: path, ...noSsh, BROWSER: undefined, ...extra }, username);
 }
 
 /** agy 를 띄우는 빈 폴더(<runDir>/agy-login). 프로젝트 폴더에서 띄우지 않는다. */

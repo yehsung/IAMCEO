@@ -12,7 +12,7 @@ import type { ApprovalPrompt, Backend, DeliveryEvidence, MemberKind } from "../.
 import { claudeFolderTrust, codexFolderTrust, looksLikeFolderTrust } from "./core-approval.ts";
 import { cleanText, clipUtf16 } from "../text.ts";
 import { defaultGeminiHome } from "../config.ts";
-import { childEnv } from "./env.ts";
+import { childEnv, GEMINI_REMOTE_ENV } from "./env.ts";
 import { claudeQuietScreen, inputText, screenContextPct } from "./claude-screen.ts";
 import { GEMINI_FOLDER_TRUST_CODE, GEMINI_SELECTED_OPTION, GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE, geminiDraft, geminiFolderTrust, geminiMcpPanel, geminiRetry, geminiSetupBlocked, geminiTurnToStop } from "./gemini-screen.ts";
 import { geminiStatusPath, readGeminiStatus, type GeminiStatusRecord } from "./gemini-status.ts";
@@ -631,7 +631,7 @@ export class CoreRunner implements FullRunner {
     Object.assign(env, launch.env);
     // Antigravity CLI 는 SSH_CLIENT·SSH_TTY·SSH_CONNECTION 이 있으면 원격으로 보고 로그인 토큰을 키체인이 아닌 파일에서 읽고 쓴다.
     // 서버를 SSH 세션에서 띄웠어도 팀장이 폰 로그인(키체인, cli-login.ts)과 같은 계정을 쓰게 뺀다. SSH_AUTH_SOCK(git 의 ssh 열쇠)은 둔다.
-    if (providerFor(member) === "gemini") for (const key of ["SSH_CLIENT", "SSH_TTY", "SSH_CONNECTION"]) delete env[key];
+    if (providerFor(member) === "gemini") for (const key of GEMINI_REMOTE_ENV) delete env[key];
     const nonce = providerFor(member) === "codex" ? crypto.randomUUID().replaceAll("-", "") : null;
     let terminal: CoreTerminal;
     try { terminal = await this.call<CoreTerminal>("terminal.run", {

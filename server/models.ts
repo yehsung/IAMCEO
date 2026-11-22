@@ -6,6 +6,7 @@ import { ApiError } from "./store.ts";
 import { resolveCliExecutable } from "./config.ts";
 import { CODEX_EFFORTS, EFFORTS, GEMINI_EFFORTS, isGeminiSubagentTier, memberRank, ranksFor } from "../shared/types.ts";
 import { ERROR_CODES } from "../shared/error-codes.ts";
+import { withoutGeminiRemote as agyEnvWithoutSsh } from "./runner/env.ts";
 
 export interface ModelOption {
   value: string;
@@ -192,18 +193,11 @@ export type AgyModelsSpawn = (bin: string, timeoutMs: number) => Promise<AgyMode
  */
 export type GeminiModelsRefresh = { ok: true; count: number } | { ok: false; reason: "not_installed" | "timeout" | "failed" | "empty" | "write_failed" };
 
-/** agy 가 보면 로그인 토큰을 키체인이 아닌 <geminiHome>/antigravity-oauth-token 파일에 쓰고 읽는 환경 변수(원격 세션 판정, 실행 파일 역분석). */
-export const AGY_FILE_TOKEN_ENV = ["SSH_CLIENT", "SSH_TTY", "SSH_CONNECTION"] as const;
-
 /**
- * agy 에 넘길 환경: AGY_FILE_TOKEN_ENV 를 뺀 나머지 그대로. 서버를 SSH 세션에서 띄웠어도 폰 로그인(cli-login.ts geminiCliEnv)·팀장 터미널과
- * 같은 키체인의 로그인을 읽게 한다(넘기면 토큰 파일을 읽어, 없으면 인증 실패이고 남아 있으면 그 파일의 다른 계정을 본다). 값이 없는 칸은 버린다.
+ * agy 에 넘길 환경(서버 것에서 SSH_CLIENT·SSH_TTY·SSH_CONNECTION 만 뺀 것). 서버를 SSH 세션에서 띄웠어도 폰 로그인(cli-login.ts geminiCliEnv)·
+ * 팀장 터미널·한도 조회와 같은 키체인의 로그인을 읽게 한다. 정의는 runner/env.ts 하나다.
  */
-export function agyEnvWithoutSsh(base: Record<string, string | undefined> = process.env): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(base)) if (value !== undefined && !(AGY_FILE_TOKEN_ENV as readonly string[]).includes(key)) env[key] = value;
-  return env;
-}
+export { GEMINI_REMOTE_ENV as AGY_FILE_TOKEN_ENV, withoutGeminiRemote as agyEnvWithoutSsh } from "./runner/env.ts";
 
 async function spawnAgyModels(bin: string, timeoutMs: number): Promise<AgyModelsRun> {
   let timer: ReturnType<typeof setTimeout> | undefined;

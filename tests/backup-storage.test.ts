@@ -362,6 +362,69 @@ describe("끝까지 검증한 스냅샷은 재시작 뒤에도 다시 해시하�
     expect(listBackups(f.root).map((snapshot) => snapshot.manifest.id)).toEqual([third!.manifest.id, second.manifest.id]);
   });
 
+  // 11-22 검토: 표시가 맞으면 옆 파일 검사를 건너뛰어, 복원할 수 없는 s2 가 정리 칸을 차지하고 정상인 s1 이 지워졌다.
+  test.each(["-wal", "-shm", "-journal"] as const)("스냅샷에 iamceo.db%s 가 생기면 표시가 맞아도 좋은 것으로 세지 않아, 그보다 오래된 정상 스냅샷을 지우지 않는다", async (suffix) => {
+    const f = home(1);
+    let now = Date.parse("2026-11-05T00:00:00.000Z");
+    const policy = { daily: 2, weekly: 0 };
+    const manager = () => new BackupManager({ home: f.home, backupDir: f.root, policy, now: () => new Date(now) });
+    const first = (await manager().run())!;
+    now += DAY;
+    const second = (await manager().run())!;
+    now += DAY;
+    // 예: 누가 sqlite3 로 그 DB 에 쓰다가 죽어 남은 것. manifest 에 적힌 파일은 그대로라 stamp 가 같다.
+    fs.writeFileSync(join(second.directory, `iamceo.db${suffix}`), "");
+    expect(() => verifyBackup(second.directory)).toThrow("sidecars");
+    const third = (await manager().run())!;
+    expect(fs.existsSync(first.directory)).toBe(true);
+    expect(fs.existsSync(second.directory)).toBe(true);
+    expect(listBackups(f.root).map((snapshot) => snapshot.manifest.id)).toEqual([third.manifest.id, first.manifest.id]);
+  });
+
+  test("옆 파일이 생긴 가장 최근 스냅샷은 재시작 뒤 주기 계산에도 쓰지 않는다(다음 백업이 하루 늦어지지 않음)", async () => {
+    const f = home(1);
+    const first = (await new BackupManager({ home: f.home, backupDir: f.root, now: () => new Date(at) }).run())!;
+    fs.writeFileSync(join(first.directory, "iamceo.db-journal"), "");
+    const restarted = new BackupManager({ home: f.home, backupDir: f.root, now: () => new Date("2026-11-07T06:00:00.000Z") });
+    const created = await restarted.run();
+    expect(created).not.toBeNull();
+    expect(restarted.status().lastSuccessAt).toBe(created!.manifest.createdAt);
+  });
+
+  test("첨부 폴더가 링크로 바뀌면(안의 파일 inode·ctime 은 그대로) 표시를 믿지 않고 끝까지 검증해 거부한다", async () => {
+    const f = home(2);
+    const first = (await new BackupManager({ home: f.home, backupDir: f.root, now: () => new Date(at) }).run())!;
+    const moved = join(f.runtime.paths.work, "moved-attachments");
+    fs.renameSync(join(first.directory, "attachments"), moved);
+    fs.symlinkSync(moved, join(first.directory, "attachments"));
+    expect(() => verifyBackup(first.directory)).toThrow("symlink");
+    const created = await new BackupManager({ home: f.home, backupDir: f.root, now: () => new Date("2026-11-07T06:00:00.000Z") }).run();
+    expect(created).not.toBeNull();
+    expect(listBackups(f.root).map((snapshot) => snapshot.manifest.id)).toEqual([created!.manifest.id]);
+  });
+
+  test("이주가 적은 앞 판으로 되돌리면, 표시가 맞아도 그 판이 열 수 없는 판 번호의 스냅샷을 성공으로 치지 않는다", async () => {
+    const f = home(1);
+    await new BackupManager({ home: f.home, backupDir: f.root, now: () => new Date(at) }).run();
+    const script = join(f.runtime.paths.work, "older-build.ts");
+    fs.writeFileSync(script, `const { BackupManager, listBackups } = await import(${JSON.stringify(join(import.meta.dir, "..", "server", "backup.ts"))});
+const { MIGRATIONS } = await import(${JSON.stringify(join(import.meta.dir, "..", "server", "db.ts"))});
+// 불러온 뒤에 줄인다: manifest 형식 검사의 상한은 불러올 때 정해지므로, 표시 길의 판 번호 검사만 남는다.
+MIGRATIONS.pop();
+const [home, root] = process.argv.slice(2);
+const manager = new BackupManager({ home, backupDir: root, now: () => new Date("2026-11-07T06:00:00.000Z") });
+let failed = false;
+try { await manager.run(); } catch { failed = true; }
+console.log(JSON.stringify({ lastSuccessAt: manager.status().lastSuccessAt, failed, listed: listBackups(root).length }));
+`);
+    f.db.close(); databases.splice(databases.indexOf(f.db), 1);
+    const child = Bun.spawn([process.execPath, script, f.home, f.root], { env: f.runtime.childEnv(), cwd: f.runtime.paths.work, stdout: "pipe", stderr: "pipe" });
+    const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+    expect(code).toBe(0);
+    // 라이브 DB 도 앞 판이 열 수 없는 판이라 새 백업은 실패한다. 중요한 것은 옛 스냅샷을 성공으로 쳐 실패를 가리지 않는 것.
+    expect(JSON.parse(stdout)).toEqual({ lastSuccessAt: null, failed: true, listed: 0 });
+  }, 30_000);
+
   test("표시 파일은 manifest 밖이라 검증·목록·복원(예전 서버 포함)이 그대로이고, 복원한 홈으로 따라가지 않는다", async () => {
     const f = home(2);
     const snapshot = (await new BackupManager({ home: f.home, backupDir: f.root, now: () => new Date(at) }).run())!;

@@ -350,15 +350,30 @@ export function verifyBackup(directory: string): BackupSnapshot {
   return drain(verifySteps(directory));
 }
 
-function* verifySteps(directory: string): Steps<BackupSnapshot> {
-  directory = normalizeHome(directory);
+/*
+ * 해시도 DB 열기도 없는 값싼 검사들. verifySteps 와, 표시를 믿고 다시 해시하지 않는 길(alreadyVerified)이 함께 쓴다.
+ * 11-22 검토: 표시 길이 옆 파일 검사를 건너뛰어, -journal 이 생겨 복원할 수 없게 된 스냅샷이 정리 칸을 차지하고
+ * 그보다 오래된 정상 스냅샷이 지워졌다(daily=2 에서 복원 가능한 것이 1개).
+ */
+function checkStandalone(directory: string): void {
   if (["-wal", "-shm", "-journal"].some((suffix) => existsSync(join(directory, `iamceo.db${suffix}`)))) throw new Error("Backup DB must be standalone without sidecars");
-  const manifestPath = backupPath(directory, join(directory, "manifest.json"));
-  // An invalid manifest must not direct reads to arbitrary paths or p8 files.
-  const manifest = manifestSchema.parse(readBackupJson(manifestPath));
+}
+
+function checkManifest(manifest: BackupManifest): void {
   if (new Date(manifest.createdAt).toISOString() !== manifest.createdAt) throw new Error("Invalid snapshot time");
   if (new Set(manifest.configs.map((entry) => entry.path)).size !== manifest.configs.length || !manifest.configs.some((entry) => entry.path === "config.json")) throw new Error("Invalid config inventory");
   if (new Set(manifest.attachments.map((entry) => entry.id)).size !== manifest.attachments.length || new Set(manifest.attachments.map((entry) => entry.path)).size !== manifest.attachments.length) throw new Error("Duplicate backup attachment");
+  // 아래 DB 검사(`check`)가 파일에 거는 범위와 같다. 표시 길에는 DB 검사가 없어 manifest 의 판 번호로 본다(이주가 적은 앞 판으로 되돌린 경우).
+  if (manifest.schemaVersion < 1 || manifest.schemaVersion > MIGRATIONS.length) throw new Error("Unsupported backup DB schema");
+}
+
+function* verifySteps(directory: string): Steps<BackupSnapshot> {
+  directory = normalizeHome(directory);
+  checkStandalone(directory);
+  const manifestPath = backupPath(directory, join(directory, "manifest.json"));
+  // An invalid manifest must not direct reads to arbitrary paths or p8 files.
+  const manifest = manifestSchema.parse(readBackupJson(manifestPath));
+  checkManifest(manifest);
   for (const entry of [manifest.database, ...manifest.configs, ...manifest.attachments]) {
     const path = backupPath(directory, join(directory, entry.path));
     // The DB file and any large attachment are one long read each: the worker reads them. Small files are read here between yields as before.
@@ -539,6 +554,9 @@ type Verified = Map<string, string>;
  */
 function snapshotStamp(snapshot: BackupSnapshot): string | null {
   try {
+    // backupPath 와 같게 링크를 거부한다: 각 파일은 아래 lstat 의 isFile 이, 사이의 attachments 폴더는 여기서 본다
+    // (폴더를 밖으로 옮기고 링크를 두면 안의 파일 inode·ctime 은 그대로라 stamp 만으로는 모른다).
+    if (snapshot.manifest.attachments.length && !lstatSync(join(snapshot.directory, "attachments")).isDirectory()) return null;
     const hash = createHash("sha256").update(`${snapshot.manifest.id}\n`);
     for (const path of ["manifest.json", snapshot.manifest.database.path, ...snapshot.manifest.configs.map((entry) => entry.path), ...snapshot.manifest.attachments.map((entry) => entry.path)]) {
       const stat = lstatSync(join(snapshot.directory, path));
@@ -553,6 +571,8 @@ function snapshotStamp(snapshot: BackupSnapshot): string | null {
  * 11-22: 서버가 다시 뜰 때마다(배포마다) 보관 스냅샷을 처음부터 다시 해시했다(지금 1회 약 17 GB 읽기). 끝까지 검증한 스냅샷에는
  * 그때의 stamp 를 이 표시 파일로 남기고, 다음 프로세스는 stamp 가 그대로일 때만 다시 해시하지 않는다. manifest 밖의 파일이라
  * 예전 서버·복원은 이 파일을 보지 않는다. 지우기 직전과 복원은 지금처럼 끝까지 검증한다.
+ * 판 번호 상한(MIGRATIONS.length)은 표시에 적지 않는다: 이주가 적은 앞 판으로 되돌리면 manifest 판 번호 검사(checkManifest)가
+ * 거르고, 이주가 많은 뒤 판은 옛 판 스냅샷을 이주해 복원하므로, 적어 두면 이주를 올린 판마다 보관분 전체를 다시 읽기만 한다.
  */
 const VERIFIED_MARK = ".verified.json";
 const verifiedMarkSchema = z.object({ format: z.literal(1), id: z.string(), stamp: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
@@ -582,10 +602,20 @@ function remember(verified: Verified, snapshot: BackupSnapshot, persist: boolean
   if (persist && readMark(snapshot) !== stamp) writeMark(snapshot, stamp);
 }
 
-/** True when this exact snapshot was verified in full before (by this process, or by an earlier one per its mark). */
+/**
+ * True when this exact snapshot was verified in full before (by this process, or by an earlier one per its mark) and still passes
+ * every cheap check verifySteps makes. Only the hashes and the DB checks are skipped; anything else that fails goes to full verification.
+ */
 function alreadyVerified(verified: Verified, snapshot: BackupSnapshot): boolean {
+  try {
+    // stamp 는 manifest 에 적힌 파일만 본다: 그 밖에 생긴 옆 파일과 이 판이 열 수 있는 판 번호인지는 따로 본다.
+    checkStandalone(snapshot.directory);
+    checkManifest(snapshot.manifest);
+  } catch { return false; }
   const stamp = snapshotStamp(snapshot);
   if (!stamp || (verified.get(snapshot.directory) ?? readMark(snapshot)) !== stamp) return false;
+  try { for (const config of snapshot.manifest.configs) checkConfig(join(snapshot.directory, config.path)); }
+  catch { return false; }
   verified.set(snapshot.directory, stamp);
   return true;
 }

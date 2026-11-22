@@ -1164,9 +1164,10 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
       await until(`${handle} 전달`, () => t.runner.sent.some(s => s.memberId === memberId));
       t.runner.fail(memberId, errorText);
     };
+    // 실제 agy 처럼 상태줄 기록에 지금 모델을 싣는다(모델을 정하지 않은 팀장은 이것으로 한도 묶음의 갈래를 안다. 모르면 초기화 시각을 정하지 않는다).
     const status = (memberId: string, quota: Record<string, unknown>) => {
       mkdirSync(join(t.config.home, "context", "gemini"), { recursive: true });
-      writeFileSync(geminiStatusPath(t.config.home, memberId), JSON.stringify(geminiStatusFromPayload(memberId, { conversation_id: "", quota }, new Date())));
+      writeFileSync(geminiStatusPath(t.config.home, memberId), JSON.stringify(geminiStatusFromPayload(memberId, { conversation_id: "", model: { id: "gemini-3.8-flash-low" }, quota }, new Date())));
     };
     const quota = "You have exhausted your quota on this model.";
     const network = 'There was a network issue connecting to the server, please try again. · generating and executing: request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": unexpected EOF';
@@ -1201,6 +1202,42 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
     expect(t.store.requireMember(login.id).lastError).toBe(auth);
     expect(t.orch.apiRecovery.holdReason(login.id)).toBeNull();
     expect(t.store.listMessages(t.project.id, { limit: 100 }).filter(m => m.textCode === "chat.member_error").map(m => m.body).join("\n")).toContain("Verification required");
+  });
+
+  test("429 글인데 그 갈래의 칸 하나가 남은 비율 없이 왔다(agy 의 omitempty): 바닥났는지 모르므로 장애로 바꾸지 않고 사용 한도로 둔다", async () => {
+    const probes: string[] = [];
+    const t = setup({ apiRecovery: { probe: async url => { probes.push(url); throw new Error("offline"); }, intervalMs: 1 } });
+    const member = await t.add("자료 조사", "research", { cli: "gemini", modelOverride: "gemini-3.8-flash" });
+    mkdirSync(join(t.config.home, "context", "gemini"), { recursive: true });
+    const reset = new Date(Date.now() + 3 * 3_600_000).toISOString();
+    writeFileSync(geminiStatusPath(t.config.home, member.id), JSON.stringify(geminiStatusFromPayload(member.id, { conversation_id: "", agent_state: "idle", quota: {
+      "gemini-5h": { reset_time: reset }, "gemini-weekly": { remaining_fraction: 0.5, reset_time: new Date(Date.now() + 5 * 86_400_000).toISOString() },
+    } }, new Date())));
+    await t.orch.assign(t.project.id, "research", { text: "자료 찾기" });
+    await until("전달", () => t.runner.sent.some(s => s.memberId === member.id));
+    t.runner.fail(member.id, "request failed: 429 Too Many Requests: RESOURCE_EXHAUSTED");
+    await until("한도 보류", () => t.orch.apiRecovery.usageLimited(member.id));
+    expect(t.orch.apiRecovery.outage()).toBeNull();
+    expect(t.store.listDecisions(t.project.id).find(d => d.usageLimit)?.usageLimit?.cli).toBe("gemini");
+  });
+
+  test("모델 갈래를 모르는 팀장(Orchestrator (Argon))의 한도: 상태줄의 다른 갈래 시각(6일 뒤)을 쓰지 않고 초기화 시각을 모름으로 둔다(1시간부터 다시 이어 본다)", async () => {
+    const t = setup();
+    writeGeminiModelsCache(geminiModelsCachePath(t.config.home), [
+      { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash", efforts: ["low", "medium", "high"] },
+      { value: "gemini-pro-orchestrator-g1-pro", label: "Orchestrator (Argon)", efforts: [] },
+    ], new Date());
+    const member = await t.add("자료 조사", "research", { cli: "gemini", modelOverride: "gemini-pro-orchestrator-g1-pro" });
+    mkdirSync(join(t.config.home, "context", "gemini"), { recursive: true });
+    const iso = (ms: number) => new Date(Date.now() + ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+    writeFileSync(geminiStatusPath(t.config.home, member.id), JSON.stringify(geminiStatusFromPayload(member.id, { conversation_id: "", agent_state: "idle", quota: {
+      "gemini-5h": { remaining_fraction: 0, reset_time: iso(2 * 3_600_000) }, "3p-weekly": { remaining_fraction: 0, reset_time: iso(6 * 86_400_000) },
+    } }, new Date())));
+    await t.orch.assign(t.project.id, "research", { text: "자료 찾기" });
+    await until("전달", () => t.runner.sent.some(s => s.memberId === member.id));
+    t.runner.fail(member.id, "You have exhausted your quota on this model.");
+    await until("한도 보류", () => t.orch.apiRecovery.usageLimited(member.id));
+    expect(t.store.listDecisions(t.project.id).find(d => d.usageLimit)!.usageLimit!.resetsAt).toBeNull();
   });
 
   test("한도로 멈춘 Gemini 팀장의 카드: /usage 로 초기화 시각을 정하고, 남은 묶음의 모델을 선택지로 낸다. 고르면 같은 대화를 그 모델로 이어 연다", async () => {
@@ -1241,6 +1278,42 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
     expect(after.sessionId).toBe(conversation);
     expect(t.runner.startsOf(created.id).at(-1)!.member).toMatchObject({ model: "claude-opus-5-5", sessionId: conversation });
     expect(t.runner.startsOf(created.id).at(-1)!.opts.resume).toBe(true);
+  });
+
+  test("새 한도 때는 /usage 를 다시 읽는다: 앞 팀장의 한도 때 읽어 둔 답(60초 캐시)으로 뒤 팀장의 초기화 시각을 놓치거나 바닥난 묶음의 모델을 선택지로 내지 않는다", async () => {
+    const usage = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "agy-headless", "1.5.14", "usage.json"), "utf8"));
+    const iso = (ms: number) => new Date(Date.now() + ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const r1 = iso(2 * 3_600_000), r2 = iso(4 * 3_600_000);
+    // 첫 답: Gemini 묶음의 5시간 칸이 바닥. 둘째 답: Claude·GPT 묶음의 5시간 칸까지 바닥.
+    const first = structuredClone(usage);
+    first.command.data.groups[0].buckets[1] = { ...first.command.data.groups[0].buckets[1], remaining_fraction: 0, reset_time: r1 };
+    const second = structuredClone(first);
+    second.command.data.groups[1].buckets[1] = { ...second.command.data.groups[1].buckets[1], remaining_fraction: 0, reset_time: r2 };
+    let spawns = 0;
+    const t = setup({ geminiQuota: new GeminiQuotaReader({ bin: "/bin/sh", cwd: join(tmpdir(), "unused"), spawn: async () => ({ exitCode: 0, stdout: JSON.stringify(++spawns === 1 ? first : second) }) }) });
+    writeGeminiModelsCache(geminiModelsCachePath(t.config.home), [
+      { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash", efforts: ["low", "medium", "high"] },
+      { value: "gemini-4-argon", label: "Gemini 4 Argon", efforts: ["low", "medium", "high"] },
+      { value: "claude-opus-5-5", label: "Claude Opus 5.5", efforts: ["low", "medium", "high"] },
+      { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", efforts: ["low", "medium", "high"] },
+      { value: "gpt-oss-120b", label: "GPT-OSS 120B", efforts: ["medium"] },
+    ], new Date());
+    const a = await t.add("자료 조사", "research", { cli: "gemini", modelOverride: "gemini-3.8-flash" });
+    const b = await t.add("문서 정리", "docs", { cli: "gemini", modelOverride: "claude-opus-5-5" });
+    const card = () => t.store.listDecisions(t.project.id).find(d => d.usageLimit);
+    await t.orch.assign(t.project.id, "research", { text: "자료 찾기" });
+    await until("A 전달", () => t.runner.sent.some(s => s.memberId === a.id));
+    t.runner.fail(a.id, "You have exhausted your quota on this model.");
+    await until("A 초기화 시각", () => card()?.usageLimit?.resetsAt === new Date(r1).toISOString());
+    await t.orch.assign(t.project.id, "docs", { text: "문서 정리" });
+    await until("B 전달", () => t.runner.sent.some(s => s.memberId === b.id));
+    t.runner.fail(b.id, "You have exhausted your quota on this model.");
+    // 카드의 시각은 기다리는 팀장들 가운데 가장 늦은 것이다: B 의 시각(4시간 뒤)을 /usage 를 다시 읽어 알아야 그것이 된다.
+    await until("B 초기화 시각", () => card()?.usageLimit?.resetsAt === new Date(r2).toISOString());
+    expect(spawns).toBe(2);
+    await t.orch.apiRecovery.tick();
+    // 남은 묶음은 Argon 뿐이다. Claude Sonnet·GPT-OSS(바닥난 Claude·GPT 묶음)를 선택지로 내지 않는다.
+    expect(card()!.options.map(o => o.k)).toEqual(["model:gemini-4-argon", "resume"]);
   });
 
   test("/usage 를 못 읽으면 상태줄 기록의 묶음(1.5.14 실측 id)으로 같은 선택지를 낸다: Gemini 모델 ↔ gemini-*, Claude·GPT-OSS ↔ 3p-*, Argon ↔ gemini-argon-*", async () => {

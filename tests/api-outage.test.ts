@@ -5,6 +5,7 @@ import { Store } from "../server/store.ts";
 import { Bus } from "../server/bus.ts";
 import { mustRender, type ServerTextRef } from "../shared/server-text.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
+import { GEMINI_PROBE_URL } from "../server/gemini-errors.ts";
 
 /** 0.2.6 Y: 서버가 정한 글은 코드로 온다. 총괄의 연결(systemMessage)처럼 보고 언어(여기서는 한국어)로 그려 본다. */
 const shown = (text: string | ServerTextRef): string => typeof text === "string" ? text : mustRender(text, "ko");
@@ -688,12 +689,69 @@ describe("Gemini 한도: 화면 밖에서 안 초기화 시각과 모델 묶음 
     expect(g.card("gemini").options).toEqual([USAGE_RESUME_OPTION]);
   });
 
-  test("장애 탐침: Gemini 팀장이 있으면 agy 가 닿는 주소를 더한다(정해 둔 주소가 없을 때)", async () => {
+  test("장애 탐침: Gemini 팀장이 걸린 장애는 agy 가 닿는 주소를 본다(정해 둔 주소가 없을 때). Gemini 팀장만 걸렸으면 Anthropic 에 매이지 않는다", async () => {
     const f = fixture();
     const gemini = f.makeMember("gem", "gemini");
     const service = new ApiRecovery({ ...f.options, urls: undefined });
     service.networkFailure(gemini, true);
     await service.tick();
-    expect(f.probes).toEqual(["https://api.anthropic.com", "https://daily-cloudcode-pa.googleapis.com"]);
+    expect(f.probes).toEqual([GEMINI_PROBE_URL]);
+    // Claude 팀장도 걸리면 Anthropic 도 본다(둘 다 닿아야 닫힌다).
+    service.networkFailure(f.member, true);
+    f.probes.length = 0; f.now += 30_000; await service.tick();
+    expect(f.probes).toEqual(["https://api.anthropic.com", GEMINI_PROBE_URL]);
+  });
+
+  test("장애 탐침: Gemini 주소는 Gemini 팀장이 장애에 걸렸을 때만 본다. 보관한 프로젝트나 걸리지 않은 Gemini 팀장 때문에 Claude 장애가 Google 에 매이지 않는다", async () => {
+    const f = fixture();
+    const old = f.store.createProject({ name: "옛 일", cwd: "/private/tmp/fake-api-old" });
+    f.store.createMember({ projectId: old.id, handle: "oldgem", name: "oldgem", cli: "gemini", kind: "worker", backend: "core", paneId: "t-oldgem", sessionId: "s-oldgem" });
+    f.store.patchProject(old.id, { archived: true });
+    f.makeMember("idle-gem", "gemini");
+    const probes: string[] = [];
+    // 이 Mac 의 망이 Anthropic 에는 닿고 Google 은 막는다(회사 망 등).
+    const service = new ApiRecovery({ ...f.options, urls: undefined, probe: async url => { probes.push(url); if (url === GEMINI_PROBE_URL) throw new Error("blocked"); return { status: 404 }; } });
+    service.networkFailure(f.member, true);
+    await service.tick(); f.now += 30_000; await service.tick();
+    expect([...new Set(probes)]).toEqual(["https://api.anthropic.com"]);
+    expect(service.outage()).toBeNull();
+    expect(service.holdReason(f.member.id)).toBeNull();
+    expect(f.store.listPending(f.member.id).map(d => d.text)).toEqual([API_RESUME_TEXT]);
+  });
+
+  test("Gemini 팀장만 걸린 장애는 Claude·Codex 의 한도 이어가기(자동·수동)를 막지 않는다. 같은 장애 동안 Gemini 한도 팀장은 기다린다", async () => {
+    const f = fixture();
+    const gemini = f.makeMember("gem", "gemini"), codex = f.makeMember("codex", "codex"), waiting = f.makeMember("gem-limit", "gemini");
+    f.service.usageFailure(f.member, "You've hit your usage limit. try again in 2h 30m");
+    f.service.usageFailure(codex, "You've hit your usage limit. try again in 2h 30m");
+    f.service.usageFailure(waiting, "You have exhausted your quota on this model. try again in 2h 30m");
+    f.response = false;
+    // 검토 재현: 초기화 1초 전에 Gemini 팀장의 턴이 연결 문제로 끝나 장애가 열린다. 70초 뒤에도 Google 은 닿지 않는다.
+    f.now += 150 * 60_000 - 1000;
+    f.service.networkFailure(gemini, true);
+    f.now += 70_000; await f.service.tick();
+    expect(f.service.outage()?.affectedMemberIds).toEqual([gemini.id]);
+    expect(f.store.listPending(f.member.id).map(d => d.text)).toEqual([USAGE_RESUME_TEXT]);
+    expect(f.store.listPending(codex.id).map(d => d.text)).toEqual([USAGE_RESUME_TEXT]);
+    expect(f.store.listPending(waiting.id)).toEqual([]);
+    // 대표가 카드에서 누른 '이어가기'도 같다: Gemini 카드는 장애가 닫힐 때까지 그대로다.
+    await f.service.resumeUsage(f.card("gemini").id);
+    expect(f.store.listPending(waiting.id)).toEqual([]);
+    expect(f.service.usageLimited(waiting.id)).toBe(true);
+  });
+
+  test("Claude 팀장이 걸린 장애는 예전처럼(0.2.9) Claude·Codex 의 한도 이어가기를 미루지만, Gemini 한도 팀장은 막지 않는다", async () => {
+    const f = fixture();
+    const codex = f.makeMember("codex", "codex"), waiting = f.makeMember("gem-limit", "gemini"), claude = f.makeMember("claude-limit", "claude");
+    f.service.usageFailure(codex, "You've hit your usage limit. try again in 2h 30m");
+    f.service.usageFailure(claude, "You've hit your usage limit. try again in 2h 30m");
+    f.service.usageFailure(waiting, "You have exhausted your quota on this model. try again in 2h 30m");
+    f.response = false;
+    f.now += 150 * 60_000 - 1000;
+    f.service.networkFailure(f.member, true);
+    f.now += 70_000; await f.service.tick();
+    expect(f.store.listPending(codex.id)).toEqual([]);
+    expect(f.store.listPending(claude.id)).toEqual([]);
+    expect(f.store.listPending(waiting.id).map(d => d.text)).toEqual([USAGE_RESUME_TEXT]);
   });
 });

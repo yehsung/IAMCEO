@@ -341,6 +341,32 @@ export class ApiRecovery {
       }
     });
   }
+  /**
+   * 0.2.10: 이 장애에 걸린 CLI 들. 영향받은 팀장 가운데 아직 있고 보관되지 않은 프로젝트의 팀장의 CLI 다(보관한 프로젝트는 돌지 않는다).
+   * 장애는 하나뿐이지만, Gemini 쪽 장애가 Claude·Codex 를 묶지 않게(또 그 반대도) 이것으로 탐침 주소와 한도 이어가기 보류를 가른다.
+   */
+  private outageClis(o: Outage): Set<CliProvider> {
+    const clis = new Set<CliProvider>();
+    for (const a of o.affected) {
+      const member = this.options.store.getMember(a.memberId);
+      if (member && !this.options.store.getProject(member.projectId)?.archived) clis.add(member.cli);
+    }
+    return clis;
+  }
+  /** Gemini 팀장만 걸린 장애인가(걸린 CLI 를 하나도 모르면 아니다: 0.2.9 처럼 다룬다). */
+  private geminiOnly(clis: Set<CliProvider>): boolean {
+    return clis.size > 0 && [...clis].every(cli => cli === "gemini");
+  }
+  /**
+   * 열린 장애가 이 CLI 의 팀장을 붙잡는가(한도 이어가기를 미룰지). Gemini 는 Gemini 팀장이 걸렸을 때만이다. Claude·Codex 는 Gemini 팀장만 걸린 장애가 아니면
+   * 0.2.9 처럼 서로 묶인다(Claude 장애 중에는 Codex 한도도 기다린다).
+   */
+  private outageHolds(cli: CliProvider): boolean {
+    const o = this.state.outage;
+    if (!o?.active) return false;
+    const clis = this.outageClis(o);
+    return cli === "gemini" ? clis.has("gemini") : !this.geminiOnly(clis);
+  }
   holdReason(memberId: string): "api_outage" | "usage_limit" | null {
     if (this.state.outage?.affected.some(a => a.memberId === memberId && (this.state.outage!.active || a.exhausted))) return "api_outage";
     return this.state.limits.some(g => g.members.some(m => m.memberId === memberId && !m.awaitingResult)) ? "usage_limit" : null;
@@ -630,7 +656,8 @@ export class ApiRecovery {
         if (this.menuClosing.has(limited.memberId)) continue;
         const member = this.options.store.getMember(limited.memberId);
         if (!member) { group.members = group.members.filter(m => m !== limited); continue; }
-        if (this.options.store.requireProject(member.projectId).archived || this.state.outage?.active) continue;
+        // 장애 중이면 기다린다. 다만 그 팀장의 CLI 가 이 장애에 묶일 때만이다(0.2.10: Gemini 팀장만 걸린 장애는 Claude·Codex 한도를 막지 않는다).
+        if (this.options.store.requireProject(member.projectId).archived || this.outageHolds(member.cli)) continue;
         // 잠든 팀장(대표나 총괄이 재운 것)은 스스로 깨우지 않는다(재시작 깨우기와 같은 원칙). 카드에 남아 있어 '이어가기'·모델 변경으로 깨울 수 있다.
         if (automatic && member.status === "asleep") continue;
         if (automatic && !this.autoDue(limited)) continue;
@@ -771,9 +798,16 @@ export class ApiRecovery {
       o.lastProbeAt = new Date(this.now()).toISOString();
       this.save();
       const configured = this.options.urls ?? process.env.IAMCEO_API_PROBE_URLS?.split(",").map(s => s.trim()).filter(Boolean);
-      // Gemini(Antigravity CLI) 팀장이 있으면 agy 가 모델·한도를 묻는 주소(daily-cloudcode-pa.googleapis.com, 실측 프록시 기록)도 본다. 어떤 HTTP 답이든 닿은 것이다.
-      const members = this.options.store.listAllMembers();
-      const urls = configured?.length ? configured : ["https://api.anthropic.com", ...(members.some(m => m.cli === "codex") ? ["https://api.openai.com"] : []), ...(members.some(m => m.cli === "gemini") ? [GEMINI_PROBE_URL] : [])];
+      // 정해 둔 주소가 없으면 이 장애에 걸린 CLI 로 정한다(outageClis). Gemini(Antigravity CLI) 팀장이 걸렸으면 agy 가 모델·한도를 묻는 주소
+      // (daily-cloudcode-pa.googleapis.com, 실측 프록시 기록)를 본다. 어떤 HTTP 답이든 닿은 것이다. 걸리지 않은 Gemini 팀장(보관한 프로젝트 포함) 때문에
+      // Claude·Codex 장애가 Google 에 매이지 않고, Gemini 팀장만 걸린 장애는 Anthropic 에 매이지 않는다. Claude·Codex 가 걸린 장애는 0.2.9 그대로다
+      // (Anthropic, Codex 팀장이 있으면 OpenAI 도).
+      const clis = this.outageClis(o);
+      const legacy = !this.geminiOnly(clis);
+      const urls = configured?.length ? configured : [
+        ...(legacy ? ["https://api.anthropic.com", ...(this.options.store.listAllMembers().some(m => m.cli === "codex") ? ["https://api.openai.com"] : [])] : []),
+        ...(clis.has("gemini") ? [GEMINI_PROBE_URL] : []),
+      ];
       const revision = o.revision;
       const results = await Promise.all(urls.map(async url => {
         const controller = new AbortController();

@@ -10,9 +10,11 @@
 //   reset_time 은 '2026-11-22T19:37:31Z' 꼴, disabled 칸은 없다. 쓰지 않은 3p-* 의 reset_time 은 매번 지금+5시간·7일로 움직인다(다 쓴 칸의 시각만 쓴다).
 //   그래서 /usage 없이도 묶음 id 로 모델 갈래를 안다(geminiBucketFamily): gemini-5h·gemini-weekly = Gemini 모델, 3p-* = Claude·GPT 모델,
 //   gemini-argon-* = Gemini 4 Argon(Pro 요금제에서 따로, Ultra 는 큰 Gemini 묶음에 든다는 /usage 설명).
-// 서버는 Gemini 팀장이 한도로 멈췄을 때만 /usage 를 띄운다(60초 안에 다시 묻지 않는다). 시험 모드에서는 만들지 않는다(createOrchestrator).
+// 서버는 Gemini 팀장이 한도로 멈췄을 때만 /usage 를 띄운다. 한도가 날 때마다 새로 읽는다(그 앞에 읽은 답에는 방금 바닥난 묶음이 없다: read(true)). 한 번에 하나만 돈다.
+// 시험 모드에서는 만들지 않는다(createOrchestrator).
 import { mkdirSync } from "node:fs";
 import { resolveCliExecutable } from "./config.ts";
+import { withoutGeminiRemote } from "./runner/env.ts";
 import type { GeminiStatusRecord } from "./runner/gemini-status.ts";
 
 export interface AgyUsageBucket { id: string; window: string | null; remainingFraction: number | null; resetAt: string | null }
@@ -123,18 +125,22 @@ function familyOf(names: readonly (string | null | undefined)[]): GeminiQuotaFam
 
 type StatusBucket = GeminiStatusRecord["quota"][string];
 /**
- * 상태줄 기록의 묶음 가운데 이 모델 이름들의 갈래 것. 갈래를 모르거나 기록에 그 갈래 묶음이 없으면 전부다(예전처럼: 어느 묶음인지 모를 때).
- * Argon 묶음이 없으면(Ultra 요금제) Gemini 묶음이다.
+ * 상태줄 기록의 묶음 가운데 이 모델 이름들의 갈래 것. Argon 묶음이 없으면(Ultra 요금제) Gemini 묶음이다.
+ * 갈래를 모르거나(Orchestrator (Argon) 처럼 어느 묶음에도 없는 모델, 이름을 모름) 기록에 그 갈래 묶음이 없으면 null(어느 묶음이 이 팀장 것인지 모른다).
  */
-function scopedBuckets(record: Pick<GeminiStatusRecord, "quota">, names: readonly (string | null | undefined)[]): StatusBucket[] {
-  const entries = Object.entries(record.quota).filter(([, bucket]) => !bucket.disabled);
+function familyBuckets(record: Pick<GeminiStatusRecord, "quota">, names: readonly (string | null | undefined)[]): StatusBucket[] | null {
   const family = familyOf(names);
-  if (!family) return entries.map(([, bucket]) => bucket);
+  if (!family) return null;
+  const entries = Object.entries(record.quota).filter(([, bucket]) => !bucket.disabled);
   for (const wanted of family === "argon" ? ["argon", "gemini"] as const : [family]) {
     const mine = entries.filter(([id]) => geminiBucketFamily(id) === wanted);
     if (mine.length) return mine.map(([, bucket]) => bucket);
   }
-  return entries.map(([, bucket]) => bucket);
+  return null;
+}
+/** familyBuckets, 모르면 전부(바닥났는지 물을 때: 어느 묶음인지 모르면 모든 묶음을 본다). */
+function scopedBuckets(record: Pick<GeminiStatusRecord, "quota">, names: readonly (string | null | undefined)[]): StatusBucket[] {
+  return familyBuckets(record, names) ?? Object.values(record.quota).filter(bucket => !bucket.disabled);
 }
 
 /**
@@ -161,19 +167,26 @@ export function geminiExhaustedResetAt(buckets: { remainingFraction: number | nu
 }
 
 /**
- * 상태줄 기록의 한도 묶음으로 본 초기화 시각: 이 팀장 모델(names)의 갈래 묶음에서 다 쓴 칸 가운데 가장 늦은 시각. 갈래를 모르면 모든 묶음에서 본다
- * (어느 묶음이 이 팀장의 모델 것인지 모를 때 쓰는 대신 길: 늦게 풀리는 쪽으로). 기록이 없거나 다 쓴 칸이 없으면 null.
+ * 상태줄 기록의 한도 묶음으로 본 초기화 시각: 이 팀장 모델(names)의 갈래 묶음에서 다 쓴 칸 가운데 가장 늦은 시각.
+ * 갈래를 모르거나(Orchestrator (Argon), 이름 없음) 기록에 그 갈래 묶음이 없으면 null(모름)이다: 다른 갈래 칸의 시각(예: Claude·GPT 주간 6일 뒤)을 빌리면
+ * 그때까지 자동 이어가기가 없다. 모르면 부르는 쪽이 1시간부터 간격을 벌려 다시 이어 본다(이르게 이어도 agy 는 할당량 오류를 곧바로 돌려준다).
+ * 기록이 없거나 다 쓴 칸이 없어도 null. 남은 비율을 모르는 칸은 다 쓴 칸으로 보지 않는다(빠진 칸을 0 으로 읽을 실측이 없다).
  */
 export function geminiStatusResetAt(record: Pick<GeminiStatusRecord, "quota"> | null, names: readonly (string | null | undefined)[] = []): string | null {
-  if (!record) return null;
-  return geminiExhaustedResetAt(scopedBuckets(record, names));
+  const buckets = record ? familyBuckets(record, names) : null;
+  return buckets ? geminiExhaustedResetAt(buckets) : null;
 }
 
-/** 상태줄 기록이 알리는 한도 묶음(이 팀장 모델의 갈래, 모르면 전부) 가운데 다 쓴 것이 있는가. 묶음을 하나도 모르면 null(모름). */
+/**
+ * 상태줄 기록이 알리는 한도 묶음(이 팀장 모델의 갈래, 모르면 전부) 가운데 다 쓴 것이 있는가. 아는 칸 가운데 다 쓴 칸이 있으면 true.
+ * 그렇지 않은데 남은 비율을 모르는 칸이 하나라도 있으면 null(모름)이다: agy 는 다 쓴 칸의 remaining_fraction 을 빠뜨릴 수 있다(실행 파일의 JSON 태그가
+ * omitempty, 검토 지적). 그런 기록으로 '바닥나지 않음'(false)이라고 하면 429 글을 장애로 바꾸는 규칙이 불완전한 근거로 돈다. 묶음을 하나도 모르면 null.
+ */
 export function geminiStatusExhausted(record: Pick<GeminiStatusRecord, "quota"> | null, names: readonly (string | null | undefined)[] = []): boolean | null {
-  const buckets = record ? scopedBuckets(record, names).filter(bucket => bucket.remainingFraction !== null) : [];
-  if (!buckets.length) return null;
-  return buckets.some(bucket => bucket.remainingFraction! <= 0);
+  const buckets = record ? scopedBuckets(record, names) : [];
+  if (buckets.some(bucket => bucket.remainingFraction !== null && bucket.remainingFraction <= 0)) return true;
+  if (!buckets.length || buckets.some(bucket => bucket.remainingFraction === null)) return null;
+  return false;
 }
 
 export interface AgyUsageRun { exitCode: number | null; stdout: string }
@@ -183,10 +196,11 @@ export type AgyUsageSpawn = (bin: string, cwd: string, timeoutMs: number) => Pro
 async function spawnAgyUsage(bin: string, cwd: string, timeoutMs: number): Promise<AgyUsageRun> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    // 환경은 서버의 것을 그대로 쓴다(models.ts 의 `agy models` 와 같다. env -i 로 비우지 않는다). 입력은 닫아 둔다: 물음이 뜨면 답하지 않고 끊긴다.
-    // --print-timeout 은 agy 스스로의 상한이고, 아래 deadline 이 서버 쪽 상한이다.
+    // 환경은 서버의 것을 그대로 쓰되(env -i 로 비우지 않는다) SSH_CLIENT·SSH_TTY·SSH_CONNECTION 만 뺀다: 그 값이 있으면 agy 가 키체인이 아닌 토큰 파일을 읽어
+    // 서버를 SSH 세션에서 띄웠을 때 폰 로그인·팀장(키체인)과 다른 계정의 한도를 읽거나 인증에 실패한다(runner/env.ts withoutGeminiRemote).
+    // 입력은 닫아 둔다: 물음이 뜨면 답하지 않고 끊긴다. --print-timeout 은 agy 스스로의 상한이고, 아래 deadline 이 서버 쪽 상한이다.
     const seconds = Math.max(5, Math.floor(timeoutMs / 1000) - 5);
-    const child = Bun.spawn([bin, "-p", "/usage", "--output-format", "json", "--print-timeout", `${seconds}s`], { cwd, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const child = Bun.spawn([bin, "-p", "/usage", "--output-format", "json", "--print-timeout", `${seconds}s`], { cwd, env: withoutGeminiRemote(process.env), stdin: "ignore", stdout: "pipe", stderr: "ignore" });
     const deadline = new Promise<AgyUsageRun>(resolve => {
       timer = setTimeout(() => { try { child.kill(); } catch { /* 이미 끝났다 */ } resolve({ exitCode: null, stdout: "" }); }, Math.max(1, timeoutMs));
     });
@@ -210,8 +224,8 @@ export interface GeminiQuotaReaderOptions {
 }
 
 /**
- * `/usage` 읽기. 한 번에 하나만 띄우고, 성공한 답은 cacheMs(60초) 동안 다시 띄우지 않고 쓴다. 실패(실행 파일 없음·시간 초과·오류 종료·모양이 다름)는
- * null 이고 예전 답을 지우지 않는다. 던지지 않는다.
+ * `/usage` 읽기. 한 번에 하나만 띄우고, 성공한 답은 cacheMs(60초) 동안 다시 띄우지 않고 쓴다(read(true) 는 이 부름 뒤에 띄운 읽기를 기다린다).
+ * 실패(실행 파일 없음·시간 초과·오류 종료·모양이 다름)는 null 이고 예전 답을 지우지 않는다. 던지지 않는다.
  */
 export class GeminiQuotaReader {
   private last: AgyUsage | null = null;
@@ -226,9 +240,21 @@ export class GeminiQuotaReader {
     return this.last && this.now() - this.lastAt <= maxAgeMs ? this.last : null;
   }
 
+  /**
+   * force: 이 부름 뒤에 띄운 읽기의 답(새 한도가 났을 때: 그 앞에 읽은 답에는 방금 바닥난 묶음이 없다). 캐시를 쓰지 않고, 이미 도는 읽기는 이 부름 앞에
+   * 띄운 것이라 끝나기를 기다렸다가 새로 띄운다. 그 사이 다른 부름이 이미 새로 띄웠으면 그것을 함께 기다린다: 어느 때든 한 번에 하나만 돈다.
+   * force 가 아니면 cacheMs 안의 답을 쓰고, 도는 읽기가 있으면 그것을 함께 기다린다.
+   */
   read(force = false): Promise<AgyUsage | null> {
     if (this.stopped) return Promise.resolve(null);
     if (!force && this.last && this.now() - this.lastAt < (this.options.cacheMs ?? GEMINI_USAGE_CACHE_MS)) return Promise.resolve(this.last);
+    // running 은 끝날 때(finally) 비워진 뒤에 풀리므로, 기다린 뒤의 start() 는 새로 띄우거나 그 뒤에 띄운 읽기에 붙는다.
+    if (force && this.running) return this.running.then(() => this.start());
+    return this.start();
+  }
+
+  private start(): Promise<AgyUsage | null> {
+    if (this.stopped) return Promise.resolve(null);
     return this.running ??= (async (): Promise<AgyUsage | null> => {
       let bin: string | null = null;
       try { bin = this.options.bin ? resolveCliExecutable(this.options.bin) : null; } catch { bin = null; }

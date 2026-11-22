@@ -9,7 +9,7 @@ import { handleAgentTool } from "../server/agent-tools.ts";
 import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile } from "../server/config.ts";
 import { ensureFileVersionSchema, FILE_VERSION_SCHEMA, MIGRATIONS, openDb } from "../server/db.ts";
-import { compareVersions, pickPrevious, planTidy, titleParts, tidyPlanId, type ChainFile } from "../server/file-versions.ts";
+import { compareVersions, pickPrevious, planTidy, SAME_TITLE_WINDOW_MS, titleParts, tidyPlanId, unchainedKey, type ChainFile } from "../server/file-versions.ts";
 import { startServer } from "../server/http.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import type { Runner, RunnerEvent, SendResult } from "../server/runner/types.ts";
@@ -135,6 +135,15 @@ describe("제목 정규화", () => {
     expect(titleParts("주간 보고 (13-40)").dates).toEqual([]);
   });
 
+  test("날짜임이 분명한 꼴(연도·M월 D일·괄호 속 M/D)만 datesClear. 괄호 속 '1-2'·'1.3' 은 단원 번호일 수 있다", () => {
+    expect(titleParts("주간 보고 2026-11-17").datesClear).toBe(true);
+    expect(titleParts("11월 17일 회의록").datesClear).toBe(true);
+    expect(titleParts("주간 보고 (11/17)").datesClear).toBe(true);
+    expect(titleParts("주간 보고").datesClear).toBe(true);
+    expect(titleParts("강의 자료 (1-2) v1")).toMatchObject({ dates: ["1-2"], datesClear: false });
+    expect(titleParts("강의 자료 [1.3] v1")).toMatchObject({ dates: ["1-3"], datesClear: false });
+  });
+
   test("꼬리의 순번(N화·Part N·#N·N/M)은 표시하고, '12장'처럼 분량은 순번이 아니다", () => {
     expect(titleParts("대본 v2 (3화)")).toMatchObject({ stem: "대본", ordinal: true });
     expect(titleParts("강의안 v2 (Part 2)").ordinal).toBe(true);
@@ -156,16 +165,50 @@ describe("자동 잇기 규칙(pickPrevious)", () => {
     expect(pickPrevious(file("n", "발표 자료 v3", 2 * HOUR), heads)).toMatchObject({ chain: true, to: { id: "b" }, basis: "marker+full" });
   });
 
-  test("판 표시 + 같은 앞부분(괄호 꼬리가 달라도): 후보가 하나일 때만", () => {
+  test("판 표시 + 같은 앞부분(괄호 꼬리가 달라도): 후보가 하나이고 두 제목 모두 판 번호가 있어 새 판 번호가 클 때만", () => {
     const one = [file("a", "분기 실적 발표 v3 (오프닝 수정)", 0)];
     expect(pickPrevious(file("n", "분기 실적 발표 v4 (클로징 추가)", HOUR), one)).toMatchObject({ chain: true, to: { id: "a" }, basis: "marker+stem" });
+    expect(pickPrevious(file("n", "결제 설계 v3 (화면)", HOUR), [file("a", "결제 설계 v2", 0)])).toMatchObject({ chain: true, basis: "marker+stem" });
     const two = [file("a", "분기 실적 발표 (영업)", 0), file("b", "분기 실적 발표 (개발)", HOUR)];
     expect(pickPrevious(file("n", "분기 실적 발표 v2 (요약)", 2 * HOUR), two)).toMatchObject({ chain: false, why: "ambiguous" });
   });
 
-  test("판 표시 없이 같은 제목으로 다시 올림: 사진·영상이 아니면 잇는다. 사진은 잇지 않는다", () => {
+  test("판 번호가 계속 오르는 정상 판은 잇는다('결제 설계 v2'→'v3', '(요약) v1'→'(요약) v2')", () => {
+    expect(pickPrevious(file("n", "결제 설계 v3", HOUR), [file("a", "결제 설계 v2", 0)])).toMatchObject({ chain: true, basis: "marker+full" });
+    expect(pickPrevious(file("n", "IR 자료 (요약) v2", HOUR), [file("a", "IR 자료 (요약) v1", 0)])).toMatchObject({ chain: true, basis: "marker+full" });
+  });
+
+  test("줄기만 같고 판 번호로 새 판임을 알 수 없으면 잇지 않는다(낱말 판 표시 '최종'·'초안'·'수정본'·final, 한쪽만 번호)", () => {
+    const pairs: [string, string][] = [
+      ["IR 자료 (요약) 최종", "IR 자료 (전체) 최종"],
+      ["사업계획서 (요약본) 최종", "사업계획서 (전체본) 최종"],
+      ["경쟁사 분석 (토스) 초안", "경쟁사 분석 (카카오페이) 초안"],
+      ["랜딩 페이지 (시안 A) 최종", "랜딩 페이지 (시안 B) 최종"],
+      ["면접 질문지 (개발) final", "면접 질문지 (디자인) final"],
+      ["팀 회의록 (월요일) 수정본", "팀 회의록 (화요일) 수정본"],
+      ["마케팅 전략: 인스타그램", "마케팅 전략: 유튜브 초안"],
+      ["경쟁사 분석: 토스", "경쟁사 분석: 카카오페이 v1"],
+      ["IR 자료 (요약) v1", "IR 자료 (전체) 최종"],
+    ];
+    for (const [before, after] of pairs) {
+      expect({ before, after, verdict: pickPrevious(file("n", after, HOUR), [file("a", before, 0)]) }).toMatchObject({ before, after, verdict: { chain: false, why: "different-tail" } });
+    }
+    expect(pickPrevious(file("n", "결제 오류 (Android) 수정", HOUR), [file("a", "결제 오류 (iOS) 수정", 0)])).toMatchObject({ chain: false, why: "different-tail" });
+    expect(pickPrevious(file("n", "IR 자료 (전체) v1", HOUR), [file("a", "IR 자료 (요약) v1", 0)])).toMatchObject({ chain: false, why: "same-number-different-tail" });
+    expect(planTidy([file("s", "사업계획서 (요약본) 최종", 0), file("t", "사업계획서 (전체본) 최종", HOUR)])).toMatchObject({ links: [], skipped: { "different-tail": 1 } });
+  });
+
+  test("판 표시 없이 같은 제목으로 다시 올림: 사진·영상이 아니고 48시간 안이면 잇는다. 사진은 잇지 않는다", () => {
     expect(pickPrevious(file("n", "결제 연동 설계", HOUR), [file("a", "결제 연동 설계", 0)])).toMatchObject({ chain: true, basis: "same-title" });
+    expect(pickPrevious(file("n", "결제 연동 설계", 48 * HOUR), [file("a", "결제 연동 설계", 0)])).toMatchObject({ chain: true, basis: "same-title" });
     expect(pickPrevious(file("n", "결제 연동 화면", HOUR, { kind: "image" }), [file("a", "결제 연동 화면", 0, { kind: "image" })])).toMatchObject({ chain: false, why: "no-marker" });
+  });
+
+  test("같은 이름으로 거듭 올리는 보고는 48시간이 지나면 잇지 않는다(판 표시가 있으면 14일 그대로)", () => {
+    expect(SAME_TITLE_WINDOW_MS).toBe(48 * HOUR);
+    expect(pickPrevious(file("n", "일일 보고", 49 * HOUR), [file("a", "일일 보고", 0)])).toMatchObject({ chain: false, why: "no-marker" });
+    expect(pickPrevious(file("n", "테스트 결과", 3 * DAY), [file("a", "테스트 결과", 0)])).toMatchObject({ chain: false, why: "no-marker" });
+    expect(pickPrevious(file("n", "결제 설계 v3", 10 * DAY), [file("a", "결제 설계 v2", 0)])).toMatchObject({ chain: true, basis: "marker+full" });
   });
 
   test("잇지 않는다: 다른 팀장·다른 종류·이미 옛 판·14일 넘음·대표가 올림·종류 없는 옛 자료", () => {
@@ -189,10 +232,21 @@ describe("자동 잇기 규칙(pickPrevious)", () => {
     expect(pickPrevious(file("n", "분기 실적 발표 v1 (클로징)", HOUR), [file("a", "분기 실적 발표 v1 (오프닝)", 0)])).toMatchObject({ chain: false, why: "same-number-different-tail" });
   });
 
-  test("날짜가 다른 같은 제목은 다른 자료다(주간 보고). 판 번호가 분명히 오르면 그 날짜는 고친 날로 본다", () => {
+  test("날짜가 다른 같은 제목은 다른 자료다(주간 보고). 판 번호가 분명히 오르고 날짜임이 분명한 꼴이면 그 날짜는 고친 날로 본다", () => {
     expect(pickPrevious(file("n", "주간 보고 (11-24) 수정본", HOUR), [file("a", "주간 보고 (11-17)", 0)])).toMatchObject({ chain: false, why: "different-date" });
     expect(pickPrevious(file("n", "주간 보고 (11-17) 수정본", HOUR), [file("a", "주간 보고 (11-17)", 0)])).toMatchObject({ chain: true });
-    expect(pickPrevious(file("n", "분기 실적 발표 v4 (11-18)", HOUR), [file("a", "분기 실적 발표 v3 (11-17)", 0)])).toMatchObject({ chain: true });
+    expect(pickPrevious(file("n", "분기 실적 발표 v4 (11/18)", HOUR), [file("a", "분기 실적 발표 v3 (11/17)", 0)])).toMatchObject({ chain: true });
+    expect(pickPrevious(file("n", "분기 실적 발표 2026-11-18 v4", HOUR), [file("a", "분기 실적 발표 2026-11-17 v3", 0)])).toMatchObject({ chain: true });
+    expect(pickPrevious(file("n", "분기 실적 발표 11월 18일 v4", HOUR), [file("a", "분기 실적 발표 11월 17일 v3", 0)])).toMatchObject({ chain: true });
+  });
+
+  test("날짜 구멍: 한쪽에만 날짜가 있으면 판 번호가 오를 때만, 괄호 속 '1-2'→'1-3'(단원 번호일 수 있음)은 판 번호가 올라도 잇지 않는다", () => {
+    expect(pickPrevious(file("n", "주간 보고 (11/22) 초안", HOUR), [file("a", "주간 보고 최종", 0)])).toMatchObject({ chain: false, why: "different-date" });
+    expect(pickPrevious(file("n", "주간 보고 최종", HOUR), [file("a", "주간 보고 (11/22) 초안", 0)])).toMatchObject({ chain: false, why: "different-date" });
+    expect(pickPrevious(file("n", "주간 보고 (11/22) v2", HOUR), [file("a", "주간 보고 v1", 0)])).toMatchObject({ chain: true });
+    expect(pickPrevious(file("n", "강의 자료 (1-3) v2", HOUR), [file("a", "강의 자료 (1-2) v1", 0)])).toMatchObject({ chain: false, why: "different-date" });
+    expect(pickPrevious(file("n", "강의 자료 (1-3) 최종", HOUR), [file("a", "강의 자료 (1-2) 최종", 0)])).toMatchObject({ chain: false, why: "different-date" });
+    expect(pickPrevious(file("n", "분기 실적 발표 v4 (11-18)", HOUR), [file("a", "분기 실적 발표 v3 (11-17)", 0)])).toMatchObject({ chain: false, why: "different-date" });
   });
 
   test("너무 짧은 제목은 잇지 않는다", () => {
@@ -210,6 +264,29 @@ describe("자동 잇기 규칙(pickPrevious)", () => {
     expect(plan.links.map((l) => `${l.previous.id}>${l.next.id}`)).toEqual(["a>b", "b>c", "y>z"]);
     expect(plan.planId).toBe(tidyPlanId(plan.links));
     expect(planTidy([...files].reverse()).planId).toBe(plan.planId);
+  });
+
+  test("정리 계획: 팀장이 끊은 쌍과 '새 자료'라고 밝힌 자료는 다시 잇지 않는다(까닭 unchained·new-item). 그 자료의 뒤 판은 잇는다", () => {
+    const files = [
+      file("a", "결제 연동 설계", 0), file("b", "결제 연동 설계", HOUR),
+      file("c", "사업계획서 v1", 0), file("d", "사업계획서 v2", HOUR), file("e", "사업계획서 v3", 2 * HOUR),
+    ];
+    expect(planTidy(files).links.map((l) => `${l.previous.id}>${l.next.id}`)).toEqual(["a>b", "c>d", "d>e"]);
+    const plan = planTidy(files, { unchained: new Set([unchainedKey("b", "a")]), newItems: new Set(["d"]) });
+    expect(plan.links.map((l) => `${l.previous.id}>${l.next.id}`)).toEqual(["d>e"]);
+    expect(plan.skipped).toMatchObject({ unchained: 1, "new-item": 1 });
+    // 끊은 쌍만 막는다: 끊은 판 b 의 뒤 판은 b 에 잇는다.
+    const more = planTidy([...files, file("f", "결제 연동 설계", 2 * HOUR)], { unchained: new Set([unchainedKey("b", "a")]), newItems: new Set() });
+    expect(more.links.map((l) => `${l.previous.id}>${l.next.id}`)).toContain("b>f");
+  });
+
+  test("정리 계획: 시각이 뒤바뀐 판 갈이를 거꾸로 이어 고리를 만들지 않는다(올린 순서 sort_order 를 먼저 보고, 뒤 판 사슬은 후보에서 뺀다)", () => {
+    // B 가 replaces 로 A 를 대신했는데 시계가 뒤로 가 B 의 시각이 A 보다 앞선다.
+    const a = file("a", "결제 연동 설계", HOUR, { replacedBy: "b", order: 1 });
+    const b = file("b", "결제 연동 설계", 0, { replaces: "a", order: 2 });
+    expect(planTidy([a, b]).links).toEqual([]);
+    // 순서 정보가 없어도(시각만 보면 B 가 먼저) A 의 뒤 판 B 는 A 의 앞 판 후보가 아니다.
+    expect(planTidy([{ ...a, order: undefined }, { ...b, order: undefined }]).links).toEqual([]);
   });
 });
 
@@ -460,6 +537,59 @@ describe("iamceo files tidy: 계획·적용·되돌리기", () => {
     expect(t.store.getFile(ids.a3)!.replaces).toBeUndefined();
     expect(t.store.getFile(ids.a1)!.replacedBy).toBeUndefined();
     expect((await t.post("/api/file-tidy/undo", { batchId: "tb_none" })).status).toBe(404);
+  });
+
+  test("팀장이 끊은 잇기(서버가 이은 것·명시한 replaces 모두)와 new_item 으로 올린 자료는 기록에 남고, 정리가 다시 잇지 않는다", async () => {
+    const t = await setup();
+    const a = await t.publish(t.worker, { title: "결제 연동 설계 (서버)", content: "가짜" });
+    const b = await t.publish(t.worker, { title: "결제 연동 설계 (서버)", content: "가짜" });
+    expect(t.store.getFile(b.id)!.replaces).toBe(a.id);
+    expect((await t.tool(t.worker, "file", { unchain: b.id })).isError ?? false).toBe(false);
+    const c = await t.publish(t.worker, { title: "사업계획서 v1", content: "가짜" });
+    const d = await t.publish(t.worker, { title: "사업계획서 v2", content: "가짜", new_item: true });
+    const e = await t.publish(t.other, { title: "운영 안내 v1", content: "가짜" });
+    const f = await t.publish(t.other, { title: "운영 안내 v2", content: "가짜", replaces: e.id });
+    expect((await t.tool(t.lead, "file", { unchain: f.id })).isError ?? false).toBe(false);
+    expect(t.store.db.query("SELECT source, file_id AS file, replaces, basis, undone_at IS NOT NULL AS undone FROM file_chain_journal ORDER BY seq").all()).toEqual([
+      { source: "auto", file: b.id, replaces: a.id, basis: "same-title", undone: 1 },
+      { source: "unchain", file: b.id, replaces: a.id, basis: "unchain", undone: 0 },
+      { source: "new_item", file: d.id, replaces: "*", basis: "new_item", undone: 0 },
+      { source: "unchain", file: f.id, replaces: e.id, basis: "unchain", undone: 0 },
+    ]);
+    const plan = t.store.planFileTidy();
+    expect(plan.links).toEqual([]);
+    expect(plan.skipped).toMatchObject({ unchained: 2, "new-item": 1 });
+    const report = await (await t.get("/api/file-tidy")).json() as { links: number; skipped: Record<string, number>; batches: unknown[] };
+    expect(report).toMatchObject({ links: 0, skipped: { unchained: 2, "new-item": 1 }, batches: [] });
+    const { formatTidy } = await import("../bin/iamceo.ts");
+    const text = formatTidy({ kind: "plan", report: report as never }, { kind: "plan", titles: false });
+    expect(text).toMatch(/팀장이 끊은 잇기 2|link the staff removed 2/);
+    expect(text).toMatch(/팀장이 새 자료라고 밝힘 1|staff marked it as a new file 1/);
+    // 막는 것은 그 쌍·그 자료뿐이다: 같은 제목의 뒤 판은 그대로 잇는다.
+    const g = await t.publish(t.worker, { title: "사업계획서 v3", content: "가짜" });
+    expect(t.store.getFile(g.id)!.replaces).toBe(d.id);
+    expect(t.store.getFile(c.id)!.replacedBy).toBeUndefined();
+  });
+
+  test("시각이 뒤바뀐 판 갈이를 거꾸로 이어 고리를 만들지 않는다. 계획이 고리를 내도 적용은 409 file_tidy_cycle 로 막고 바꾸지 않는다", async () => {
+    const t = await setup();
+    const a = t.store.createFile({ projectId: t.project.id, title: "결제 연동 설계", body: "가짜", memberId: t.worker.id, kind: "document" });
+    const b = t.store.createFile({ projectId: t.project.id, title: "결제 연동 설계", body: "가짜", memberId: t.worker.id, kind: "document", replaces: a.id });
+    backdate(t.store, b.id, new Date(Date.parse(a.createdAt) - 1000));
+    expect(t.store.planFileTidy().links).toEqual([]);
+    // 가드 시험: 계획이 B → A(A.replaces = B)를 내도 A 는 B 의 앞 판 사슬에 있어 고리가 된다.
+    const files = t.store.fileChainFiles();
+    const links = [{ projectId: t.project.id, previous: files.find((x) => x.id === b.id)!, next: files.find((x) => x.id === a.id)!, basis: "same-title" as const }];
+    const forged = { planId: tidyPlanId(links), links, skipped: {} };
+    t.store.planFileTidy = () => forged;
+    let error: unknown;
+    try { t.store.applyFileTidy(forged.planId); } catch (caught) { error = caught; }
+    expect(error).toMatchObject({ status: 409, code: "file_tidy_cycle" });
+    expect(t.store.getFile(a.id)).toMatchObject({ replacedBy: b.id });
+    expect(t.store.getFile(a.id)!.replaces).toBeUndefined();
+    expect(t.store.getFile(b.id)).toMatchObject({ replaces: a.id });
+    expect(t.store.getFile(b.id)!.replacedBy).toBeUndefined();
+    expect(t.store.db.query("SELECT COUNT(*) AS n FROM file_chain_journal WHERE source = 'tidy'").get()).toEqual({ n: 0 });
   });
 
   test("이 Mac 밖에서 온 요청은 거절한다", async () => {

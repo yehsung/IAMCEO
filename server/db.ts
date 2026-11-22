@@ -1011,7 +1011,9 @@ export function ensureRevisionColumns(db: Database): void {
  * - files_revisions: 판 연결(replaces·replaced_by)만 읽는 덮는 색인. 판 열은 html 뒤에 ALTER 로 붙어 있어 표에서 읽으면
  *   큰 html 의 넘침 페이지를 끝까지 따라간다(실측: 판이 이어진 아티팩트가 많으면 자료 목록 2.4 ms → 28 ms). store.ts 가 INDEXED BY 로 고른다.
  * - files_member_recent: 자동 잇기가 같은 팀장의 최근 자료만 본다.
- * - file_chain_journal: 서버가 고른 판 잇기(자동 잇기 source='auto', iamceo files tidy source='tidy')의 기록. 정리 되돌리기·팀장의 잇기 끊기가 쓴다.
+ * - file_chain_journal: 서버가 고른 판 잇기(자동 잇기 source='auto', iamceo files tidy source='tidy')와 팀장이 바로잡은 것(unchain 으로 끊은 쌍 source='unchain',
+ *   new_item:true 로 올린 자료 source='new_item': 정리가 다시 잇지 않게 남긴다. replaces 가 NOT NULL 이라 new_item 행은 표지 '*' 를 쓴다)의 기록.
+ *   정리 계획·되돌리기·팀장의 잇기 끊기가 쓴다. 표 정의는 그대로다(행의 source 만 늘었다).
  * 실패해도 서버는 뜬다(색인이 없으면 예전처럼 표에서 읽는다: 느릴 뿐 결과는 같다. 기록 표가 없으면 정리 적용을 거절한다). 다음 시작 때 다시 한다.
  */
 export const FILE_VERSION_SCHEMA: readonly string[] = [

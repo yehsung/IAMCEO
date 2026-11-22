@@ -456,5 +456,13 @@ enum ServerErrorText {
         "cli_login_expired": (ko: "로그인 시간이 지났습니다. 처음부터 다시 시작하세요", en: "The sign-in timed out. Start again"),
         "cli_login_device_disabled": (ko: "이 계정(또는 조직)은 기기 코드 로그인이 꺼져 있습니다. ChatGPT 설정에서 Codex 기기 코드 로그인을 켜거나, Mac 터미널에서 codex login 으로 로그인하세요", en: "Device code sign-in is off for this account (or workspace). Turn on device code sign-in for Codex in ChatGPT settings, or run codex login in a terminal on the Mac"),
         "cli_account_unreadable": (ko: "계정 정보를 읽지 못했습니다", en: "Couldn't read the account"),
+        "file_chain_conflict": (ko: "replaces 와 new_item 은 함께 줄 수 없습니다", en: "Give either replaces or new_item, not both"),
+        "file_original_requires_html": (ko: "original 은 html 미리보기(html 또는 .html path)와 함께 줍니다", en: "original goes together with an HTML preview (html, or a .html path)"),
+        "file_original_is_html": (ko: "original 에는 html 이 아닌 원본 파일(pptx·pdf 등)을 줍니다", en: "original takes the source file (pptx, pdf and so on), not HTML"),
+        "file_not_chained": (ko: "앞 판에 이어진 자료가 아닙니다", en: "This file is not linked to an earlier version"),
+        "file_unchain_not_own": (ko: "직원은 자기가 올린 자료의 판 잇기만 끊을 수 있습니다", en: "Staff can only unlink versions of files they uploaded themselves"),
+        "file_tidy_unavailable": (ko: "판 정리 기록 표가 없어 적용하지 않았습니다. 서버를 다시 시작한 뒤 다시 하세요", en: "The version tidy-up log table is missing, so nothing was applied. Restart the server and try again"),
+        "file_tidy_plan_changed": (ko: "확인한 뒤로 자료가 바뀌었습니다. 다시 확인한 뒤 새 계획 번호로 적용하세요", en: "Files changed since you checked. Check again and apply with the new plan number"),
+        "file_tidy_batch_not_found": (ko: "판 정리 기록을 찾을 수 없습니다", en: "That version tidy-up was not found"),
     ]
 }

@@ -7,6 +7,11 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 0.2.10 — 출시 전
+
+- **자료함에 같은 자료가 v1…v11로 쌓이지 않습니다.** 팀장이 고친 판을 올릴 때 앞 판을 잇지 않아(자료 771개 중 4개만 이어짐) 같은 덱이 판마다 따로 보였습니다. 이제 팀장이 앞 판을 빠뜨리면 서버가 같은 팀장이 같은 종류로 올린, 제목이 같은 최신 판(v2·3판·초안·최종 같은 판 표시와 날짜는 빼고 비교)에 이어 '이전 판'으로 접고, 팀장에게 무엇에 이었는지 알려 잘못 이었으면 끊게 합니다. 서로 다른 자료(숫자만 다른 '영어 1'·'영어 2', 날짜가 다른 주간 보고 등)는 잇지 않습니다. 덱의 원본(pptx·pdf)과 html 미리보기도 판마다 자료 하나로 올라오고, 앱은 미리보기 아래 '원본'으로 보이고 목록에 '원본 PPTX'를 붙입니다. 이미 쌓인 판은 `iamceo files tidy`로 묶음 수만 먼저 보고(바꾸지 않음) 확인한 계획을 적용하거나 되돌립니다. 열린 결재가 보던 자료는 그대로 둡니다. 판이 많이 이어져도 자료 목록이 느려지지 않게 판 연결을 따로 읽습니다.
+- 팀장 지침과 file 도구 설명을 같은 말로 맞췄습니다(고친 판은 `replaces`, 모르면 `find`, 새 자료는 `new_item`, 제목에 '최신'을 붙이지 않음). 바뀐 지침은 새로 여는 세션부터 실립니다.
+
 ### 0.2.9 — 2026-11-20
 
 - **Codex 총괄이 서로 상관없는 일을 미루지 않고 바로 나눠 맡깁니다.** 서버가 Codex 세션에 넣는 글 앞에 붙이던 '이 일은 순서대로 하고 서브에이전트를 띄우지 말라'는 줄이 총괄에게도 붙어, Codex 총괄이 팀장에게 일을 나누는 것까지 순서대로 했습니다. 다른 성격의 일을 시켜도 앞 일이 끝날 때까지 새 팀장을 띄우지 않고 예정에만 올려 두었고, 팀장에게 주는 지시에도 '병렬 금지'를 적었습니다. 이제 총괄에게는 자기 서브에이전트만 띄우지 말라고 알립니다. 총괄 지침에도 나누는 기준을 더했습니다: 서로 결과를 기다릴 필요가 없는 일은 지금 맞는 팀장에게 맡기거나 새로 띄워 함께 돌리고('그리고'·'이것도'는 순서를 정한 말이 아닙니다), 한 가지 일에 '팀장·사원'처럼 위아래를 따로 띄우지 않으며(이름에 직급을 붙이지 않습니다), 대표가 서브에이전트·병렬을 말하면 팀장을 더 띄우는 대신 그 팀장의 병렬을 켭니다. 총괄이 대표에게 쓰는 글에서도 화면과 같이 '팀장'이라고 부릅니다(예전에는 '직원'). 바뀐 지침은 새로 여는 세션부터 실립니다.
@@ -177,6 +182,11 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### 0.2.10 — 출시 전
+
+- **The Files tab no longer fills up with v1…v11 copies of the same file.** Staff rarely linked a revised file to its earlier version (4 of 771 files), so each version of a deck showed up on its own. Now, when staff leave out the earlier version, the server links the upload to the latest file with the same title that the same staff member uploaded as the same kind (version marks such as v2, 3판, draft, final and dates are ignored when comparing) and folds the older one under "Earlier versions". The staff member is told what it was linked to and can unlink it. Different files (titles that differ only by a number, weekly reports with different dates) are not linked. A deck's original (pptx, pdf) and its HTML preview now arrive as one file per version; the app shows the original under the preview and marks the row "Original PPTX". Versions that already piled up can be folded with `iamceo files tidy`: it first shows only the counts (changing nothing), then applies or undoes the plan you checked. Open decisions keep pointing at the same files. Version links are read separately so the file list stays fast however many versions are linked.
+- The staff instructions and the file tool description now say the same thing (a revised file uses `replaces`, `find` looks up an id, `new_item` marks a new file, no "latest" in titles). New instructions apply to sessions opened from now on.
 
 ### 0.2.9 — 2026-11-20
 

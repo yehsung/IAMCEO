@@ -13,7 +13,7 @@ import type { AssignResult, Orchestrator, UrgentWaitReason } from "./orchestrato
 import { sinceText } from "./delivery-text.ts";
 import { josa } from "./roles.ts";
 import { withRo } from "./api-outage.ts";
-import { ApiError } from "./store.ts";
+import { ApiError, type FileChainResult } from "./store.ts";
 import { oneLineProblem } from "./text.ts";
 import { canonicalPath as realOrSelf, isInside, isSecretPath, rejectHardLink, SECRET_DIRS } from "./secret-paths.ts";
 import { textRef } from "../shared/server-text.ts";
@@ -213,6 +213,21 @@ function boardView(orch: Orchestrator, projectId: string) {
   };
 }
 
+/** 0.2.10: file 도구의 답. 서버가 이은 앞 판을 밝혀 팀장이 바로잡을 수 있게 한다. 제목은 한 줄 80자까지. */
+function fileReply(result: FileChainResult, replaces: string | undefined): string {
+  const { file, chained, ambiguous } = result;
+  const quoted = (title: string) => `'${Array.from(title.replace(/\s+/g, " ").trim()).slice(0, 80).join("")}'`;
+  const link = `post 의 file_ids 에 ${file.id} 를 넣으면 대화에 이어집니다`;
+  if (replaces) return `자료를 올렸습니다 #${file.id} (옛 판 #${replaces} 를 대신합니다). ${link}`;
+  if (chained) {
+    return `자료를 올렸습니다 #${file.id}. 내가 올린 같은 제목의 앞 판 #${chained.previous.id} ${quoted(chained.previous.title)} 에 새 판으로 이었습니다(판 ${chained.versions}). 대표 자료 목록에는 이 판만 보이고 앞 판은 '이전 판'에 남습니다. 앞 판과 다른 자료라면 file 에 unchain: "${file.id}" 로 끊으세요. ${link}`;
+  }
+  if (ambiguous?.length) {
+    return `자료를 올렸습니다 #${file.id}. 같은 제목의 앞 판이 여럿이라 잇지 않았습니다(${ambiguous.slice(0, 3).map((f) => `#${f.id} ${quoted(f.title)}`).join(", ")}). 이 가운데 하나를 고친 판이면 다음부터 replaces 에 그 id 를 넣으세요. ${link}`;
+  }
+  return `자료를 올렸습니다 #${file.id}. ${link}`;
+}
+
 const TOOLS: Record<ToolName, Tool<any>> = {
   status: tool(
     "지금 하는 일을 일상어 한 줄로 적는다. 일을 시작하거나 바뀔 때마다 부른다. 대표 팀 화면에 보인다.",
@@ -293,27 +308,60 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   ),
 
   file: tool(
-    "대표가 읽거나 복사하거나 확인해야 하는 문서·대본·표·이미지·영상은 반드시 이 도구로 자료에 올리고 post의 file_ids로 연결한다. 로컬 경로만 보고하지 않는다. 바뀌면 새 판을 올려 최신 id를 연결한다. 짧은 보고는 post, 긴 글은 content(마크다운). 글로 설명이 길어지거나 비교·흐름·구조·수치·시안처럼 글만으로 보기 힘든 내용은 html 로 한 페이지를 만들어 올린다. 대표가 읽고 판단할 비교표·요약 표도 csv·마크다운 표가 아니라 html 이다. 외부 사이트에 따로 게시하지 않는다. path 는 디스크의 파일로, 종류는 확장자로 정해진다(.html 아티팩트, csv·tsv 표는 내려받아 쓸 원본 데이터일 때, json·코드·로그·txt 코드, pdf, 이미지, 영상, 오디오). 결과의 id 를 post 의 file_ids 로 잇는다.",
+    "대표가 읽거나 복사하거나 확인해야 하는 문서·대본·표·이미지·영상은 반드시 이 도구로 자료에 올리고 post의 file_ids로 연결한다. 로컬 경로만 보고하지 않는다. 짧은 보고는 post, 긴 글은 content(마크다운). 글로 설명이 길어지거나 비교·흐름·구조·수치·시안처럼 글만으로 보기 힘든 내용은 html 로 한 페이지를 만들어 올린다. 대표가 읽고 판단할 비교표·요약 표도 csv·마크다운 표가 아니라 html 이다. 외부 사이트에 따로 게시하지 않는다. path 는 디스크의 파일로, 종류는 확장자로 정해진다(.html 아티팩트, csv·tsv 표는 내려받아 쓸 원본 데이터일 때, json·코드·로그·txt 코드, pdf, 이미지, 영상, 오디오). 결과의 id 를 post 의 file_ids 로 잇는다. "
+      + "판: 이미 올린 자료를 고친 판·새 판은 반드시 replaces 에 앞 판 id(f_...)를 넣어 올린다. 앞 판 id 는 그 자료를 올렸을 때의 결과에 있고, 모르면 find 로 찾는다. replaces 를 빼면 서버가 내가 올린 같은 종류의 자료 가운데 제목이 같은 최신 판(v2·3판·초안·최종 같은 판 표시와 날짜는 빼고 비교)을 찾아 잇고 결과에 알린다(잘못 이었으면 unchain 으로 끊는다). 앞 판과 다른 새 자료면 new_item: true. 새 판은 같은 제목으로 올리고, 제목에 '최신'·latest 를 붙이지 않는다(판은 서버가 센다). 덱·문서의 원본 파일(pptx·pdf 등)과 html 미리보기는 따로 올리지 않고 한 번에 올린다: html(또는 .html path)에 original 로 원본을 붙인다.",
     z.strictObject({
-      title: text,
+      title: text.optional().describe("자료 제목. 무엇인지만 쓴다('최신'·latest 를 붙이지 않는다). 올릴 때 필요하다"),
       summary: z.string().optional().describe("세 줄 요약"),
       path: z.string().optional().describe("파일 경로. 작업 폴더 안의 파일만. 상대 경로는 작업 폴더 기준"),
       content: z.string().optional().describe("마크다운 전문"),
       html: z.string().optional().describe("한 페이지짜리 자체 완결 HTML(2MB 이하). CDN·일반 외부 요청은 막힌다(iframe·link 는 지워지고, 격리가 완전하지 않으므로 비밀번호·개인정보 같은 민감한 데이터는 싣지 않는다). 대표가 실행을 눌러야 스크립트가 돈다. 스크립트는 인라인만, 이미지는 data: 로. 기본 스타일 키트가 자동으로 깔려 semantic HTML 과 키트 클래스(card, grid, callout, kpi, steps, flow, tabs, tag, compare)만 써도 깔끔하다. kpi 는 <div class=\"kpi\"><b>값</b><small>설명</small></div>"),
+      original: z.string().optional().describe("html 미리보기와 같은 판의 원본 파일 경로(pptx·pdf·key·docx·xlsx 등, 작업 폴더 안). html 이나 .html path 와 함께 주면 원본과 미리보기가 자료 하나가 된다. 대표는 미리보기를 보고 원본을 내려받는다"),
       images: z.array(z.string()).optional().describe("이미지 파일 경로(작업 폴더 안)"),
-      replaces: text.optional().describe("이 자료가 대신할 옛 판 id(f_...). 고친 판을 올릴 때 쓴다. 대표 자료 목록에는 최신 판만 보이고(이전 판은 판 목록에서), 옛 판을 근거로 둔 열린 결재는 새 판을 가리킨다"),
+      replaces: text.optional().describe("이 자료가 대신할 앞 판 id(f_...). 고친 판·새 판을 올릴 때 넣는다. 대표 자료 목록에는 최신 판만 보이고(이전 판은 판 목록에서), 옛 판을 근거로 둔 열린 결재는 새 판을 가리킨다"),
+      new_item: z.boolean().optional().describe("앞 판이 아니라 새 자료일 때 true. 서버가 같은 제목의 앞 판에 자동으로 잇지 않는다"),
+      find: z.string().optional().describe("올리지 않고 찾는다: 이 프로젝트 자료의 최신 판 가운데 제목에 이 낱말이 모두 든 것(빈 글이면 최근 것)의 id·제목·종류·올린 이·판 수. replaces 에 넣을 앞 판 id 를 찾을 때. 이 필드만 준다"),
+      unchain: text.optional().describe("서버가 잘못 이었을 때: 이 자료(f_...)와 앞 판의 잇기를 끊는다. 두 자료는 따로 남는다. 이 필드만 준다"),
+    }).superRefine((a, ctx) => {
+      const lookup = a.find !== undefined ? "find" : a.unchain !== undefined ? "unchain" : null;
+      if (lookup) {
+        const others = Object.entries(a).filter(([key, value]) => key !== lookup && value !== undefined).map(([key]) => key);
+        if (others.length) ctx.addIssue({ code: "custom", message: `${lookup} 는 다른 인자(${others.join(", ")})와 함께 줄 수 없습니다` });
+      } else if (a.title === undefined) ctx.addIssue({ code: "custom", path: ["title"], message: "자료를 올리려면 title 이 필요합니다" });
     }),
     async (orch, member, a) => {
+      if (a.find !== undefined) {
+        const { files, more } = orch.store.findLatestFiles(member.projectId, a.find);
+        return reply(JSON.stringify({
+          files: files.map((f) => ({ id: f.id, title: f.title, kind: f.kind, who: f.who, createdAt: f.createdAt, ...(f.versions > 1 ? { versions: f.versions } : {}), ...(f.memberId === member.id ? { mine: true } : {}) })),
+          ...(more ? { more } : {}),
+        }));
+      }
+      if (a.unchain !== undefined) {
+        const target = orch.store.getFile(a.unchain);
+        if (!target || target.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${a.unchain}`, "file_not_found");
+        if (member.kind === "worker" && target.memberId !== member.id) throw new ApiError(403, "직원은 자기가 올린 자료의 판 잇기만 끊을 수 있습니다", "file_unchain_not_own");
+        const { file, previous } = orch.store.unchainFile(target.id);
+        return reply(`자료 #${file.id} 와 앞 판 #${previous?.id ?? target.replaces} 의 잇기를 끊었습니다. 두 자료가 따로 대표 자료 목록에 보입니다`);
+      }
+      const title = a.title!;
       if ([a.path, a.content, a.html].filter((v) => v !== undefined).length > 1) throw new ApiError(400, "path·content·html 은 하나만 줍니다", "file_source_ambiguous");
+      if (a.replaces !== undefined && a.new_item) throw new ApiError(400, "replaces 와 new_item 은 함께 줄 수 없습니다", "file_chain_conflict");
       if (a.replaces !== undefined) {
         // 0.2.7 묶음 4(D5-7): 판 갈이. 직원은 자기가 올린 자료만, 총괄·본사 AI 는 프로젝트의 자료를 바꾼다. 이미 새 판이 있으면 store 가 409.
+        // 0.2.10: 올린 직원이 명부에서 빠진(닫힌) 자료는 같은 프로젝트 직원도 잇는다(일을 넘겨받은 직원이 이을 수 없었다).
         const old = orch.store.getFile(a.replaces);
         if (!old || old.projectId !== member.projectId) throw new ApiError(404, `자료를 찾을 수 없습니다: ${a.replaces}`, "file_not_found");
-        if (member.kind === "worker" && old.memberId !== member.id) throw new ApiError(403, "직원은 자기가 올린 자료만 새 판으로 바꿀 수 있습니다", "file_not_own");
+        if (member.kind === "worker" && old.memberId !== member.id && !(old.memberId && !orch.store.getMember(old.memberId))) throw new ApiError(403, "직원은 자기가 올린 자료만 새 판으로 바꿀 수 있습니다", "file_not_own");
       }
       if (a.html !== undefined && !a.html.trim()) throw new ApiError(400, "html 이 비어 있습니다", "html_empty");
       if (!a.path && a.content === undefined && a.html === undefined && !a.images?.length) throw new ApiError(400, "path·content·html·images 중 하나가 필요합니다", "file_source_required");
       if (a.html !== undefined && artifactBytes(a.html) > MAX_ARTIFACT_BYTES) throw new ApiError(413, "html 은 2MB 까지 올릴 수 있습니다", "html_too_large");
+      // 0.2.10: original 은 html 미리보기(html 또는 .html path)와 같은 판의 원본이다.
+      if (a.original !== undefined) {
+        if (a.html === undefined && (a.path === undefined || fileKindOf(basename(a.path)) !== "artifact")) throw new ApiError(400, "original 은 html 미리보기(html 또는 .html path)와 함께 줍니다", "file_original_requires_html");
+        if (fileKindOf(basename(a.original)) === "artifact") throw new ApiError(400, "original 에는 html 이 아닌 원본 파일(pptx·pdf 등)을 줍니다", "file_original_is_html");
+      }
       // Validate and read all inputs before creating a staging directory or attachment row.
       const inputs: PreparedImport[] = [];
       let body: string = a.content ?? "";
@@ -340,6 +388,13 @@ const TOOLS: Record<ToolName, Tool<any>> = {
           if (TEXT_BODY_KINDS.has(kind) && stat.size <= MARKDOWN_BODY_MAX_BYTES) body = readFileSync(real, "utf8");
         }
       }
+      if (a.original !== undefined) {
+        // 원본이 첫 첨부다(앱은 아티팩트 아래에 원본 칩을 그리고, 눌러 열거나 받는다). 원본 위치는 path 로 남긴다(.html path 가 없을 때).
+        const input = prepareAttachment(orch, member, a.original);
+        if (input.mime === "text/html") throw new ApiError(400, "original 에는 html 이 아닌 원본 파일(pptx·pdf 등)을 줍니다", "file_original_is_html");
+        inputs.unshift(input);
+        path ??= expandPath(a.original, member.cwd);
+      }
       for (const image of a.images ?? []) {
         const input = prepareAttachment(orch, member, image);
         if (!input.mime.startsWith("image/")) throw new ApiError(400, `이미지가 아닙니다: ${image}`, "not_an_image");
@@ -347,7 +402,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       }
       kind ??= "image";
       let publication: FilePublication | undefined;
-      let file;
+      let result;
       try {
         const saved: SavedFile[] = [];
         if (inputs.length) {
@@ -355,16 +410,16 @@ const TOOLS: Record<ToolName, Tool<any>> = {
           for (const input of inputs) saved.push(await publication.stagePath(input));
           publication.publish();
         }
-        file = orch.store.transaction(() => {
+        result = orch.store.transaction(() => {
           const attachments = saved.map((entry) => orch.store.createAttachment(entry));
-          return orch.store.createFile({ projectId: member.projectId, title: a.title, who: member.name, memberId: member.id, summary: a.summary, body, path, attachments, kind, html, replaces: a.replaces ?? null });
+          return orch.store.createFileWithChain({ projectId: member.projectId, title, who: member.name, memberId: member.id, summary: a.summary, body, path, attachments, kind, html, replaces: a.replaces ?? null, autoChain: !a.new_item });
         });
         publication?.complete();
       } catch (error) {
         try { publication?.fail(createStorageReferences(orch.store, join(orch.dataDir, "inbox"))); } catch { /* Unknown cleanup stays active and protected. */ }
         throw toStorageError(error, "자료 게시");
       }
-      return reply(`자료를 올렸습니다 #${file.id}${a.replaces ? ` (옛 판 #${a.replaces} 를 대신합니다)` : ""}. post 의 file_ids 에 ${file.id} 를 넣으면 대화에 이어집니다`);
+      return reply(fileReply(result, a.replaces));
     },
   ),
 

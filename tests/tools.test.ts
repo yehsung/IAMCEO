@@ -413,7 +413,7 @@ describe("공통 도구", () => {
     const { home, store, lead, orch } = await setup();
     const path = join(home, "full.png");
     writeFileSync(path, "image");
-    const insert = spyOn(store, "createFile").mockImplementation(() => { throw Object.assign(new Error("full"), { code: "SQLITE_FULL" }); });
+    const insert = spyOn(store, "createFileWithChain").mockImplementation(() => { throw Object.assign(new Error("full"), { code: "SQLITE_FULL" }); });
     try {
       expect(await rejection(handleAgentTool(orch, lead, "file", { title: "실패", path }))).toBeInstanceOf(StorageError);
     } finally { insert.mockRestore(); }

@@ -505,6 +505,8 @@ private struct FileRow: View {
                     // web .fl-row__meta: wraps under the tag when the name and time do not fit beside it.
                     ChipFlow(spacing: 7, lineSpacing: 3) {
                         KindTag(kind: file.kind)
+                        // 0.2.10: 원본(pptx·pdf 등)이 함께 든 페이지.
+                        if let original = FileOriginals.label(file) { Tag(String(localized: "원본 \(original)")) }
                         Text(byline).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
                         if let label = searchResult?.bodyLabel { Text(label).font(CEFont.meta).foregroundStyle(CE.ink2) }
                         if openDecisions > 0 { Tag(String(localized: "결재 \(openDecisions)"), tone: .attention) }
@@ -530,7 +532,7 @@ private struct FileRow: View {
     }
 
     private var accessibilityText: String {
-        var parts = [fileKindName(file.kind), title, file.summary, file.who, relativeTime(file.createdAt)]
+        var parts = [fileKindName(file.kind), FileOriginals.label(file).map { String(localized: "원본 \($0)") } ?? "", title, file.summary, file.who, relativeTime(file.createdAt)]
         if let searchResult { parts += [searchResult.bodyLabel ?? "", searchResult.excerpt] }
         if openDecisions > 0 { parts.append(String(localized: "결재 \(openDecisions)건 대기")) }
         if let versions = file.versions, versions > 1 { parts.append(String(localized: "판 \(versions)")) }
@@ -704,6 +706,7 @@ private struct FileReaderContent: View {
         default: file.attachments.filter { !attachmentMatches($0, kind: file.kind) }
         }
     }
+    private var originals: [Attachment] { FileOriginals.of(file) }
     private var relatedDecisions: [Decision] { newestFirst(store.decisions.filter { $0.fileId == file.id }) }
     private var relatedMessages: [Message] { Array(store.messages.filter { $0.fileIds.contains(file.id) }.suffix(3).reversed()) }
     private var author: Member? { file.memberId.flatMap { id in store.members.first { $0.id == id } } }
@@ -1034,7 +1037,9 @@ private struct FileReaderContent: View {
             ArtifactViewer(file: file, loaded: $artifact, enlarged: $enlarged)
                 // web: the frame sits 4 below the block above (10 under a summary).
                 .padding(.top, artifact == nil ? 0 : file.summary.isEmpty ? 4 : 10)
-            AttachmentGroup(items: extraAttachments)
+            // 0.2.10: 같은 판의 원본(pptx·pdf 등)은 '원본' 이름표 아래 칩으로(눌러 열고, 메뉴로 저장·공유). 나머지 첨부는 예전처럼.
+            if !originals.isEmpty { OriginalFiles(items: originals) }
+            AttachmentGroup(items: extraAttachments.filter { extra in !originals.contains { $0.id == extra.id } })
             prose
         case "code":
             if !file.body.isEmpty || !mainAttachments.isEmpty {
@@ -2034,6 +2039,22 @@ private extension Attachment {
 @MainActor @Observable private final class GalleryState {
     var urls: [String: URL] = [:]
     var selected: URL?
+}
+
+/// 0.2.10: 아티팩트와 같은 판의 원본(file 도구 original). '원본' 이름표(이전 판 줄과 같은 글꼴) 아래 이름 · 크기 칩.
+private struct OriginalFiles: View {
+    let items: [Attachment]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("원본").font(CEFont.meta.weight(.semibold)).foregroundStyle(CE.ink2)
+            ChipFlow(spacing: 8) {
+                ForEach(items) { AttachmentChip(attachment: $0) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+    }
 }
 
 /// Web .atv[data-large] (a document's attachments, the extras under other viewers): pictures as 320×220 cover tiles

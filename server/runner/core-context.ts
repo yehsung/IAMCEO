@@ -3,6 +3,7 @@ import { basename, isAbsolute, join } from "node:path";
 import type { CliProvider, ContextMeasurement } from "../../shared/types.ts";
 import { contextWindowFor, measureContext, validWindow, type ContextReading, type WindowHints } from "./context.ts";
 import { jsonObject, parseCodexSessionMeta, parseProviderUserText, providerLogPath, readJsonlRange, supportedUserTextLayout, type CodexSessionMeta, type JsonlCursor } from "./delivery-evidence.ts";
+import { geminiTranscriptPath, geminiTranscriptRoot, isGeminiCheckpoint } from "./gemini-transcript.ts";
 
 export function codexBindingMarker(nonce: string): string {
   if (!/^[A-Za-z0-9_-]{22,128}$/.test(nonce)) throw new Error("Invalid session binding nonce");
@@ -141,12 +142,13 @@ export function observeCompactBoundary(options: { cli: CliProvider; home: string
   // 옛 규칙의 커서는 그 위치까지 읽은 줄을 지금 규칙으로 다시 보지 못하게 한다. 버리고 기준선(baseline.offset)부터 읽는다.
   const cursor = options.cursor?.rules === COMPACT_BOUNDARY_RULES ? options.cursor : null;
   const unknown = (code: string): CompactBoundaryResult => ({ outcome: "unknown", code, cursor });
-  // Antigravity CLI 는 스스로 압축하고 그 경계를 읽을 줄 단위 기록이 없다. Claude 기록 자리(projects)에서 찾지 않는다.
-  if (options.cli === "gemini") return unknown("unsupported_provider");
   if (baseline.sessionId !== current.sessionId || baseline.generation !== current.generation || baseline.terminalId !== current.terminalId || baseline.model !== current.model ||
     (baseline.turn !== null && (current.turn === null || current.turn < baseline.turn)) || !baseline.fileIdentity ||
     (cursor && cursor.queryKey !== queryKey)) return unknown("session_changed");
-  const root = options.cli === "codex" ? join(options.home, "sessions") : join(options.home, "projects");
+  // Antigravity CLI: <홈>/brain/<대화 id>/.system_generated/logs/transcript.jsonl(gemini-transcript.ts). 기록 파일이 대화마다 따로라 세션은 파일로 묶인다.
+  const root = options.cli === "codex" ? join(options.home, "sessions") : options.cli === "gemini" ? geminiTranscriptRoot(options.home) : join(options.home, "projects");
+  // Antigravity CLI 의 기록은 대화 id 로 정해지는 파일 하나다. 기준선의 파일이 지금 대화의 그 파일이 아니면 다른 대화의 것이다.
+  if (options.cli === "gemini" && baseline.path !== geminiTranscriptPath(options.home, current.sessionId)) return unknown("session_conflict");
   if (!providerLogPath(root, baseline.path)) return unknown("path_unavailable");
   if (options.cli === "codex") {
     const head = readJsonlRange(root, baseline.path, null, { maxBytes: 1024 * 1024, fileIdentity: baseline.fileIdentity });
@@ -164,6 +166,8 @@ export function observeCompactBoundary(options: { cli: CliProvider; home: string
     // Claude 줄의 cwd 는 비교하지 않는다(COMPACT_BOUNDARY_RULES). 다른 세션·사이드체인 줄은 위·여기서 거른다.
     if (options.cli === "claude" && entry.type === "system" && entry.subtype === "compact_boundary" && entry.sessionId === current.sessionId) state.boundary = true;
     if (options.cli === "codex" && entry.type === "compacted" && (entry.sessionId === undefined || entry.sessionId === current.sessionId)) state.boundary = true;
+    // Antigravity CLI: 압축 요약 줄(CHECKPOINT · SYSTEM · DONE, 머리말 '# Resuming from a compaction'). 줄에 대화 id 가 없다: 파일이 그 대화의 것이다.
+    if (options.cli === "gemini" && isGeminiCheckpoint(entry)) state.boundary = true;
     // 압축 명령을 '할 것 없음'으로 끝낸 출력. 명령 이름이 적혀 있으면 compact 여야 한다(다른 로컬 명령의 출력이 아님).
     const run = jsonObject(entry.commandRun);
     if (options.cli === "claude" && entry.type === "system" && entry.subtype === "local_command" && entry.sessionId === current.sessionId &&

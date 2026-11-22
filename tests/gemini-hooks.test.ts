@@ -5,7 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GEMINI_HOOK_EVENTS, GEMINI_HOOK_RECORDER_MARKER, GEMINI_HOOK_TIMEOUT_SEC, GEMINI_HOOKS_NAME, geminiHookEventsDir, geminiHookLastWrite, geminiHooksConfig, parseGeminiHookLine, readGeminiDeliveryEvidence, readGeminiHookConversation, type GeminiHookConversationWatch } from "../server/runner/gemini-hooks.ts";
+import { clearGeminiTurn, GEMINI_HOOK_EVENTS, GEMINI_HOOK_RECORDER_MARKER, GEMINI_HOOK_TIMEOUT_SEC, GEMINI_HOOKS_NAME, geminiHookEventsDir, geminiHookLastWrite, geminiHooksConfig, geminiTurnWatch, parseGeminiHookLine, readGeminiDeliveryEvidence, readGeminiHookConversation, readGeminiTurnStop, type GeminiHookConversationWatch } from "../server/runner/gemini-hooks.ts";
 import { HookEventReader, HookFileReader, hookEventsMark, parseHookEventLine } from "../server/runner/hook-events.ts";
 import { hookEventsDir, hookEventsFile } from "../server/runner/hooks.ts";
 
@@ -85,15 +85,38 @@ describe("기록 스크립트를 실제로 돌린다", () => {
     expect(raw).not.toContain("hello");
     expect(raw).not.toContain("transcript");
   });
-  test("Stop: 오류 글은 남기지 않고 있었다는 것만, 모르는 사유는 other", async () => {
+  test("Stop: 오류 글은 발췌로 남긴다(제어 문자 → 칸, 메일 → <email>, 400자에서 자름). 모르는 사유는 other", async () => {
     const home = temp(), eventsDir = geminiHookEventsDir(home);
     const command = commandOf(geminiHooksConfig({ memberId: "m_one", eventsDir }));
-    await runHook(command, hookInput("Stop", { terminationReason: "ERROR", fullyIdle: false, error: "quota exhausted for project secret-project" }));
+    // 실측(헤드리스 1.5.14): 재시도를 다 쓰고 끝난 턴의 Stop 입력.
+    const real = 'generating and executing: request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": unexpected EOF';
+    await runHook(command, hookInput("Stop", { terminationReason: "ERROR", fullyIdle: true, error: real, executionNum: 0, continuationActive: false }));
+    await runHook(command, hookInput("Stop", { terminationReason: "ERROR", fullyIdle: false, error: "quota\n\texhausted for dev@example.com\u0007 now" }));
+    await runHook(command, hookInput("Stop", { terminationReason: "ERROR", error: "x".repeat(5000) }));
     await runHook(command, hookInput("Stop", { terminationReason: "some reason with spaces", error: "" }));
     await runHook(command, hookInput("Stop", { terminationReason: "USER_CANCELED" }));
     const records = lines(hookEventsFile(eventsDir, "m_one"));
-    expect(records.map(r => [r.reason, r.fullyIdle, r.failed])).toEqual([["ERROR", false, true], ["other", null, false], ["USER_CANCELED", null, false]]);
-    expect(readFileSync(hookEventsFile(eventsDir, "m_one"), "utf8")).not.toContain("secret-project");
+    expect(records.map(r => [r.reason, r.fullyIdle, r.failed])).toEqual([["ERROR", true, true], ["ERROR", false, true], ["ERROR", null, true], ["other", null, false], ["USER_CANCELED", null, false]]);
+    expect(records[0]!.error).toBe(real);
+    expect(records[1]!.error).toBe("quota exhausted for <email> now");
+    expect((records[2]!.error as string).length).toBe(400);
+    expect((records[2]!.error as string).endsWith("…")).toBe(true);
+    expect(records.slice(3).every(r => r.error === undefined)).toBe(true);
+    expect(readFileSync(hookEventsFile(eventsDir, "m_one"), "utf8")).not.toContain("dev@example.com");
+    // 읽기도 같은 모양을 받는다.
+    const parsed = readFileSync(hookEventsFile(eventsDir, "m_one"), "utf8").split("\n").filter(Boolean).map(parseGeminiHookLine);
+    expect(parsed.map(r => r?.error)).toEqual([real, "quota exhausted for <email> now", records[2]!.error as string, undefined, undefined]);
+  });
+  test("PreInvocation: 받은 글이 맨 /compact 면 그 사실(compact)만 남긴다. '/compact <글>'·글 속의 /compact 는 아니다", async () => {
+    const home = temp(), eventsDir = geminiHookEventsDir(home);
+    const command = commandOf(geminiHooksConfig({ memberId: "m_one", eventsDir }));
+    for (const input of ["/compact", "  /compact\n", "/compact Keep the code word", "explain /compact please", "/compactx"]) {
+      await runHook(command, hookInput("PreInvocation", { invocationNum: 0, lastUserInput: input }));
+    }
+    const records = lines(hookEventsFile(eventsDir, "m_one"));
+    expect(records.map(r => r.compact ?? false)).toEqual([true, true, false, false, false]);
+    expect(readFileSync(hookEventsFile(eventsDir, "m_one"), "utf8")).not.toContain("Keep the code word");
+    expect(parseGeminiHookLine(JSON.stringify(records[0]))).toMatchObject({ event: "PreInvocation", compact: true });
   });
   test("모르는 사건·JSON 이 아닌 입력·빈 입력은 남기지 않는다. 그래도 `{}` 와 0", async () => {
     const home = temp(), eventsDir = geminiHookEventsDir(home);
@@ -161,6 +184,12 @@ describe("parseGeminiHookLine", () => {
     expect(parseGeminiHookLine(JSON.stringify({ v: 1, cli: "gemini", at: 5, event: "Stop", conversationId: null, reason: "bad reason", fullyIdle: "yes" })))
       .toEqual({ at: 5, event: "Stop", conversationId: null, reason: "other", fullyIdle: null, failed: false });
     expect(parseGeminiHookLine(JSON.stringify({ v: 1, cli: "gemini", at: 5, event: "SessionStart", conversationId: CONV }))).toEqual({ at: 5, event: "SessionStart", conversationId: CONV });
+    // 오류 글 발췌: 오류가 있었던 줄에서만, 400자 이하·제어 문자 없을 때만 받는다.
+    const stop = (extra: Record<string, unknown>) => parseGeminiHookLine(JSON.stringify({ v: 1, cli: "gemini", at: 5, event: "Stop", conversationId: CONV, reason: "ERROR", fullyIdle: true, ...extra }));
+    expect(stop({ failed: true, error: "unexpected EOF" })).toMatchObject({ failed: true, error: "unexpected EOF" });
+    expect(stop({ failed: false, error: "unexpected EOF" })!.error).toBeUndefined();
+    expect(stop({ failed: true, error: "x".repeat(401) })!.error).toBeUndefined();
+    expect(stop({ failed: true, error: "bad\nline" })!.error).toBeUndefined();
   });
   test("다른 판·다른 CLI·모르는 사건·깨진 줄은 null", () => {
     for (const line of ["", "{", "[]", "null", JSON.stringify({ v: 2, cli: "gemini", at: 5, event: "Stop" }), JSON.stringify({ v: 1, cli: "claude", at: 5, event: "Stop" }),
@@ -399,5 +428,54 @@ describe("geminiHookLastWrite: 마지막으로 줄이 덧붙은 때", () => {
     expect(geminiHookLastWrite(eventsDir, "m_one")).toBe("unknown");
     expect(geminiHookLastWrite(eventsDir, "../x")).toBe("unknown");
     expect(geminiHookLastWrite("run/gemini-events", "m_one")).toBe("unknown");
+  });
+});
+
+describe("readGeminiTurnStop: 지금 끝난 턴의 Stop", () => {
+  const line = (entry: Record<string, unknown>) => `${JSON.stringify({ v: 1, cli: "gemini", at: Date.now(), conversationId: CONV, ...entry })}\n`;
+  const setupWatch = () => {
+    const home = temp(), eventsDir = geminiHookEventsDir(home);
+    mkdirSync(eventsDir, { recursive: true, mode: 0o700 });
+    const file = hookEventsFile(eventsDir, "m_one");
+    writeFileSync(file, line({ event: "Stop", reason: "ERROR", failed: true, error: "붙기 전" }), { mode: 0o600 });
+    const watch = geminiTurnWatch(eventsDir, "m_one")!;
+    return { eventsDir, file, watch, add: (entry: Record<string, unknown>) => appendFileSync(file, line(entry)) };
+  };
+  test("붙을 때의 파일 끝부터 읽고, 마지막 PreInvocation 뒤의 첫 Stop 이 이 턴의 것이다(앞 턴의 늦은 Stop 은 섞이지 않는다)", () => {
+    const { eventsDir, watch, add } = setupWatch();
+    expect(readGeminiTurnStop(watch, eventsDir, CONV, true)).toBeNull();
+    add({ event: "PreInvocation", invocation: 0, markers: [] });
+    add({ event: "Stop", reason: "ERROR", failed: true, error: "unexpected EOF" });
+    expect(readGeminiTurnStop(watch, eventsDir, CONV)).toMatchObject({ reason: "ERROR", error: "unexpected EOF" });
+    clearGeminiTurn(watch);
+    // 앞 턴의 Stop 이 늦게 덧붙고, 그 뒤 이 턴이 돌았다.
+    add({ event: "Stop", reason: "ERROR", failed: true, error: "late" });
+    add({ event: "PreInvocation", invocation: 0, markers: [] });
+    expect(readGeminiTurnStop(watch, eventsDir, CONV, true)).toBeNull(); // 이 턴의 Stop 이 아직 없다
+    add({ event: "Stop", reason: "NO_TOOL_CALL", failed: false });
+    expect(readGeminiTurnStop(watch, eventsDir, CONV, true)).toMatchObject({ reason: "NO_TOOL_CALL" });
+  });
+  test("다른 대화(서브에이전트)의 줄은 보지 않는다. PreInvocation 이 없으면 anyStop 일 때만 마지막 Stop", () => {
+    const { eventsDir, watch, add } = setupWatch();
+    add({ event: "PreInvocation", invocation: 0, markers: [] });
+    add({ event: "PreInvocation", conversationId: "sub-conv", invocation: 0, markers: [] });
+    add({ event: "Stop", conversationId: "sub-conv", reason: "ERROR", failed: true, error: "RESOURCE_EXHAUSTED" });
+    add({ event: "Stop", reason: "NO_TOOL_CALL", failed: false });
+    expect(readGeminiTurnStop(watch, eventsDir, CONV)).toMatchObject({ reason: "NO_TOOL_CALL", conversationId: CONV });
+    clearGeminiTurn(watch);
+    add({ event: "Stop", reason: "ERROR", failed: true, error: "before invocation" });
+    expect(readGeminiTurnStop(watch, eventsDir, CONV)).toBeNull();
+    expect(readGeminiTurnStop(watch, eventsDir, CONV, true)).toMatchObject({ error: "before invocation" });
+  });
+  test("훅을 넣지 않는 환경·남이 쓸 수 있는 파일이면 읽지 않는다", () => {
+    expect(geminiTurnWatch(null, "m_one")).toBeNull();
+    expect(geminiTurnWatch("/x", "../bad")).toBeNull();
+    const { eventsDir, file, watch, add } = setupWatch();
+    add({ event: "PreInvocation", invocation: 0, markers: [] });
+    add({ event: "Stop", reason: "ERROR", failed: true, error: "x" });
+    chmodSync(file, 0o622);
+    expect(readGeminiTurnStop(watch, eventsDir, CONV)).toBeNull();
+    chmodSync(file, 0o600);
+    expect(readGeminiTurnStop(watch, eventsDir, CONV)).toMatchObject({ error: "x" });
   });
 });

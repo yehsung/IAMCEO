@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CoreRunner, codexExecutionPreference, geminiMayHaveConversed, type CoreRunnerDeps } from "../server/runner/core.ts";
+import { CoreRunner, codexExecutionPreference, geminiMayHaveConversed, type CoreCompactState, type CoreRunnerDeps } from "../server/runner/core.ts";
 import { CoreError } from "../server/runner/core-client.ts";
 import { geminiStatusFromPayload, geminiStatusPath, readGeminiStatus } from "../server/runner/gemini-status.ts";
 import { GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE } from "../server/runner/gemini-screen.ts";
@@ -768,7 +768,7 @@ describe("입력칸: agy 판독기로만 읽는다", () => {
   });
 });
 
-describe("병렬·압축: Claude 명령을 치지 않는다", () => {
+describe("병렬: Claude 명령을 치지 않는다", () => {
   test("setParallel 은 선호만 적고 다음 입력 앞에 실행 선호 줄을 붙인다(`/effort ultracode` 를 넣지 않는다)", async () => {
     const f = await setup();
     const started = await f.runner.start(f.member, f.opts);
@@ -789,36 +789,144 @@ describe("병렬·압축: Claude 명령을 치지 않는다", () => {
     await turn(g, { ...g.member, paneId: lead.paneId }, "일을 나눠 주세요");
     expect(g.core.turns("m_gem1")[0]!.prompt).toBe(`${codexExecutionPreference("conductor", false)}일을 나눠 주세요`);
   });
-  test("compact 는 아무것도 넣지 않고 깨끗이 거절한다", async () => {
-    const f = await setup({}, {}, { compactStore: { load: () => null, save: () => { throw new Error("저장하면 안 된다"); } } });
+});
+
+/** 압축 상태를 메모리에 둔다(운영은 저장소, coreCompactStore). */
+function compactStore() {
+  const states = new Map<string, CoreCompactState>();
+  return { states, port: { load: (id: string) => states.get(id) ?? null, save: (id: string, state: CoreCompactState) => { states.set(id, structuredClone(state)); } } };
+}
+const transcriptOf = (f: Fixture, id: string) => join(f.geminiHome, "brain", id, ".system_generated", "logs", "transcript.jsonl");
+
+describe("압축: 맨 /compact 를 넣고 대화 기록의 CHECKPOINT 로 끝을 본다", () => {
+  test("맨 '/compact' 하나만(초점·실행 선호 줄·표지 없이) 넣고, 기록에 CHECKPOINT 가 생기고 쉬면 succeeded·compacted 다. 턴 끝이 아니고, 그 뒤 전달이 들어간다", async () => {
+    const store = compactStore();
+    const f = await setup({ parallel: true }, {}, { compactStore: store.port });
     const started = await f.runner.start(f.member, f.opts);
     const id = await turn(f, { ...f.member, paneId: started.paneId }, "한 턴");
     const known = { ...f.member, sessionId: id, paneId: started.paneId };
     const sends = f.core.count("terminal.send");
-    const result = await f.runner.compact(known, "이어갈 일: 결제 연동", f.opts);
-    expect(result).toMatchObject({ ok: false, reason: "error", retryable: false, deliveryEffect: "not_written" });
-    expect((result as { detail?: string }).detail).toContain("Antigravity CLI compacts its own context");
-    expect(f.core.count("terminal.send")).toBe(sends);
-    expect(f.runner.isBusy("m_gem1")).toBe(false);
-    // 그 뒤의 전달은 그대로 들어간다(압축 대기로 묶이지 않는다).
+    expect(await f.runner.compact(known, "이어갈 일: 결제 연동 · 남은 일 둘", f.opts)).toMatchObject({ ok: true });
+    const calls = f.core.calls.filter(c => c.method === "terminal.send");
+    expect(calls).toHaveLength(sends + 1);
+    expect(calls.at(-1)!.params).toMatchObject({ text: "/compact", force: false });
+    await until("압축 끝", () => ofType(f.events, "compacted").length === 1);
+    expect(store.states.get("m_gem1")).toMatchObject({ phase: "succeeded", command: "/compact" });
+    expect(store.states.get("m_gem1")!.evidence).toBeUndefined();
+    expect(store.states.get("m_gem1")!.baseline).toMatchObject({ path: transcriptOf(f, id), sessionId: id });
+    expect(readFileSync(transcriptOf(f, id), "utf8")).toContain("# Resuming from a compaction");
+    // 압축은 턴 끝이 아니다. 끝나면 묶임이 풀리고 다음 전달이 같은 대화로 들어간다.
+    expect(ofType(f.events, "turn_end")).toHaveLength(1);
+    await until("묶임 풀림", () => !f.runner.isBusy("m_gem1"));
     expect(await turn(f, known, "다음 일")).toBe(id);
-    expect(f.core.turns("m_gem1").some(t => t.prompt.startsWith("/compact"))).toBe(false);
+    expect(f.core.turns("m_gem1").map(t => t.prompt).filter(p => p.includes("/compact"))).toEqual(["/compact"]);
+  });
+
+  test("입력칸에 글이 있으면 input_busy, 답이 하나도 없는 대화면 넣지 않는다(아무것도 쓰지 않는다)", async () => {
+    const store = compactStore();
+    const f = await setup({}, {}, { compactStore: store.port });
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    const id = await turn(f, live, "첫 일");
+    const known = { ...live, sessionId: id };
+    // 대화는 열렸지만 기록에 모델의 답 줄이 없다(헤드리스에서는 이런 대화의 /compact 가 보통 글처럼 모델에 갔다).
+    writeFileSync(transcriptOf(f, id), `${JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\n첫 일\n</USER_REQUEST>" })}\n`);
+    const sends = f.core.count("terminal.send");
+    const nothing = await f.runner.compact(known, "", f.opts);
+    expect(nothing).toMatchObject({ ok: false, reason: "error", deliveryEffect: "not_written" });
+    expect((nothing as { detail?: string }).detail).toContain("Nothing to compact yet");
+    // 답이 생긴 뒤에도 입력칸에 쓰던 글이 있으면 넣지 않는다.
+    expect(await turn(f, known, "이번엔 답한다")).toBe(id);
+    f.core.setDraft("m_gem1", "대표가 쓰던 글");
+    expect(await f.runner.compact(known, "", f.opts)).toMatchObject({ ok: false, reason: "input_busy", deliveryEffect: "not_written" });
+    expect(f.core.count("terminal.send")).toBe(sends + 1);
+    expect(f.core.turns("m_gem1").some(t => t.prompt.includes("/compact"))).toBe(false);
+    expect(store.states.size).toBe(0);
+  });
+
+  test("기록에 CHECKPOINT 가 없어도 같은 대화의 PreInvocation(compact) 뒤 Stop(TERMINAL_CUSTOM_HOOK) 과 쉬는 CLI 면 닫는다(훅 근거)", async () => {
+    const store = compactStore();
+    const f = await setup({}, { geminiCompact: "hook_only" }, { compactStore: store.port });
+    const started = await f.runner.start(f.member, f.opts);
+    const id = await turn(f, { ...f.member, paneId: started.paneId }, "한 턴");
+    expect(await f.runner.compact({ ...f.member, sessionId: id, paneId: started.paneId }, "", f.opts)).toMatchObject({ ok: true });
+    await until("압축 끝", () => ofType(f.events, "compacted").length === 1);
+    expect(store.states.get("m_gem1")).toMatchObject({ phase: "succeeded", evidence: "hook" });
+  });
+
+  test("기록도 훅도 끝을 알리지 않으면 닫지 않고, 기한이 지나면 '결과 모름'(completion_timeout)이다", async () => {
+    const store = compactStore();
+    const f = await setup({}, { geminiCompact: "silent" }, { compactStore: store.port, compactTimeoutMs: 150 });
+    const started = await f.runner.start(f.member, f.opts);
+    const id = await turn(f, { ...f.member, paneId: started.paneId }, "한 턴");
+    expect(await f.runner.compact({ ...f.member, sessionId: id, paneId: started.paneId }, "", f.opts)).toMatchObject({ ok: true });
+    await until("결과 모름", () => store.states.get("m_gem1")?.phase === "uncertain");
+    expect(store.states.get("m_gem1")).toMatchObject({ reason: "completion_timeout" });
+    expect(ofType(f.events, "compacted")).toHaveLength(0);
+    expect(f.runner.isBusy("m_gem1")).toBe(true);
+  });
+});
+
+describe("턴 오류의 글: OSC 보고 글(풀어서) + 그 턴의 Stop 훅 오류 글", () => {
+  const network = "There was a network issue connecting to the server, please try again.";
+  const stopError = 'generating and executing: request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": unexpected EOF';
+  test("재시도를 다 쓰고 끝난 턴: 오류 글에 base64 를 푼 보고 글과 Stop 의 오류 글이 함께 실린다", async () => {
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const osc = Buffer.from(network).toString("base64");
+    expect(await f.runner.send({ ...f.member, paneId: started.paneId }, `일 @fake:error=x @fake:oscmsg=${osc} @fake:stoperror=${encodeURIComponent(stopError)}`, f.opts)).toMatchObject({ ok: true });
+    const ended = await until("오류 턴 끝", () => ofType(f.events, "turn_end")[0]);
+    expect(ended).toMatchObject({ isError: true, errorText: `${network} · ${stopError}` });
+  });
+
+  test("UNVERIFIED-INTERACTIVE 대비: OSC 는 끝남(done)으로 알렸는데 그 턴의 Stop 이 ERROR 면 오류로 끝난 턴이다", async () => {
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    expect(await f.runner.send({ ...f.member, paneId: started.paneId }, `일 @fake:stopfail=${encodeURIComponent("RESOURCE_EXHAUSTED: You have exhausted your quota on this model.")}`, f.opts)).toMatchObject({ ok: true });
+    const ended = await until("턴 끝", () => ofType(f.events, "turn_end")[0]);
+    expect(ended).toMatchObject({ isError: true, errorText: "RESOURCE_EXHAUSTED: You have exhausted your quota on this model." });
+  });
+
+  test("앞 턴의 Stop 이 늦게 덧붙었거나 서브에이전트(다른 대화)의 Stop 이 ERROR 여도, 이 턴의 Stop 으로 가른다", async () => {
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    const id = await turn(f, live, "첫 일");
+    // 앞 턴의 늦은 Stop(ERROR): 다음 턴의 모델 호출(PreInvocation) 앞에 놓인다.
+    putHookLine(f, { event: "Stop", conversationId: id, reason: "ERROR", fullyIdle: true, failed: true, error: "late error" });
+    // 이 턴 안에서 서브에이전트(다른 대화 id)가 ERROR 로 끝났다.
+    f.core.setOnTurn(() => { putHookLine(f, { event: "Stop", conversationId: "sub-agent-conv", reason: "ERROR", fullyIdle: false, failed: true, error: "RESOURCE_EXHAUSTED" }); return false; });
+    await turn(f, { ...live, sessionId: id }, "둘째 일");
+    expect(ofType(f.events, "turn_end").map(e => e.isError)).toEqual([false, false]);
   });
 });
 
 describe("문맥·서브에이전트·진전: 상태줄 기록에서", () => {
-  test("턴 끝의 문맥 % 는 agy 가 상태줄로 알려 준 값이다", async () => {
+  test("턴 끝의 문맥 크기는 대화 기록의 마지막 모델 호출 크기(input + cache_read)와 상태줄의 창 크기다(정확한 값, 토큰 수와 함께)", async () => {
     const f = await setup();
     const started = await f.runner.start(f.member, f.opts);
     const id = await turn(f, { ...f.member, paneId: started.paneId }, "문맥 재기 @fake:usage=50000 @fake:window=1000000");
     const usage = await until("문맥 사건", () => ofType(f.events, "context_usage").at(-1));
-    expect(usage).toMatchObject({ memberId: "m_gem1", sessionId: id, tokens: null, shownPct: 5, model: "fake-model", exact: { window: 1_000_000, source: "statusline", pct: 5 } });
+    expect(usage).toMatchObject({ memberId: "m_gem1", sessionId: id, tokens: 50_000, shownPct: null, model: "fake-model", exact: { window: 1_000_000, source: "statusline" } });
+    expect((usage.exact as { pct?: number }).pct).toBeUndefined();
     // 팀장에게 정한 모델이 있으면 그 이름으로 싣는다.
     const g = await setup({ model: "gemini-4-neon" });
     const lead = await g.runner.start(g.member, g.opts);
     await turn(g, { ...g.member, paneId: lead.paneId }, "문맥 @fake:usage=20000 @fake:window=200000");
-    expect(await until("문맥 사건", () => ofType(g.events, "context_usage").at(-1))).toMatchObject({ shownPct: 10, model: "gemini-4-neon" });
+    expect(await until("문맥 사건", () => ofType(g.events, "context_usage").at(-1))).toMatchObject({ tokens: 20_000, model: "gemini-4-neon" });
     expect(g.core.runs()[0]!.argv).toContain("gemini-4-neon");
+  });
+  test("대화 기록을 읽지 못하면 예전처럼 상태줄이 알려 준 % 다(토큰 수 없이)", async () => {
+    const f = await setup();
+    const elsewhere = join(f.home, "other-gemini-home");
+    mkdirSync(elsewhere, { recursive: true });
+    const runner = f.newRunner({}, { geminiHome: elsewhere });
+    const events: RunnerEvent[] = [];
+    runner.on(e => events.push(e));
+    const started = await runner.start(f.member, f.opts);
+    expect(await runner.send({ ...f.member, paneId: started.paneId }, "문맥 재기 @fake:usage=50000 @fake:window=1000000", f.opts)).toMatchObject({ ok: true });
+    const usage = await until("문맥 사건", () => ofType(events, "context_usage").at(-1));
+    expect(usage).toMatchObject({ tokens: null, shownPct: 5, exact: { window: 1_000_000, source: "statusline", pct: 5 } });
   });
   test("상태줄 명령이 없으면(contextHome 없음) id·문맥을 지어내지 않는다", async () => {
     const f = await setup();

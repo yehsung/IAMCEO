@@ -3,6 +3,7 @@ import { CLI_INFO, type ApiOutageState, type CliProvider, type Decision, type De
 import { ApiError, type Store } from "./store.ts";
 import { API_OUTAGE_NOTE, USAGE_WAIT_NOTE } from "./hold-codes.ts";
 import { textRef, type ServerTextRef } from "../shared/server-text.ts";
+import { GEMINI_PROBE_URL } from "./gemini-errors.ts";
 
 function usageLimitTitle(text: string): boolean {
   return /(?:you['’]ve hit your (?:weekly limit|5-hour limit|Opus limit|Sonnet limit|Fable limit|usage credit limit|monthly spend limit|team['’]s shared budget|channel['’]s monthly spend limit)\b|you['’]ve reached your .+?\blimit\b|you['’]re out of usage credits\b|your org is out of usage\b)/i.test(text);
@@ -208,6 +209,11 @@ export interface ApiRecoveryOptions {
   choices?: (cli: CliProvider, limited: { memberId: string; raw: string }[], blocked: string[]) => (DecisionOption & { model?: string })[];
   /** 이 팀장이 이 글로 한도에 걸렸을 때 막힌 모델 값들(쓰던 모델, 글에 이름이 나온 모델). 카드가 blockedModels 로 기억한다. */
   limitedModels?: (member: Member, raw: string) => string[];
+  /**
+   * 이 팀장의 한도가 그 모델(묶음)에만 걸린 것인가(다른 모델로 바꾸면 바로 이어 갈 수 있다). 카드가 모델 선택지를 낼지 정한다.
+   * 넣지 않으면 글로만 가른다(modelScopedLimit: Claude 의 모델 크레딧·모델 이름이 붙은 한도). Gemini 는 한도가 모델 묶음마다 따로라 총괄이 /usage 로 정한다.
+   */
+  modelScoped?: (cli: CliProvider, limited: { memberId: string; raw: string }) => boolean;
 }
 
 /** A single host-owned tick; all intent/attempt receipts are committed before external input. */
@@ -436,8 +442,12 @@ export class ApiRecovery {
     const first = deliveries.find(d => ids.includes(d.id));
     return first ? [first] : deliveries;
   }
-  usageFailure(member: Member, raw: string, menu: UsageMenu | null = null, errorKey?: string): void {
+  /**
+   * 사용 한도로 멈춘 팀장을 보류하고 카드에 올린다. hint.resetsAt: 화면·글 밖에서 안 초기화 시각(Gemini 상태줄의 한도 묶음). 메뉴의 시각 다음, 글 속 시각보다 먼저 쓴다.
+   */
+  usageFailure(member: Member, raw: string, menu: UsageMenu | null = null, errorKey?: string, hint: { resetsAt?: string | null } = {}): void {
     const store = this.options.store;
+    const hinted = hint.resetsAt && Number.isFinite(Date.parse(hint.resetsAt)) ? new Date(Date.parse(hint.resetsAt)).toISOString() : null;
     this.transaction(() => {
       this.state.limits = this.state.limits.filter(g => g.members.length > 0);
       let group = this.state.limits.find(g => g.cli === member.cli);
@@ -450,7 +460,7 @@ export class ApiRecovery {
       }
       let limited = group.members.find(m => m.memberId === member.id);
       if (!menu && errorKey && limited?.errorKey === errorKey) return;
-      if (!limited) { limited = { memberId: member.id, fingerprint: menu?.fingerprint ?? null, raw, resetsAt: menu?.resetsAt ?? parseUsageReset(raw, this.now()), resumeId: null, awaitingResult: false, autoAttempted: null, failure: null, limitedAt: new Date(this.now()).toISOString() }; group.members.push(limited); }
+      if (!limited) { limited = { memberId: member.id, fingerprint: menu?.fingerprint ?? null, raw, resetsAt: menu?.resetsAt ?? hinted ?? parseUsageReset(raw, this.now()), resumeId: null, awaitingResult: false, autoAttempted: null, failure: null, limitedAt: new Date(this.now()).toISOString() }; group.members.push(limited); }
       else {
         const before = limited.resetsAt;
         const again = limited.awaitingResult;
@@ -464,7 +474,7 @@ export class ApiRecovery {
         limited.raw = raw;
         // Relative reset text is parsed once per occurrence, never moved forward by polling.
         // A failed continuation is a new occurrence, so its text is read again.
-        limited.resetsAt = menu?.resetsAt ?? (again ? parseUsageReset(raw, this.now()) ?? limited.resetsAt : limited.resetsAt ?? parseUsageReset(raw, this.now()));
+        limited.resetsAt = menu?.resetsAt ?? hinted ?? (again ? parseUsageReset(raw, this.now()) ?? limited.resetsAt : limited.resetsAt ?? parseUsageReset(raw, this.now()));
         // 새 초기화 시각이 나왔으면 그 시각에 맞춰 처음부터 다시 센다.
         if (limited.resetsAt && limited.resetsAt !== before && Date.parse(limited.resetsAt) > this.now()) { limited.autoAttempts = 0; limited.autoNextAt = null; limited.relimits = 0; }
       }
@@ -484,6 +494,33 @@ export class ApiRecovery {
       if (this.started) this.start();
     });
   }
+  /**
+   * 한도로 멈춘 팀장의 초기화 시각을 뒤늦게 알았다(Gemini: /usage 의 그 팀장 모델 묶음). 앞으로의 시각이고 지금 아는 것과 다를 때만 바꾸고,
+   * 자동 이어가기 일정을 그 시각에 맞춰 처음부터 다시 센다(usageFailure 가 새 시각을 받을 때와 같다). 이어가기를 넣고 결과를 기다리는 중이면 건드리지 않는다.
+   * 바꿨으면 true.
+   */
+  noteUsageReset(memberId: string, resetsAt: string | null): boolean {
+    const at = resetsAt && Number.isFinite(Date.parse(resetsAt)) ? new Date(Date.parse(resetsAt)).toISOString() : null;
+    if (!at || Date.parse(at) <= this.now()) return false;
+    return this.transaction(() => {
+      let changed = false;
+      for (const group of this.state.limits) {
+        const mine = group.members.filter(m => m.memberId === memberId && !m.awaitingResult && m.resetsAt !== at);
+        if (!mine.length) continue;
+        for (const limited of mine) { limited.resetsAt = at; limited.autoAttempts = 0; limited.autoNextAt = null; limited.relimits = 0; }
+        // 시각을 알게 된 팀장의 글은 카드의 '근거 글'(시각을 모를 때만 싣는다)에서 뺀다.
+        if (group.rawEvidence) {
+          const kept = group.members.filter(m => !m.resetsAt).map(m => m.raw);
+          group.rawEvidence = group.rawEvidence.filter(raw => kept.includes(raw));
+          if (!group.rawEvidence.length) delete group.rawEvidence;
+        }
+        this.updateCard(group);
+        changed = true;
+      }
+      if (changed) this.save();
+      return changed;
+    });
+  }
   private updateCard(group: LimitGroup): void {
     const waiting = group.members.filter(m => !m.awaitingResult || !m.resumeId || this.options.store.getDelivery(m.resumeId)?.status !== "delivered");
     const times = waiting.map(m => m.resetsAt).filter((t): t is string => !!t).sort();
@@ -492,7 +529,7 @@ export class ApiRecovery {
     // 선택지: 한도에 걸리지 않은 모델마다 하나(먼저), 그다음 이어가기. 팀장이 빠지거나 모델 목록이 바뀌면 다시 계산한다(틱마다 이 함수가 돈다).
     // 모델에 한정된 한도가 하나도 없으면(5시간·주간·Codex 등 계정 전체의 한도) 모델을 바꿔도 곧바로 다시 걸리므로 모델 선택지를 내지 않는다.
     const models: (DecisionOption & { model?: string })[] = !waiting.length ? card.options.filter(o => o.k.startsWith(USAGE_MODEL_PREFIX))
-      : waiting.some(m => modelScopedLimit(m.raw)) ? this.options.choices?.(group.cli, waiting.map(m => ({ memberId: m.memberId, raw: m.raw })), group.blockedModels ?? []) ?? [] : [];
+      : waiting.some(m => this.options.modelScoped ? this.options.modelScoped(group.cli, { memberId: m.memberId, raw: m.raw }) : modelScopedLimit(m.raw)) ? this.options.choices?.(group.cli, waiting.map(m => ({ memberId: m.memberId, raw: m.raw })), group.blockedModels ?? []) ?? [] : [];
     const first = this.cardLead(group, waiting, resetsAt, models.length > 0);
     const names = waiting.map(m => `${this.options.store.getMember(m.memberId)?.name ?? m.memberId}${m.failure ? ` — ${m.failure}` : ""}`).join("\n");
     const raw = (group.rawEvidence ?? group.members.filter(m => !m.resetsAt).map(m => m.raw)).join("\n\n");
@@ -734,10 +771,9 @@ export class ApiRecovery {
       o.lastProbeAt = new Date(this.now()).toISOString();
       this.save();
       const configured = this.options.urls ?? process.env.IAMCEO_API_PROBE_URLS?.split(",").map(s => s.trim()).filter(Boolean);
-      // Gemini(Antigravity CLI) 팀장이 있어도 탐침 주소를 더하지 않는다: 그 CLI 가 닿는 주소를 확인한 적이 없어 지어내지 않는다.
-      // Gemini 쪽 서비스의 장애는 여기서 알 수 없다(모름). 그래서 Gemini 팀장의 턴 오류는 장애로 가르지 않고 일반 오류로 알린다
-      // (Orchestrator.turnErrorKind): 이 장애의 영향 목록에 들어오지 않고, 아래 주소의 답으로 Gemini 가 돌아왔다고 말하지도 않는다.
-      const urls = configured?.length ? configured : ["https://api.anthropic.com", ...(this.options.store.listAllMembers().some(m => m.cli === "codex") ? ["https://api.openai.com"] : [])];
+      // Gemini(Antigravity CLI) 팀장이 있으면 agy 가 모델·한도를 묻는 주소(daily-cloudcode-pa.googleapis.com, 실측 프록시 기록)도 본다. 어떤 HTTP 답이든 닿은 것이다.
+      const members = this.options.store.listAllMembers();
+      const urls = configured?.length ? configured : ["https://api.anthropic.com", ...(members.some(m => m.cli === "codex") ? ["https://api.openai.com"] : []), ...(members.some(m => m.cli === "gemini") ? [GEMINI_PROBE_URL] : [])];
       const revision = o.revision;
       const results = await Promise.all(urls.map(async url => {
         const controller = new AbortController();

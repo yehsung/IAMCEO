@@ -50,8 +50,6 @@ import UIKit
     }
 
     func testFeaturesThatDifferByCLI() {
-        // 압축: 서버가 Gemini 의 요청을 받지 않는다(스스로 압축한다).
-        XCTAssertEqual(RankSettingsCLI.allCases.map(\.compacts), [true, true, false])
         // 앱에서 로그인: Gemini 는 없다(사용 한도 카드의 '다른 계정으로 로그인' 단추가 이 값으로 갈린다).
         XCTAssertEqual(RankSettingsCLI.allCases.map(\.signsInFromApp), [true, true, false])
         XCTAssertNil(RankSettingsCLI(cli: "something_new")?.signsInFromApp, "모르는 CLI 에도 로그인 단추를 내지 않는다")

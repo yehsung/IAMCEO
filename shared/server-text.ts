@@ -159,6 +159,8 @@ export const SERVER_TEXTS = {
   "activity.compact_draft_left": { ko: "압축을 멈춘 뒤 입력칸에 글이 남아 있어 전달을 기다립니다. IAMCEO가 넣은 압축 명령이 되살아난 것이면 터미널에서 지워 주세요(대표가 쓴 글일 수 있어 IAMCEO는 지우지 않습니다)", en: "Text was left in the input box after the compaction was stopped, so deliveries wait. If it is the compaction command IAMCEO typed, clear it in the terminal (IAMCEO doesn't clear it because it may be yours)" },
   // 0.2.7 배포 전 재확인(real-cli-3 곁 문제): Claude 가 압축할 대화가 적어 압축 명령을 'Not enough messages to compact.' 로 끝냈다. 막힘이 아니다.
   "activity.compact_nothing": { ko: "압축하지 않았습니다: 압축할 대화가 아직 적다고 Claude가 답했습니다. 기다리던 전달을 이어 넣습니다", en: "Not compacted: Claude said there isn't enough conversation to compact yet. Waiting deliveries continue" },
+  // Gemini(Antigravity CLI): 서버가 넣은 자동 압축 뒤의 첫 측정도 기준 이상이면 그 세션에서는 자동 압축을 더 하지 않는다(일마다 되풀이 막기).
+  "activity.gemini_auto_compact_off": { ko: "자동 압축 뒤에도 문맥이 {pct}로 기준 이상이라 이 세션에서는 자동 압축을 더 하지 않습니다. 필요하면 팀 화면에서 직접 압축하세요", en: "Context is still {pct}, above the threshold, after automatic compaction, so automatic compaction is off for this session. Compact it yourself from Team if needed" },
   "activity.trust_auto": { ko: "프로젝트를 만들 때 대표가 이 폴더를 신뢰한다고 답해, 폴더 신뢰 확인 창에서 '{label}' 을 골랐습니다 · {cwd}", en: "You said you trust this folder when creating the project, so '{label}' was chosen at the folder trust prompt · {cwd}" },
   "activity.tidy": { ko: "판 정리: {text}", en: "Board tidy-up: {text}" },
   "activity.delivery_stalled": { ko: "전달이 진행되지 않고 있습니다. 다시 확인해 주세요", en: "Delivery is not moving. Please check it again" },

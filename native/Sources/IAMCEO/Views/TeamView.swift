@@ -513,8 +513,6 @@ struct MemberDetailView: View {
     private func compactBlock(_ m: Member) -> String? {
         if let reason = readOnlyReason { return reason }
         if m.origin == "manual" { return String(localized: "직접 띄운 세션은 원래 터미널에서 압축하세요.") }
-        // 서버가 이 CLI 의 압축 요청을 받지 않는다(Gemini). 눌러서 거절을 보게 하지 않고 까닭을 적어 잠근다.
-        if RankSettingsCLI(cli: m.cli)?.compacts == false { return GeminiText.compactsItself }
         if store.state?.project.runnerEnabled != true { return String(localized: "실행이 꺼져 있어 압축할 수 없습니다.") }
         if m.paneId == nil || ["asleep", "offline", "gone"].contains(m.status) { return String(localized: "열린 세션이 있어야 압축할 수 있습니다.") }
         if (m.backend ?? store.bootstrap?.settings.backend) == "core", m.contextState == nil || m.sessionId == nil {
@@ -537,8 +535,7 @@ struct MemberDetailView: View {
             TeamFactRow(label: String(localized: "문맥"), alignment: .center) {
                 Group {
                     if let pct {
-                        // IAMCEO 가 압축하지 않는 CLI(Gemini)에는 압축 기준을 표시하지 않는다.
-                        TeamContextBar(pct: pct, compactAt: RankSettingsCLI(cli: m.cli)?.compacts == false ? nil : compactAt)
+                        TeamContextBar(pct: pct, compactAt: compactAt)
                     } else {
                         Text("확인 중").foregroundStyle(CE.ink3)
                     }
@@ -567,8 +564,7 @@ struct MemberDetailView: View {
         var lines = [contextSource(m)]
         if let window = measurement?.window ?? m.contextWindow, window > 0 { lines.append(String(localized: "문맥 창 \(window.formatted()) 토큰")) }
         if let date = parseISODate(measurement?.measuredAt) { lines.append(String(localized: "측정 \(koDateTime(date))")) }
-        if RankSettingsCLI(cli: m.cli)?.compacts == false { lines.append(GeminiText.compactsItself) }
-        else { lines.append(String(localized: "압축 기준 \(compactAt)%")) }
+        lines.append(String(localized: "압축 기준 \(compactAt)%"))
         return lines.joined(separator: "\n")
     }
 
@@ -1688,12 +1684,11 @@ private struct TeamPushTitle: ViewModifier {
 /// Web .tm-ctx: 72×5 bar and the percentage; orange with a badge once the compact threshold is reached.
 private struct TeamContextBar: View {
     let pct: Double
-    /// nil: 압축 기준이 없는 세션(IAMCEO 가 압축하지 않는 CLI). 그때는 기준 도달 표시를 하지 않는다.
-    let compactAt: Int?
+    let compactAt: Int
 
     var body: some View {
         let value = Int(min(max(pct, 0), 100).rounded())
-        let due = compactAt.map { value >= $0 } ?? false
+        let due = value >= compactAt
         HStack(spacing: 8) {
             Capsule().fill(Color.white.opacity(0.12)).frame(width: 72, height: 5)
                 .overlay(alignment: .leading) {
@@ -2493,8 +2488,6 @@ enum GeminiText {
     static var firstUseDetail: String { String(localized: "처음 쓴다면 서버 컴퓨터의 터미널에서 agy를 한 번 실행해 로그인과 첫 설정을 끝내 주세요.") }
     /// 같은 안내를 한 줄 글로(팀장 실행 설정의 주석 줄).
     static var firstUse: String { "\(firstUseTitle). \(firstUseDetail)" }
-    /// 문맥 압축을 요청할 수 없는 까닭.
-    static var compactsItself: String { String(localized: "Antigravity CLI는 문맥을 스스로 압축합니다. 여기서 압축을 요청하지 않습니다.") }
     /// 서버가 Gemini 를 알고 Antigravity CLI 가 깔려 있다(Gemini 팀장을 바로 쓸 수 있다).
     @MainActor static func usable(in store: AppStore) -> Bool {
         store.offeredCLIs.contains(.gemini) && store.runtime?.providers["gemini"]?.installed == true

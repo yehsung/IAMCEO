@@ -62,13 +62,6 @@ enum RankSettingsCLI: String, CaseIterable {
         case .gemini: true
         }
     }
-    /// IAMCEO 가 문맥 압축을 요청할 수 있는가. Antigravity CLI 는 스스로 압축하고, 서버는 요청을 거절한다(unsupported).
-    var compacts: Bool {
-        switch self {
-        case .claude, .codex: true
-        case .gemini: false
-        }
-    }
     /// 같은 CLI 에서 모델·effort 만 바꾸면 같은 대화를 이어 연다고 안내하는가(팀장 실행 설정의 문구).
     /// Codex 는 예전부터 '새 세션'으로 안내한다. Gemini 는 서버가 `agy --conversation <id>` 로 같은 대화를 연다.
     var resumesOnConfigChange: Bool {

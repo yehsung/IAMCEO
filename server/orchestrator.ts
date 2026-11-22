@@ -2,7 +2,12 @@ import { configuredSecretRoots } from "./secret-paths.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { GeminiModelsRefresher, geminiModelsCachePath, ModelCatalogReader, type GeminiModelsRefresherOptions } from "./models.ts";
 import { CONTROL_UNKNOWN_NOTE, CORE_RECONNECT_HELD_NOTE, HOLD_NOTES, REOPEN_RETRY_NOTE, startingUnknownNote, stopCheckHeldNote } from "./hold-codes.ts";
-import { ApiRecovery, classifyTurnError, limitedModelName, LOGIN_RESUME_TEXT, modelCreditLimit, NoTerminalError, USAGE_ACCOUNT_RESUME_TEXT, USAGE_MODEL_PREFIX, usageModelResumeText, withRo, type ApiRecoveryOptions, type TurnErrorKind } from "./api-outage.ts";
+import { classifyGeminiTurnError, geminiTransientLimit } from "./gemini-errors.ts";
+import { GeminiQuotaReader, geminiExhaustedResetAt, geminiGroupAvailable, geminiGroupExhausted, geminiModelKey, geminiStatusExhausted, geminiStatusResetAt, geminiUsageGroup } from "./gemini-quota.ts";
+import { readGeminiStatus, type GeminiStatusRecord } from "./runner/gemini-status.ts";
+import { geminiTranscriptPath, geminiTranscriptRoot } from "./runner/gemini-transcript.ts";
+import { defaultGeminiHome } from "./config.ts";
+import { ApiRecovery, classifyTurnError, limitedModelName, LOGIN_RESUME_TEXT, modelCreditLimit, modelScopedLimit, NoTerminalError, USAGE_ACCOUNT_RESUME_TEXT, USAGE_MODEL_PREFIX, usageModelResumeText, withRo, type ApiRecoveryOptions, type TurnErrorKind } from "./api-outage.ts";
 import { DeliveryRecovery, type RecoveryRunner } from "./delivery-recovery.ts";
 import { verdictRejudged, type PumpVerdictCode } from "./pump-verdict.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
@@ -206,6 +211,11 @@ export interface OrchestratorDeps {
    * 운영 조립(createOrchestrator)만 만들고, 시험은 가짜 실행을 넣은 것을 넘긴다(실제 agy 를 띄우지 않는다).
    */
   geminiModels?: GeminiModelsRefresher | null;
+  /**
+   * Gemini 팀장이 사용 한도로 멈췄을 때 초기화 시각·한도 묶음을 읽는 `agy -p /usage --output-format json`(턴을 열지 않는다). 넣지 않으면 띄우지 않는다:
+   * 운영 조립(createOrchestrator)만 만들고, 시험은 가짜 실행을 넣은 것을 넘긴다. 없으면 상태줄 기록의 한도 묶음만 본다.
+   */
+  geminiQuota?: GeminiQuotaReader | null;
 }
 
 export interface NewMemberInput {
@@ -513,7 +523,7 @@ export function createOrchestrator(config: Config, store: Store, overrides: Asse
     // still be running; see Orchestrator.dispatchQuiescence for when it is over.
     quiescence: (memberId, dispatch) => orchestrator?.dispatchQuiescence(memberId, dispatch) ?? { originalWrite: dispatch.transportState === "rejected" ? "rejected" : dispatch.transportState === "accepted" ? "settled" : "unresolved", externalInput: null },
   }));
-  orchestrator = new Orchestrator({ providerHomes: { claudeHome: defaultClaudeHome(), codexHome: process.env.CODEX_HOME || join(homedir(), ".codex") }, notifier: macNotifier(), geminiModels: geminiModelsRefresher(config, store), ...overrides.orchestrator, config, store, runners, deliveryRecovery });
+  orchestrator = new Orchestrator({ providerHomes: { claudeHome: defaultClaudeHome(), codexHome: process.env.CODEX_HOME || join(homedir(), ".codex") }, notifier: macNotifier(), geminiModels: geminiModelsRefresher(config, store), geminiQuota: geminiQuotaReader(config), ...overrides.orchestrator, config, store, runners, deliveryRecovery });
   return orchestrator;
 }
 
@@ -534,6 +544,15 @@ export function geminiModelsRefresherOptions(config: Pick<Config, "home" | "gemi
 function geminiModelsRefresher(config: Pick<Config, "home" | "geminiBin">, store: Pick<Store, "geminiInUse">): GeminiModelsRefresher | null {
   if (process.env.IAMCEO_TEST === "1" || process.env.NODE_ENV === "test") return null;
   return new GeminiModelsRefresher(geminiModelsRefresherOptions(config, store));
+}
+
+/**
+ * Gemini 의 /usage 읽기. 운영에서만 만든다: 시험(IAMCEO_TEST=1, NODE_ENV=test)에서 이 Mac 에 깔린 실제 agy 를 띄우면 안 된다(모델 목록 갱신기와 같은 기준).
+ * Gemini 팀장이 사용 한도로 멈췄을 때만 띄운다(60초 안에는 다시 띄우지 않는다). 빈 폴더 <home>/run/gemini-usage 에서 띄운다.
+ */
+function geminiQuotaReader(config: Pick<Config, "home" | "geminiBin">): GeminiQuotaReader | null {
+  if (process.env.IAMCEO_TEST === "1" || process.env.NODE_ENV === "test") return null;
+  return new GeminiQuotaReader({ bin: config.geminiBin, cwd: join(config.home, "run", "gemini-usage") });
 }
 
 /** 인자로 넘기므로 글에 무엇이 있어도 AppleScript 로 해석되지 않는다. */
@@ -598,6 +617,8 @@ export class Orchestrator implements OrchestratorApi {
   private readonly models: ModelCatalogReader;
   /** Gemini 모델 목록 캐시의 뒤 갱신. 없으면 갱신하지 않는다(목록은 있는 캐시나 기본 목록). */
   private readonly geminiModels: GeminiModelsRefresher | null;
+  /** Gemini 의 /usage 읽기(한도로 멈췄을 때만 띄운다). 없으면 상태줄 기록만 본다. */
+  private readonly geminiQuota: GeminiQuotaReader | null;
   /** 판 정리·묵은 할 일 알림·직접 띄운 CLI 의 상태(board-hygiene.ts). */
   private readonly boardHygiene: BoardHygiene;
   /** 대표 쪽 업무 흐름: 메시지·결재 답·할 일, 받을 사람 없이 멈춘 대표의 글(flows/owner.ts). */
@@ -611,6 +632,7 @@ export class Orchestrator implements OrchestratorApi {
     // config.home 으로 Gemini 모델 캐시의 자리(<home>/cache/gemini-models.json)가 정해진다.
     this.models = new ModelCatalogReader(deps.config);
     this.geminiModels = deps.geminiModels ?? null;
+    this.geminiQuota = deps.geminiQuota ?? null;
     this.store = deps.store;
     this.providerHomes = deps.providerHomes;
     this.config = deps.config;
@@ -720,6 +742,7 @@ export class Orchestrator implements OrchestratorApi {
       },
       choices: (cli, limited, blocked) => this.usageModelChoices(cli, limited, blocked),
       limitedModels: (member, raw) => this.usageBlockedModels(member, raw),
+      modelScoped: (cli, limited) => cli === "gemini" ? this.geminiLimitScoped(limited.memberId) : modelScopedLimit(limited.raw),
     });
     this.serverUrl = deps.serverUrl ?? `http://127.0.0.1:${deps.config.port}`;
     const core = this.runners.get("core");
@@ -2174,6 +2197,7 @@ export class Orchestrator implements OrchestratorApi {
     if (this.tick) clearInterval(this.tick);
     if (this.healthTimer) clearInterval(this.healthTimer);
     this.geminiModels?.stop();
+    this.geminiQuota?.stop();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
     for (const memberId of [...this.blockedNoticeTimers.keys()]) this.cancelBlockedNotices(memberId);
@@ -2721,6 +2745,7 @@ export class Orchestrator implements OrchestratorApi {
    */
   private usageModelChoices(cli: CliProvider, limited: { memberId: string; raw: string }[], blocked: string[] = []): (DecisionOption & { model: string })[] {
     const catalog = this.models.read()[cli].models;
+    if (cli === "gemini") return this.geminiUsageChoices(limited, blocked);
     const scoped = limited.some(entry => modelCreditLimit(entry.raw) !== null || this.catalogValuesNamed(cli, limitedModelName(entry.raw)).length > 0);
     if (!scoped) return [];
     const excluded = new Set(blocked.map(model => model.toLowerCase()));
@@ -2735,7 +2760,85 @@ export class Orchestrator implements OrchestratorApi {
   /** 이 팀장이 이 글로 한도에 걸렸을 때 막힌 모델 값(소문자): 쓰던 모델(설정)과 글에 이름이 나온 모델. 카드가 blockedModels 로 기억한다. */
   private usageBlockedModels(member: Member, raw: string): string[] {
     const model = this.desiredConfig(member).model;
-    return [...new Set([...(model ? [model.toLowerCase()] : []), ...this.catalogValuesNamed(member.cli, limitedModelName(raw))])];
+    // Gemini: 한도는 모델 묶음마다다. 그 팀장 모델의 묶음이 바닥났으면 그 묶음의 모델이 모두 막힌다(/usage 를 읽었을 때).
+    const group = member.cli === "gemini" ? geminiUsageGroup(this.geminiQuota?.latest() ?? null, this.geminiModelNames(member)) : null;
+    const siblings = group && geminiGroupExhausted(group) ? this.geminiCatalogIn(group.models) : [];
+    return [...new Set([...(model ? [model.toLowerCase()] : []), ...this.catalogValuesNamed(member.cli, limitedModelName(raw)), ...siblings])];
+  }
+
+  /**
+   * Gemini 팀장의 모델을 한도 묶음과 견줄 이름들(앞의 것이 더 믿을 만하다): 정한 모델의 값과 목록의 표시 이름, 그다음 상태줄이 알린 지금 모델
+   * (id 꼴 `gemini-3.8-flash-low` 면 effort 를 떼고 목록의 표시 이름도). 모델을 정하지 않은 팀장(CLI 기본 모델)은 상태줄의 것뿐이다.
+   */
+  private geminiModelNames(member: Member): string[] {
+    const catalog = this.models.read().gemini.models;
+    const names: string[] = [];
+    const add = (value: string | null | undefined) => {
+      if (!value) return;
+      names.push(value);
+      const base = /^(.+)-(?:low|medium|high|xhigh|max)$/.exec(value)?.[1] ?? value;
+      const label = catalog.find(option => option.value === value || option.value === base)?.label;
+      if (label) names.push(label);
+    };
+    add(this.desiredConfig(member).model);
+    add(readGeminiStatus(this.config.home, member.id)?.model.id);
+    return names;
+  }
+
+  /** 묶음의 모델 표시 이름들에 맞는 Gemini 목록의 값(소문자). */
+  private geminiCatalogIn(models: string[]): string[] {
+    const keys = new Set(models.map(geminiModelKey));
+    return this.models.read().gemini.models.filter(option => keys.has(geminiModelKey(option.label)) || keys.has(geminiModelKey(option.value))).map(option => option.value.toLowerCase());
+  }
+
+  /**
+   * Gemini 팀장의 한도가 그 모델 묶음에만 걸린 것인가(카드의 모델 선택지를 낼지): 최근 /usage 에서 그 팀장 모델의 묶음이 바닥났고,
+   * 남은 묶음(모든 칸이 0 보다 큰 것)에 목록의 모델이 하나라도 있다. /usage 를 모르면 아니다(계정 전체 한도처럼 기다리기만 한다).
+   */
+  private geminiLimitScoped(memberId: string): boolean {
+    const usage = this.geminiQuota?.latest() ?? null;
+    const member = this.store.getMember(memberId);
+    if (!usage || !member) return false;
+    const mine = geminiUsageGroup(usage, this.geminiModelNames(member));
+    return !!mine && geminiGroupExhausted(mine) && usage.groups.some(group => group !== mine && geminiGroupAvailable(group) && this.geminiCatalogIn(group.models).length > 0);
+  }
+
+  /**
+   * Gemini 한도 카드의 모델 선택지: 최근 /usage 에서 남은 묶음(모든 칸이 0 보다 큰 것)에 든 목록의 모델 가운데 카드에서 막힌 모델을 뺀 것.
+   * 묶음을 모르는 모델은 내지 않는다(고른 뒤 곧바로 다시 걸릴 수 있다). /usage 를 모르면 [](이어가기만).
+   */
+  private geminiUsageChoices(limited: { memberId: string; raw: string }[], blocked: string[]): (DecisionOption & { model: string })[] {
+    const usage = this.geminiQuota?.latest() ?? null;
+    if (!usage) return [];
+    const excluded = new Set(blocked.map(model => model.toLowerCase()));
+    for (const entry of limited) {
+      const member = this.store.getMember(entry.memberId);
+      if (member) for (const model of this.usageBlockedModels(member, entry.raw)) excluded.add(model);
+    }
+    const open = new Set(usage.groups.filter(geminiGroupAvailable).flatMap(group => this.geminiCatalogIn(group.models)));
+    return this.models.read().gemini.models.filter(option => open.has(option.value.toLowerCase()) && !excluded.has(option.value.toLowerCase()))
+      .map(option => ({ k: `${USAGE_MODEL_PREFIX}${option.value}`, label: this.store.renderText(textRef("card.usage_limit.option_model", { model: option.label })), model: option.label }));
+  }
+
+  /**
+   * Gemini 팀장의 사용 한도. 보류부터 건다(전달이 곧바로 멈춘다). 초기화 시각은 차례로
+   * ① /usage(운영에서만, 뒤에서 읽는다): 그 팀장 모델의 묶음에서 다 쓴 칸의 가장 늦은 시각 → noteUsageReset 으로 넣는다.
+   * ② /usage 가 없거나 못 읽거나 묶음을 못 찾으면: 상태줄 기록의 다 쓴 칸 가운데 가장 늦은 시각(어느 묶음인지 몰라 늦게 풀리는 쪽).
+   * ③ 글 속 시각(parseUsageReset) → ④ 모름: 한 시간 뒤부터 간격을 벌려 다시 이어 본다(이르게 이어 가도 agy 는 할당량 오류를 곧바로 돌려준다).
+   * 크레딧 설정(useG1Credits·AI Credit Overages)은 건드리지 않는다: 켜 두었으면 agy 가 한도에서 멈추지 않고 크레딧으로 이어 간다(유료 선택은 대표 몫).
+   */
+  private geminiUsageFailure(member: Member, errorText: string, errorKey: string | undefined, status: GeminiStatusRecord | null): void {
+    this.apiRecovery.usageFailure(member, errorText, null, errorKey, { resetsAt: this.geminiQuota ? null : geminiStatusResetAt(status) });
+    const quota = this.geminiQuota;
+    if (!quota) return;
+    void quota.read().then(usage => {
+      if (this.closed) return;
+      const current = this.store.getMember(member.id);
+      if (!current || !this.apiRecovery.usageLimited(member.id)) return;
+      const group = geminiUsageGroup(usage, this.geminiModelNames(current));
+      const at = (group ? geminiExhaustedResetAt(group.buckets) : null) ?? geminiStatusResetAt(readGeminiStatus(this.config.home, member.id));
+      if (at) this.apiRecovery.noteUsageReset(member.id, at);
+    }).catch(error => console.warn("Gemini 사용 한도 초기화 시각을 읽지 못했습니다:", (error as Error).message));
   }
 
   /**
@@ -3508,8 +3611,7 @@ export class Orchestrator implements OrchestratorApi {
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 압축할 수 없습니다", "manual_session_unsupported");
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
-    // Gemini(Antigravity CLI)는 문맥을 스스로 압축한다. IAMCEO 가 넣을 압축 명령도, 압축이 끝났는지 볼 기록도 없어 깨끗이 거절한다.
-    if (member.cli === "gemini") throw new ApiError(400, `${josa(member.name, "은")} Gemini(Antigravity CLI) 팀원이라 압축할 수 없습니다. 이 CLI는 문맥을 스스로 정리합니다`, "compact_unsupported_gemini");
+    // Gemini(Antigravity CLI)도 Codex 처럼 맨 '/compact' 를 넣고, 끝은 그 대화 기록(transcript.jsonl)의 CHECKPOINT 줄로 본다(CoreRunner.compact).
     if (!project.runnerEnabled || ["asleep", "offline"].includes(member.status)) throw new ApiError(409, "깨어 있고 실행이 켜진 팀원만 압축할 수 있습니다", "compact_not_awake");
     if (!member.sessionId) throw new ApiError(this.backendOf(member) === "core" ? 409 : 400, "아직 native 세션을 확인하지 못했습니다", "session_id_unknown");
     const normalized = (focus ? normalizeSpace(focus) : "") || this.compactFocus(member);
@@ -3543,13 +3645,18 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /**
-   * 그 세션의 CLI 기록(JSONL). root 는 그 기록이 들어 있어야 하는 폴더다(Claude <home>/projects, Codex <home>/sessions).
-   * Gemini(Antigravity CLI)는 null 이다: 대화는 CLI 의 SQLite 파일에 있고 IAMCEO 는 읽지 않는다. 기록의 위치(offset)를 근거로 삼는
-   * 압축 경계·보관 대조는 Gemini 에 없다(부르는 쪽이 null 을 '근거 없음'으로 건너뛴다).
+   * 그 세션의 CLI 기록(JSONL). root 는 그 기록이 들어 있어야 하는 폴더다(Claude <home>/projects, Codex <home>/sessions, Gemini <home>/brain).
+   * Gemini(Antigravity CLI)는 대화마다 <gemini 홈>/brain/<대화 id>/.system_generated/logs/transcript.jsonl 이다(조사 parity/compact). 압축 경계·
+   * 쉬는 동안 스스로 한 압축의 근거로만 쓰고, 이어 열기 대조(보관)에는 쓰지 않는다(그쪽은 대화 파일이 있는지만 본다). 파일이 없으면 null.
    */
   private contextLog(member: Member): { path: string; home: string; root: string } | null {
-    if (!this.providerHomes || !member.sessionId) return null;
-    if (member.cli === "gemini") return null;
+    if (!member.sessionId) return null;
+    if (member.cli === "gemini") {
+      const home = this.config.geminiHome ?? defaultGeminiHome();
+      const path = geminiTranscriptPath(home, member.sessionId), root = geminiTranscriptRoot(home);
+      return path && existsSync(path) ? { path, home, root } : null;
+    }
+    if (!this.providerHomes) return null;
     const home = member.cli === "codex" ? this.providerHomes.codexHome : this.providerHomes.claudeHome;
     if (member.cli !== "codex") {
       const path = findSessionFile(home, member.cwd, member.sessionId);
@@ -4624,8 +4731,10 @@ export class Orchestrator implements OrchestratorApi {
       measurement.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration && measurement.turn !== null &&
       state?.baseline?.completedTurn === measurement.turn && state.baseline.autoTurn !== measurement.turn &&
       state.baseline.configRevision === this.store.memberRevisions(memberId).configRevision;
-    // Gemini(Antigravity CLI)는 스스로 압축한다. 서버의 자동 압축 대상에서 뺀다(넣을 압축 명령이 없다).
-    const autoCompact = member.cli !== "gemini" && hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt && !!exact && !lingering;
+    // Gemini(Antigravity CLI)도 같은 기준이다(정확한 측정 = 대화 기록의 마지막 모델 호출 크기 + 상태줄의 창 크기). 다만 자동 압축 뒤의 첫 측정도
+    // 기준 이상이면 그 세션 세대에서는 더 하지 않는다(geminiAutoOff, onContextUsage): 압축해도 줄지 않는 문맥에 일마다 압축을 되풀이하지 않게.
+    const geminiAutoOff = member.cli === "gemini" && state?.baseline?.geminiAutoOff === this.store.memberRevisions(memberId).sessionGeneration;
+    const autoCompact = !geminiAutoOff && hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt && !!exact && !lingering;
     if (autoCompact) this.queueCoreCompact(member, "auto", this.compactFocus(member));
     if ((rt.compactRequest !== null && !lingering) || autoCompact) {
       rt.pumpStage = "compact";
@@ -5560,8 +5669,10 @@ export class Orchestrator implements OrchestratorApi {
         // Gemini: 이어 띄운 뒤의 첫 턴이 같은 대화 id 로 끝났다. 그 대화가 이어 열린 것이다(새 대화였다면 첫 글을 받을 때 id 가 바뀌어 왔다).
         // 오류로 끝난 턴은 근거가 아니다(대화가 만들어지기 전에 끝났을 수 있다): 표식을 남겨 다음 턴에서 가린다.
         if (!e.isError) this.runtime(member.id).resumedConversation = null;
-        if (this.backendOf(member) === "core" && e.isError && /quota|rate.?limit|usage.?limit|authentication|unauthorized|한도|인증/i.test(e.errorText ?? "")) {
-          const reason = /auth|unauthorized|인증/i.test(e.errorText ?? "") ? "processing_auth" : "processing_quota";
+        // Gemini 는 agy 오류 글 규칙(classifyGeminiTurnError)의 갈래로 같은 울타리를 친다(Claude·Codex 는 예전 낱말 그대로).
+        const geminiKind = member.cli === "gemini" && e.isError ? classifyGeminiTurnError(e.errorText ?? "") : null;
+        if (this.backendOf(member) === "core" && e.isError && (member.cli === "gemini" ? geminiKind === "usage_limit" || geminiKind === "auth" : /quota|rate.?limit|usage.?limit|authentication|unauthorized|한도|인증/i.test(e.errorText ?? ""))) {
+          const reason = member.cli === "gemini" ? geminiKind === "auth" ? "processing_auth" : "processing_quota" : /auth|unauthorized|인증/i.test(e.errorText ?? "") ? "processing_auth" : "processing_quota";
           const due = new Date(Date.now() + this.timings.turnErrorRetryMs).toISOString();
           for (const run of pending) for (const id of run.deliveryIds) this.store.patchDeliveryRetry(id, { nextAttemptAt: due, retryScope: `member:${member.id}`, retryReason: reason });
         }
@@ -5896,18 +6007,22 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /**
-   * 턴 오류의 갈래(연결 문제·사용 한도·그 밖). 오류 글로 가르는 규칙(classifyTurnError)은 Claude·Codex 가 내는 문구로 만든 것이다.
-   * Gemini(Antigravity CLI)의 오류 문구는 아직 본 적이 없어 그 규칙을 대지 않는다: 늘 일반 오류다. 한도·장애의 보류와 이어가기 없이,
-   * CLI 가 알린 글 그대로 오류로 알린다(실행기도 Gemini 화면에는 문구 판정을 대지 않는다).
+   * 턴 오류의 갈래(연결 문제·사용 한도·인증·그 밖). Claude·Codex 는 그 CLI 들의 문구 규칙(classifyTurnError), Gemini(Antigravity CLI)는
+   * agy 의 오류 글 규칙(classifyGeminiTurnError: 실행기가 OSC 보고 글과 그 턴의 Stop 훅 오류 글을 합쳐 넘긴다)이다. 같은 글이면 늘 같은 답이다.
    */
   private turnErrorKind(member: Pick<Member, "cli">, errorText: string): TurnErrorKind {
-    return member.cli === "gemini" ? "error" : classifyTurnError(errorText);
+    return member.cli === "gemini" ? classifyGeminiTurnError(errorText) : classifyTurnError(errorText);
   }
 
   private async onTurnError(member: Member, errorText: string, errorKey?: string): Promise<void> {
-    const kind = this.turnErrorKind(member, errorText);
+    let kind = this.turnErrorKind(member, errorText);
+    // Gemini: 429·rate limit·RESOURCE_EXHAUSTED 만 말하는 글인데 상태줄 기록의 한도 묶음이 하나도 바닥나지 않았으면 잠깐의 용량 제한이다
+    // (agy 가 이미 4분까지 기다렸다): 한도 보류가 아니라 장애로 다룬다(탐침으로 돌아오면 이어 간다).
+    const status = member.cli === "gemini" ? readGeminiStatus(this.config.home, member.id) : null;
+    if (member.cli === "gemini" && kind === "usage_limit" && geminiTransientLimit(errorText) && geminiStatusExhausted(status) === false) kind = "network";
     if (kind === "network") { this.apiRecovery.networkFailure(member, true, errorKey); return; }
     this.apiRecovery.finishNetwork(member.id);
+    if (kind === "usage_limit" && member.cli === "gemini") { this.geminiUsageFailure(member, errorText, errorKey, status); return; }
     if (kind === "usage_limit") { this.apiRecovery.usageFailure(member, errorText, null, errorKey); return; }
     this.store.patchMember(member.id, { status: "error", lastError: errorText });
     this.systemMessage(member.projectId, textRef("chat.member_error", { name: member.name, error: errorText }));
@@ -5983,8 +6098,14 @@ export class Orchestrator implements OrchestratorApi {
       // Gemini 는 log 가 null 이다(contextLog). 기록 위치를 기준선으로 남기지 않고 문맥 % 만 적는다.
       const end = log ? eofLogBaseline(log.root, log.path) : null;
       const baseline = end?.fileIdentity && log ? { ...identity, path: log.path, fileIdentity: end.fileIdentity, offset: end.offset } : null;
+      // Gemini: 서버가 넣은 자동 압축이 끝난 뒤의 첫 측정이 여전히 기준 이상이면 이 세션 세대에서는 자동 압축을 더 하지 않는다(한 번만 본다).
+      const lastCompact = state.compaction;
+      const afterAuto = member.cli === "gemini" && lastCompact?.trigger === "auto" && lastCompact.phase === "succeeded" && state.baseline?.geminiAutoChecked !== lastCompact.id;
+      const autoOff = afterAuto && measured?.pct !== null && measured?.pct !== undefined && measured.pct >= settings.compactAtPct;
+      if (autoOff) this.store.appendActivity(member.id, "system", textRef("activity.gemini_auto_compact_off", { pct: `${Math.round(measured!.pct!)}%` }));
       this.store.saveContextState({ ...state, measurement, baseline: { ...state.baseline, configRevision: this.store.memberRevisions(member.id).configRevision,
-        measurementLog: baseline, ...(builtin ? { autoTurn: measurement.turn } : {}) } },
+        measurementLog: baseline, ...(builtin ? { autoTurn: measurement.turn } : {}),
+        ...(afterAuto ? { geminiAutoChecked: lastCompact!.id } : {}), ...(autoOff ? { geminiAutoOff: state.generation } : {}) } },
         { contextPct: measured?.pct ?? null, ...(measured?.learned !== null && measured?.learned !== undefined ? { contextWindow: measured.learned, contextWindowSource: measured.source } : {}) });
       return;
     }

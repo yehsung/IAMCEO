@@ -137,6 +137,12 @@ export interface FakeCoreOptions {
    * 기본(false)은 agentMode 그대로다: "auto"·"accept-edits"·"plan" 은 cycle_mode 에 싣고 ""(default) 는 뺀다.
    */
   geminiAutoUnavailable?: boolean;
+  /**
+   * 가짜 agy 가 맨 `/compact` 를 받았을 때 무엇을 하는가(실제 agy 1.5.14 헤드리스 실측의 모양):
+   * "checkpoint"(기본): 대화 기록에 USER_INPUT·SYSTEM_MESSAGE·CHECKPOINT 줄, 훅 PreInvocation(compact) → Stop(TERMINAL_CUSTOM_HOOK).
+   * "hook_only": 훅만 남고 기록에는 CHECKPOINT 가 없다(기록 모양이 바뀐 판). "silent": 아무것도 남기지 않는다(압축이 돌지 않았다).
+   */
+  geminiCompact?: "checkpoint" | "hook_only" | "silent";
 }
 interface Holder {
   terminal: CoreTerminal; run: FakeRun; history: string; screen: string | null; draft: string;
@@ -159,11 +165,16 @@ export async function startFakeCore(options: FakeCoreOptions) {
   const runs: FakeRun[] = [];
   const turns: FakeTurn[] = [];
   const keys: { terminal: string; keys: string[] }[] = [];
-  const state = { version: options.version ?? CORE_VERSION, directives: options.directives ?? "", script: options.script ?? [] as FakeScriptRule[], onTurn: options.onTurn ?? null, down: false };
+  const state = { version: options.version ?? CORE_VERSION, directives: options.directives ?? "", script: options.script ?? [] as FakeScriptRule[], onTurn: options.onTurn ?? null, down: false,
+    /** 가짜 agy 상태줄의 quota(묶음 id → { remaining_fraction, reset_time, reset_in_seconds }). setGeminiQuota 로 바꾼다. */
+    geminiQuota: null as Record<string, unknown> | null };
   let interceptor: ((call: FakeCoreCall) => FakeCoreReply) | null = null;
   const dropped = new Map<string | number, Socket>();
   let onKeys: ((terminal: CoreTerminal, pressed: string[]) => void) | null = null;
   let counter = 0, stopping = false;
+  const geminiSteps = new Map<string, number>();
+  /** @fake 지시 값의 %XX 를 푼다(공백이 든 오류 글을 넣을 때). */
+  const decode = (value: string | undefined): string | undefined => { if (value === undefined) return undefined; try { return decodeURIComponent(value); } catch { return value; } };
 
   const flagOf = (argv: string[], name: string) => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] ?? null : null; };
   const render = (holder: Holder) => holder.screen ?? (holder.run.cli === "gemini" ? geminiComposerScreen(holder.history, holder.draft) : composerScreen(holder.history, holder.draft));
@@ -184,7 +195,7 @@ export async function startFakeCore(options: FakeCoreOptions) {
     const agentMode = holder.run.settings?.agentMode;
     const cycleMode = typeof agentMode === "string" && agentMode && !(agentMode === "auto" && options.geminiAutoUnavailable) ? { cycle_mode: agentMode } : {};
     const sandbox = { sandbox: { enabled: holder.run.settings?.enableTerminalSandbox === true } };
-    const payload = { session_id: conversation, conversation_id: conversation, model: { id: "fake-model", display_name: "fake-model" }, agent_state: holder.turn ? "working" : "idle", ...cycleMode, ...sandbox, ...extra };
+    const payload = { session_id: conversation, conversation_id: conversation, model: { id: "fake-model", display_name: "fake-model" }, agent_state: holder.turn ? "working" : "idle", ...cycleMode, ...sandbox, ...(state.geminiQuota ? { quota: state.geminiQuota } : {}), ...extra };
     const launch = typeof statusLine.command === "string" ? geminiStatusLineLaunch(statusLine.command) : null;
     const tmp = `${path}.${crypto.randomUUID()}.tmp`;
     writeFileSync(tmp, JSON.stringify(geminiStatusFromPayload(member, payload, new Date(), launch)), { mode: 0o600 });
@@ -198,6 +209,19 @@ export async function startFakeCore(options: FakeCoreOptions) {
     const dir = geminiHookEventsDir(options.contextHome);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     appendFileSync(join(dir, `${member}.jsonl`), `${JSON.stringify({ v: 1, cli: "gemini", at: Date.now(), conversationId: holder.run.sessionId, ...entry })}\n`, { mode: 0o600 });
+  }
+  /**
+   * 가짜 agy 의 대화 기록: <geminiHome>/brain/<대화 id>/.system_generated/logs/transcript.jsonl 에 실제 agy 와 같은 모양의 줄을 덧붙인다
+   * (step_index·source·type·status·created_at, 모델 줄에는 model·input_tokens·cache_read_tokens·output_tokens).
+   */
+  function geminiTranscript(holder: Holder, entry: Record<string, unknown>) {
+    const session = holder.run.sessionId;
+    if (!options.geminiHome || !session || holder.run.cli !== "gemini") return;
+    const path = join(options.geminiHome, "brain", session, ".system_generated", "logs", "transcript.jsonl");
+    mkdirSync(dirname(path), { recursive: true });
+    const step = geminiSteps.get(session) ?? 0;
+    geminiSteps.set(session, step + 1);
+    appendFileSync(path, `${JSON.stringify({ step_index: step, status: "DONE", created_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"), ...entry })}\n`);
   }
   function record(holder: Holder, entry: Record<string, unknown>) {
     const session = holder.run.sessionId;
@@ -264,6 +288,18 @@ export async function startFakeCore(options: FakeCoreOptions) {
         geminiHook(holder, { event: "SessionStart" });
       }
       geminiStatus(holder);
+      geminiTranscript(holder, { source: "USER_EXPLICIT", type: "USER_INPUT", content: `<USER_REQUEST>\n${prompt}\n</USER_REQUEST>` });
+      // 맨 /compact: 실제 agy 처럼 압축만 하고 멈춘다(모델의 답·PostInvocation 없음). 훅은 PreInvocation(compact) 다음 Stop(TERMINAL_CUSTOM_HOOK).
+      if (prompt.trim() === "/compact") {
+        const mode = options.geminiCompact ?? "checkpoint";
+        if (mode === "silent") return;
+        geminiHook(holder, { event: "PreInvocation", invocation: 0, markers: [], chars: prompt.length, compact: true });
+        geminiTranscript(holder, { source: "SYSTEM", type: "SYSTEM_MESSAGE", content: "The following is a <SYSTEM_MESSAGE> not actually sent by the user." });
+        if (mode === "checkpoint") geminiTranscript(holder, { source: "SYSTEM", type: "CHECKPOINT", input_tokens: 3068, cache_read_tokens: 7755, output_tokens: 409, content: "# Resuming from a compaction\n\nYou are continuing work on the task described above." });
+        holder.history += `${holder.history ? "\n" : ""}> /compact\n`;
+        geminiHook(holder, { event: "Stop", reason: "TERMINAL_CUSTOM_HOOK", fullyIdle: true, failed: false });
+        return;
+      }
       // 모델을 부르기 직전의 훅: 마지막 사용자 글의 전달 표지만 남는다(서버의 기록 스크립트와 같은 규칙).
       geminiHook(holder, { event: "PreInvocation", invocation: 0, markers: [...new Set(prompt.match(/#iamceo_(?:b_[A-Za-z0-9_-]{22}|[A-Za-z0-9_-]{22})(?![A-Za-z0-9_-])/g) ?? [])], chars: prompt.length });
     }
@@ -308,13 +344,23 @@ export async function startFakeCore(options: FakeCoreOptions) {
         signal.addEventListener("abort", aborted, { once: true });
         holder.release = value => { signal.removeEventListener("abort", aborted); holder.release = null; resolve(value); };
       });
-      if (result.error) throw Object.assign(new Error(result.error), { fake: "error" });
+      if (result.error) {
+        if (gemini) geminiHook(holder, { event: "Stop", reason: "ERROR", fullyIdle: true, failed: true, error: result.error });
+        throw Object.assign(new Error(result.error), { fake: "error" });
+      }
     }
-    if (directives.has("error")) throw Object.assign(new Error(directives.get("error")), { fake: "error" });
+    if (directives.has("error")) {
+      // agy: 재시도를 다 쓰고 끝난 턴은 Stop(ERROR) 에 오류 글을 싣는다(stoperror 로 따로 줄 수 있다). OSC 보고 글은 oscmsg(없으면 error 글)다.
+      if (gemini) geminiHook(holder, { event: "Stop", reason: "ERROR", fullyIdle: true, failed: true, error: decode(directives.get("stoperror")) ?? directives.get("error") });
+      throw Object.assign(new Error(gemini && directives.has("oscmsg") ? decode(directives.get("oscmsg")) : directives.get("error")), { fake: "error" });
+    }
     if (gemini) {
-      // agy 는 턴이 끝나면 상태줄을 다시 그리고(문맥 % 가 실린다) 턴 끝 훅을 돌린다.
+      // agy 는 턴이 끝나면 상태줄을 다시 그리고(문맥 % 가 실린다) 턴 끝 훅을 돌린다. 모델의 답은 대화 기록에 프롬프트 크기와 함께 남는다.
+      geminiTranscript(holder, { source: "MODEL", type: "PLANNER_RESPONSE", model: "fake-model", input_tokens: 10, cache_read_tokens: Math.max(0, tokens - 10), output_tokens: 5, content: text });
       geminiStatus(holder, { agent_state: "idle", context_window: { used_percentage: Math.min(100, Math.round(tokens / window * 1000) / 10), context_window_size: window, total_input_tokens: tokens, total_output_tokens: 5 } });
-      geminiHook(holder, { event: "Stop", reason: "NO_TOOL_CALL", fullyIdle: true, failed: false });
+      // @fake:stopfail=<글>: OSC 는 끝남(done)으로 알리는데 Stop 은 ERROR 인 턴(대화형 화면에서 아직 못 본 모양).
+      const stopfail = directives.has("stopfail") ? decode(directives.get("stopfail")) ?? "" : null;
+      geminiHook(holder, { event: "Stop", reason: stopfail !== null ? "ERROR" : "NO_TOOL_CALL", fullyIdle: true, failed: !!stopfail, ...(stopfail ? { error: stopfail } : {}) });
       return;
     }
     // 실제 CLI 는 상태줄 명령으로 창 크기를 알린다. 턴 끝 직전에 같은 자리에 같은 모양으로 적는다.
@@ -483,6 +529,8 @@ export async function startFakeCore(options: FakeCoreOptions) {
      * (예: { subagents: [...] }, { conversation_id: "" }). 띄울 때 상태줄 명령을 받지 않은 터미널이면 아무것도 쓰지 않는다.
      */
     drawGeminiStatus(memberId: string, extra: Record<string, unknown> = {}) { geminiStatus(need(memberId), extra); },
+    /** 가짜 agy 상태줄의 quota 를 바꾼다(다음에 그릴 때부터). null 이면 quota 칸 없이 그린다. */
+    setGeminiQuota(quota: Record<string, unknown> | null) { state.geminiQuota = quota; },
     /** CLI 가 스스로 알리는 상태 보고를 바꾼다. null 은 보고가 사라진 것. 예: { state: "blocked", kind: "permission" } */
     setStatus(memberId: string, status: CoreTerminal["status"]) { need(memberId).terminal.status = status; },
     /** CLI 가 죽었다(터미널이 끝남). */
@@ -557,7 +605,7 @@ export interface CoreSetupOptions {
   notifier?: (title: string, body: string) => void;
   /** CoreRunner 의 간격·제한 시간. 기본은 빠른 시험용 값(pollMs 20 등)이다. */
   runnerDeps?: AssemblyOverrides["runnerDeps"];
-  fake?: Pick<FakeCoreOptions, "version" | "endState" | "startState" | "geminiStatus" | "geminiAutoUnavailable">;
+  fake?: Pick<FakeCoreOptions, "version" | "endState" | "startState" | "geminiStatus" | "geminiAutoUnavailable" | "geminiCompact">;
   /**
    * 옛 herdr 소켓 설정 자리. 주면 환경 변수(IAMCEO_HERDR_SOCKET)와 설정 파일(herdrSocket) 양쪽에 적는다.
    * 서버는 이 값을 읽지 않는다: 적혀 있어도 그 소켓을 열지 않는다는 것을 시험할 때 쓴다.

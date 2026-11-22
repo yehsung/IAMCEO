@@ -719,6 +719,19 @@ export const LIVE_INDEXES: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS operation_receipts_settled ON operation_receipts(updated_at) WHERE status != 'pending'`,
   `CREATE INDEX IF NOT EXISTS agent_operation_receipts_created ON agent_operation_receipts(created_at)`,
   `CREATE INDEX IF NOT EXISTS delivery_recovery_operations_created ON delivery_recovery_operations(created_at)`,
+  // 0.2.10: 쌓인 전달 이력 전체를 읽지 않고 살아 있는 것만 찾는다(docs/spec.md '전달 이력 읽기').
+  // 글 조립(정정된 보고의 supersededBy)과 30초 틱의 고아 보고 점검. 없으면 글 하나마다 그 프로젝트의 보고 출처를 다 훑었다.
+  `CREATE INDEX IF NOT EXISTS report_references_corrects ON report_references(corrects_message_id, sequence) WHERE corrects_message_id IS NOT NULL`,
+  // 전달 읽기 묶음·전달 알림: 아직 전달되지 않은 전달만.
+  `CREATE INDEX IF NOT EXISTS deliveries_open ON deliveries(project_id) WHERE status != 'delivered'`,
+  // 펌프 진입(fenced)·수신 확인: 쓰기 결과를 모르는 봉투만. 없으면 그 팀장의 봉투 이력 전체를 읽었다.
+  `CREATE INDEX IF NOT EXISTS delivery_dispatches_physical ON delivery_dispatches(member_id, created_at) WHERE transport_state IN ('prepared','write_started','unknown')`,
+  // 처리된 결재를 최근 순으로(상태 묶음·결재됨 목록·인용 대조). 없으면 그 프로젝트의 처리된 결재 전부를 정렬했다.
+  `CREATE INDEX IF NOT EXISTS decisions_done_order ON decisions(project_id, COALESCE(answered_at, created_at)) WHERE status != 'open'`,
+  // 홈 요약의 대표 판단 수: 실패한 대표 글만(최근 순 정렬까지 이 색인으로).
+  `CREATE INDEX IF NOT EXISTS messages_owner_failed ON messages(project_id, at, id) WHERE mine = 1 AND delivery = 'failed'`,
+  // 30초 틱의 고아 대표 글 점검(listMessagesMissingDeliveries): 아직 나가지 않은 대표 글만. 없으면 프로젝트의 대화 전체를 훑었다.
+  `CREATE INDEX IF NOT EXISTS messages_owner_pending ON messages(project_id, at, id) WHERE mine = 1 AND delivery IN ('queued','held')`,
 ];
 
 /** 색인이 하나 실패해도(디스크 부족 등) 서버는 뜬다. 색인은 빠르게 할 뿐 결과를 바꾸지 않는다. */

@@ -11,6 +11,7 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 - **백업이 디스크를 채우지 않습니다.** 매일 백업이 첨부 전체(지금 약 2 GB)를 새로 복사해 백업 폴더가 19 GB까지 커졌고, 이대로면 몇 주 안에 디스크가 찰 참이었습니다. 이제 Mac 디스크(APFS)에서는 첨부를 복제(clone)로 담아 첨부 때문에 공간이 늘지 않습니다(첨부 1 GB 홈의 백업 하나가 1,001 MB → 1 MB). 백업 폴더에 쌓이던 배포 직전 DB 사본(`pre-*`)과 설치 전 앱(`app-pre-*`)은 종류마다 최근 3개만, 이주 전 DB 사본(`iamceo.db.pre-v*.bak`)도 최근 3개만 남깁니다(하루가 안 된 것은 지우지 않습니다).
 - **백업과 정리 중에 서버가 멈추지 않습니다.** 매일 백업의 DB 검사가 서버를 1.3초까지 멈추던 것을 따로 돌려 0.05초 아래로 줄였고, 배포 뒤 다시 뜰 때마다 보관한 백업을 처음부터 다시 읽던 것(지금 약 17 GB)을 그만둡니다. 보관한 큰 프로젝트를 지울 때 서버가 6초 멈추던 것은 1초 남짓으로 줄었습니다(같은 첨부만 지웁니다).
+- **오래 쓸수록 서버가 느려지던 전달 기록 읽기를 고쳤습니다.** 프로젝트를 열거나 대화를 넘기거나 팀장에게 글을 넣을 때마다 서버가 지금까지 쌓인 전달 기록 전체를 읽었고, 30초마다 도는 점검은 총괄 자신의 보고까지 모두 다시 맞춰 봤습니다. 이제 아직 끝나지 않은 전달과 지금 보여 줄 글에 딸린 기록만 읽습니다. 지금 기록으로도 앱이 받는 상태 묶음 만들기가 5배 넘게, 대화 한 쪽이 6배쯤 빨라지고, 기록이 50배로 쌓여도(약 3년치) 대화 한 쪽은 0.6초 → 0.01초, 상태 묶음은 3.6초 → 0.2초, 30초 점검은 거의 0입니다. 앱 화면과 주고받는 내용은 그대로이고, 새 서버가 처음 뜰 때 색인을 한 번 만듭니다(지금 기록으로 0.2초쯤).
 
 ### 0.2.9 — 2026-11-20
 
@@ -187,6 +188,7 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 
 - **Backups no longer fill the disk.** Each daily backup copied every attachment again (about 2 GB now), the backup folder had reached 19 GB, and at this rate the disk would have filled within weeks. On a Mac disk (APFS) attachments are now cloned into the backup and take no extra space (one backup of a home with 1 GB of attachments: 1,001 MB → 1 MB). Database copies made before a deploy (`pre-*`) and apps moved aside before an install (`app-pre-*`) in the backup folder are trimmed to the newest 3 of each kind, and so are pre-migration database copies (`iamceo.db.pre-v*.bak`); nothing less than a day old is removed.
 - **The server no longer stalls during backups and cleanup.** The daily backup's database checks, which stalled the server for up to 1.3 seconds, now run apart from it (under 0.05 seconds), and a restart after a deploy no longer re-reads every kept backup from the start (about 17 GB today). Deleting a large archived project stalled the server for 6 seconds; it now takes about one second and removes exactly the same attachments.
+- **The server no longer slows down as delivery history piles up.** Opening a project, paging the chat or handing text to a staff member used to read every delivery record ever kept, and the 30-second check re-matched even the lead's own reports. Now only unfinished deliveries and the records of the messages being shown are read. With today's records the state bundle the apps fetch builds over 5x faster and a chat page about 6x faster; with 50x the records (about three years) a chat page goes from 0.6 s to 0.01 s, the state bundle from 3.6 s to 0.2 s, and the 30-second check to nearly nothing. What the apps see is unchanged; the new server builds its indexes once on first start (about 0.2 s with today's records).
 
 ### 0.2.9 — 2026-11-20
 

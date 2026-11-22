@@ -163,8 +163,9 @@ test("첨부 참조 검사는 프로젝트마다 읽기 스냅샷을 한 번만 
   const projects = f.store.listProjects({ includeArchived: true }).length;
   const scan = f.measure(() => references.isReferenced(orphan));
   expect(scan.result).toBe(false);
-  // 200개씩 세 쪽을 넘겨도 프로젝트의 전달 전체는 한 번만 읽는다.
-  expect(scan.sql.filter(text => text === "SELECT * FROM deliveries WHERE project_id = ? ORDER BY rowid")).toHaveLength(projects);
+  // 200개씩 세 쪽을 넘겨도 프로젝트의 살아 있는 전달은 한 번만 읽고(0.2.10), 전달 이력 전체는 읽지 않는다.
+  expect(scan.sql.filter(text => text.startsWith("SELECT * FROM deliveries WHERE rowid IN ("))).toHaveLength(projects);
+  expect(scan.sql.filter(text => text === "SELECT * FROM deliveries WHERE project_id = ? ORDER BY rowid")).toHaveLength(0);
   expect(scan.sql.filter(text => text.includes("FROM messages WHERE project_id = $project")).length).toBeGreaterThanOrEqual(3);
   expect(scan.sql.some(text => text === "SELECT * FROM delivery_recovery WHERE delivery_id = ?")).toBe(false);
   expect(references.isReferenced(kept)).toBe(true);

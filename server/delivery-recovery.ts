@@ -13,6 +13,7 @@ export type DeliveryRecoveryStore = Pick<Store,
   "listDeliveries" | "requireDelivery" | "getDelivery" | "enqueue" | "getDeliveryRecovery" | "updateDeliveryRecovery" | "listDeliveryRecoveries" |
   "withDeliveryRead" | "deliveryNoticePreviews" | "listUnlinkedFailedMessages" | "listDeliveryRecoveryCandidates" | "hasDeliveryAttention" |
   "getDeliveryRetry" | "patchDeliveryRetry" | "saveDispatch" | "getDispatch" | "listDispatches" | "latestDispatchFor" | "updateDispatch" | "inputState" |
+  "listLiveDeliveries" | "listDeliveriesByRef" | "hasLaterSameSource" | "listFenceCandidates" | "listPhysicalDispatches" | "listDispatchesFor" | "listDispatchesTouching" | "lastDispatch" |
   "deliveryRecoveryOperation" | "markDelivered" | "markHeld" | "markFailed" | "setDeliveryStatus" | "setMessageDelivery" |
   "listMissingReportNotices" | "deliveryWait" | "detectDeliveryStalls" | "deliveryStalled" | "recheckPendingDelivery" | "getMessage" | "requireMessage" | "listMessagePage" | "getDecision" | "setDecisionStatus" | "reopenDecision" | "getTodo" | "todoRevision" | "appendActivity">;
 
@@ -154,14 +155,16 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     return expected != null && expected === this.sourceRevision(delivery);
   }
 
-  /** Also used by ordinary and urgent admission. stopped releases only the logical fence. */
+  /**
+   * Also used by ordinary and urgent admission. stopped releases only the logical fence.
+   * 0.2.10: 펌프 진입마다 부른다. 프로젝트 전달 이력 전체 대신 울타리가 될 수 있는 이 팀장의 전달(listFenceCandidates)만 본다. 판정은 같다.
+   */
   fenced(memberId: string): boolean {
     this.settleProvenDispatches(memberId);
-    return this.store.withDeliveryRead(this.store.requireMember(memberId).projectId, () => {
-      const state = this.store.inputState(memberId);
-      return !!state.lease || this.mutations.has(memberId) || state.unresolvedDispatches.some(d => ["prepared", "write_started", "unknown"].includes(d.transportState)) ||
-        this.store.listDeliveries(this.store.requireMember(memberId).projectId).some(d => d.memberId === memberId && this.logicalFence(d));
-    });
+    this.store.requireMember(memberId);
+    const state = this.store.inputState(memberId);
+    return !!state.lease || this.mutations.has(memberId) || state.unresolvedDispatches.some(d => ["prepared", "write_started", "unknown"].includes(d.transportState)) ||
+      this.store.listFenceCandidates(memberId).some(d => this.logicalFence(d));
   }
   private logicalFence(d: Delivery): boolean {
     const r = this.record(d.id);
@@ -197,7 +200,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     const markers = deliveries.map(d => ({ deliveryId: d.id, marker: this.record(d.id).marker ?? `#iamceo_${randomBytes(16).toString("base64url")}` }));
     const bundleMarker = `#iamceo_b_${randomBytes(16).toString("base64url")}`;
     const wireText = deliveries.map((d, index) => `${d.text}\n${markers[index].marker}`).join("\n\n") + `\n${bundleMarker}`;
-    const createdAt = this.iso(Math.max(this.now(), Date.parse(this.store.listDispatches(member.id).at(-1)?.createdAt ?? this.iso())));
+    const createdAt = this.iso(Math.max(this.now(), Date.parse(this.store.lastDispatch(member.id)?.createdAt ?? this.iso())));
     const dispatch: DeliveryDispatch = { dispatchId: randomUUID(), memberId: first.memberId, projectId: first.projectId,
       cli: member.cli, backend: member.backend ?? "core", identity, baseline, markers, bundleMarker, wireText,
       wireSha256: createHash("sha256").update(wireText).digest("hex"), items: deliveries.map((d, ordinal) => ({ deliveryId: d.id, ordinal, sourceRevision: this.sourceRevision(d) })),
@@ -210,7 +213,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
 
   private rejectedCount(d: Delivery): number {
     let count = 0;
-    for (const dispatch of this.store.listDispatches(d.memberId).filter(x => x.items.some(i => i.deliveryId === d.id)).reverse()) {
+    for (const dispatch of this.store.listDispatchesFor(d.memberId, d.id).reverse()) {
       if (dispatch.transportState !== "rejected") break;
       count++;
     }
@@ -252,8 +255,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     this.store.setDeliveryStatus(d.id, status, { holdReason: status === "held" ? "delivery_unknown" : undefined, lastError: status === "failed" ? message : undefined });
     // A newer attempt for the same source must not be overwritten by an old result.
     const dispatch = this.latest(d);
-    const deliveries = this.store.listDeliveries(d.projectId);
-    if (d.refType === "message" && d.refId && this.store.getMessage(d.refId) && (!dispatch || this.sourceValid(dispatch, d)) && !deliveries.slice(deliveries.findIndex(item => item.id === d.id) + 1).some(other => other.refType === d.refType && other.refId === d.refId && other.memberId === d.memberId)) {
+    // 0.2.10: 같은 글의 전달만 읽는다(예전에는 프로젝트 전달 이력 전체에서 이 전달 뒤의 것을 찾았다).
+    const deliveries = d.refType === "message" && d.refId ? this.store.listDeliveriesByRef(d.refType, d.refId, d.projectId) : [];
+    if (d.refType === "message" && d.refId && this.store.getMessage(d.refId) && (!dispatch || this.sourceValid(dispatch, d)) && !deliveries.slice(deliveries.findIndex(item => item.id === d.id) + 1).some(other => other.memberId === d.memberId)) {
       this.store.setMessageDelivery(d.refId, status, message);
     }
   }
@@ -334,7 +338,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     // Even an older attempt of the same delivery can still perform physical input.
     if (this.store.inputState(memberId).unresolvedDispatches.some(other => other.dispatchId !== dispatch.dispatchId && ["prepared", "write_started", "unknown"].includes(other.transportState))) return null;
     // Multiple unknown envelopes must never be bypassed by a repair of one envelope.
-    if (this.store.listDeliveries(member.projectId).some(d => d.memberId === memberId && !dispatch.items.some(item => item.deliveryId === d.id) && this.logicalFence(d))) return null;
+    if (this.store.listFenceCandidates(memberId).some(d => !dispatch.items.some(item => item.deliveryId === d.id) && this.logicalFence(d))) return null;
     return dispatch;
   }
 
@@ -381,7 +385,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     if (d.kind !== "answer" || d.refType !== "decision" || !d.refId) return;
     const decision = this.store.getDecision(d.refId);
     if (!decision || decision.status !== "answered" || decision.projectId !== d.projectId) return;
-    const later = this.store.listDeliveries(d.projectId).filter(other => other.refType === "decision" && other.refId === decision.id && other.kind === "answer" && other.id !== d.id && ["queued", "held", "delivering", "delivered"].includes(other.status));
+    const later = this.store.listDeliveriesByRef("decision", decision.id, d.projectId).filter(other => other.kind === "answer" && other.id !== d.id && ["queued", "held", "delivering", "delivered"].includes(other.status));
     if (later.length) return;
     const asker = this.store.getMember(d.memberId);
     this.store.reopenDecision(decision.id, textRef("card.reopen_stopped", { name: asker?.name ?? decision.who }));
@@ -405,8 +409,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       const r = this.record(d.id);
       if (r.phase === "needs_owner" && r.reason === "stale_instruction") continue;
       if (!["none", "resolved", "stopped"].includes(r.phase) && this.requeueRejected(d.id)) continue;
-      if (!dispatches.has(d.memberId)) dispatches.set(d.memberId, this.store.listDispatches(d.memberId));
-      const physical = dispatches.get(d.memberId)!.some(item => item.items.some(item => item.deliveryId === d.id) && ["prepared", "write_started", "unknown"].includes(item.transportState));
+      // 0.2.10: 쓰기 결과를 모르는 봉투만 읽는다(예전에는 팀장마다 봉투 이력 전체를 읽고 같은 상태로 걸렀다).
+      if (!dispatches.has(d.memberId)) dispatches.set(d.memberId, this.store.listPhysicalDispatches(d.memberId));
+      const physical = dispatches.get(d.memberId)!.some(item => item.items.some(item => item.deliveryId === d.id));
       if (!physical && (["resolved", "stopped"].includes(r.phase) || d.status === "delivered" && r.reason !== "duplicate_draft" || r.phase === "none" && !["failed", "delivering"].includes(d.status) && !(d.status === "held" && d.holdReason === "delivery_unknown"))) continue;
       if (this.store.requireProject(d.projectId).archived || this.store.requireMember(d.memberId).origin === "manual") continue;
       if (physical && ["resolved", "stopped"].includes(r.phase) && r.lastCheckedAt && Date.parse(r.lastCheckedAt) + 60_000 > this.now()) continue;
@@ -431,19 +436,29 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     const latest = new Set(deliveries.map(d => this.latest(d)?.dispatchId));
     // 조작권은 기다림(await) 사이에만 바뀔 수 있다. 예전에는 봉투마다 조작권을 다시 읽었고, 그 읽기가 봉투 이력 전체를 거르는
     // inputState 라 바쁜 총괄(봉투 560개)에서 이 반복 하나가 3초 넘게 이벤트 루프를 막았다(11-16 D4-5). 기다린 뒤에만 다시 읽는다(판정은 같다).
-    let leaseChecked = false;
-    for (const dispatch of this.store.listDispatches(deliveries[0].memberId)) {
+    // 0.2.10: 그 팀장의 봉투 이력 전체가 아니라 쓰기 결과를 모르는 봉투만 돈다(나머지는 아래에서 언제나 건너뛰던 봉투다).
+    // 조작권·닫힘을 확인하는 때도 예전과 같다: 첫 봉투 앞(봉투가 하나라도 있으면), 그리고 기다림(await) 뒤의 다음 봉투 앞(그 뒤에 봉투가 남아 있으면).
+    // 그 사이에는 기다림이 없어 조작권이 바뀌지 않으므로, 건너뛰던 봉투 앞에서 보던 것을 다음으로 도는 봉투 앞에서, 그런 봉투가 없으면 반복 뒤에서 본다
+    // (돈 봉투가 없거나 마지막으로 기다린 봉투가 마지막 봉투가 아니면 그 뒤에 건너뛰던 봉투가 있었다).
+    const memberId = deliveries[0].memberId;
+    const last = this.store.lastDispatch(memberId)?.dispatchId ?? null;
+    let leaseChecked = false, waitedOn: string | null = null;
+    for (const dispatch of this.store.listPhysicalDispatches(memberId)) {
       if (this.closed) return;
       if (!leaseChecked) { if (this.store.inputState(dispatch.memberId).lease) return; leaseChecked = true; }
-      if (latest.has(dispatch.dispatchId) || !["prepared", "write_started", "unknown"].includes(dispatch.transportState)) continue;
+      if (latest.has(dispatch.dispatchId)) continue;
       const member = this.store.requireMember(dispatch.memberId);
       const runner = this.options.runner(member);
       if (!runner?.inspectDelivery || !this.validDispatch(dispatch) || member.sessionId !== dispatch.identity.sessionId || this.store.memberRevisions(member.id).sessionGeneration !== dispatch.identity.sessionGeneration) continue;
       let inspection: DeliveryInspection;
-      leaseChecked = false;
+      leaseChecked = false; waitedOn = dispatch.dispatchId;
       try { inspection = await runner.inspectDelivery(this.member(member), dispatch); }
       catch { continue; } // Failed reads leave the original physical fence intact.
       if (!this.closed && !this.store.inputState(member.id).lease && !this.store.requireProject(member.projectId).archived) this.settlePhysical(dispatch, inspection);
+    }
+    if (!leaseChecked && waitedOn !== last) {
+      if (this.closed) return;
+      if (this.store.inputState(memberId).lease) return;
     }
     for (const d of deliveries) {
       if (this.closed) return;
@@ -493,8 +508,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
    * provider-log receipt settles it; anything less stays unresolved.
    */
   private settleProvenDispatches(memberId: string): void {
-    for (const dispatch of this.store.listDispatches(memberId)) {
-      if (!["prepared", "write_started", "unknown"].includes(dispatch.transportState) || !dispatch.items.length) continue;
+    // 0.2.10: 쓰기 결과를 모르는 봉투만 읽는다(펌프 진입마다 그 팀장의 봉투 이력 전체를 읽었다). 고르는 봉투와 차례는 같다.
+    for (const dispatch of this.store.listPhysicalDispatches(memberId)) {
+      if (!dispatch.items.length) continue;
       const proven = dispatch.items.every(item => {
         const d = this.store.getDelivery(item.deliveryId), r = this.store.getDeliveryRecovery(item.deliveryId);
         return d?.status === "delivered" && r?.phase === "resolved" && r.evidence.some(e => e.location === "received_input" && e.verdict === "present" && e.source !== "transport");
@@ -603,7 +619,9 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     if (!member || member.status === "asleep" || !runner?.terminalGone || !runner.inspectGoneDelivery) return [];
     const generation = this.store.memberRevisions(memberId).sessionGeneration;
     const terminals = new Set<string>();
-    for (const dispatch of this.store.listDispatches(memberId)) {
+    // 0.2.10: 봉투 이력 전체 대신 쓰기 결과를 모르는 봉투와 울타리가 될 수 있는 전달을 담은 봉투만 본다. 빠진 봉투는 쓰기가 끝났고 항목이 모두
+    // 울타리가 아니어서 openItems 가 언제나 비던 것이다(아래 조건에서 빠졌다). 터미널이 처음 나오는 차례(만든 순서)도 같다.
+    for (const dispatch of this.store.listDispatchesTouching(memberId, this.store.listFenceCandidates(memberId).map(d => d.id))) {
       const terminal = dispatch.identity.terminalId;
       if (!terminal || terminal === member.paneId || dispatch.identity.sessionGeneration !== generation || dispatch.transportState === "rejected") continue;
       if (PHYSICAL.includes(dispatch.transportState) || this.openItems(dispatch).length) terminals.add(terminal);
@@ -770,7 +788,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
     return this.store.transaction(() => {
       const m = this.store.requireMessage(messageId);
       this.activeProject(m.projectId);
-      const existing = this.store.listDeliveries(m.projectId).filter(d => d.refType === "message" && d.refId === m.id).at(-1);
+      const existing = this.store.listDeliveriesByRef("message", m.id, m.projectId).at(-1);
       if (existing) return existing;
       const member = m.targetMemberId && this.store.getMember(m.targetMemberId);
       if (!m.mine || m.delivery !== "failed" || !member || member.projectId !== m.projectId) throw new ApiError(409, "옛 메시지의 수신자를 확정할 수 없습니다", "legacy_message_recipient_unknown");
@@ -789,7 +807,7 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
       if (this.store.requireProject(m.projectId).archived) throw new ApiError(409, "보관 중인 프로젝트의 메시지는 정리할 수 없습니다", "message_cleanup_archived");
       return this.store.unassignedMessageOperation<UnassignedRecoveryResult>(messageId, request.operationId, request, request.action, () => {
         if (this.closed || request.expectedVersion !== 0 || !m.mine || m.delivery !== "failed" ||
-          this.store.listDeliveries(m.projectId).some(d => d.refType === "message" && d.refId === m.id)) throw new ApiError(409, "메시지 상태가 바뀌었습니다. 다시 확인해 주세요", "message_state_changed");
+          this.store.listDeliveriesByRef("message", m.id, m.projectId).length > 0) throw new ApiError(409, "메시지 상태가 바뀌었습니다. 다시 확인해 주세요", "message_state_changed");
         const target = m.targetMemberId && this.store.getMember(m.targetMemberId);
         if (request.action === "dismiss") {
           this.store.setMessageDelivery(m.id, "dismissed");
@@ -827,16 +845,16 @@ export class DeliveryRecovery implements DeliveryRecoveryService {
   private items(projectId: string, includePreviews = true): DeliveryNoticeItem[] {
     return this.store.withDeliveryRead(projectId, () => this.readItems(projectId, includePreviews));
   }
+  /**
+   * 0.2.10: 알림이 될 수 있는 살아 있는 전달(Store.listLiveDeliveries)만 돈다. 전달되고 확인이 끝난 이력은 item() 이 언제나 null 이라 읽지 않는다.
+   * 같은 팀장·같은 원문·같은 판을 뒤에 다시 보낸 것이 있는 실패는 숨긴다(예전에는 이력 전체에서 키마다 마지막 전달을 골랐다. hasLaterSameSource 가 같은 답).
+   */
   private readItems(projectId: string, includePreviews: boolean): DeliveryNoticeItem[] {
-    const deliveries = this.store.listDeliveries(projectId);
-    const previews = includePreviews ? this.store.deliveryNoticePreviews(projectId) : new Map<string, string>();
-    const last = new Map<string, string>();
-    const key = (d: Delivery) => { const revision = this.store.getDeliveryRetry(d.id).sourceRevision; return d.refType && d.refId && revision ? JSON.stringify([d.memberId, d.refType, d.refId, revision]) : null; };
-    for (const d of deliveries) { const k = key(d); if (k) last.set(k, d.id); }
+    const deliveries = this.store.listLiveDeliveries(projectId);
+    const previews = includePreviews ? this.store.deliveryNoticePreviews(projectId, deliveries) : new Map<string, string>();
     const items: DeliveryNoticeItem[] = [];
     for (const d of deliveries) {
-      const k = key(d);
-      if (d.status === "failed" && this.definitelyAbsent(d) && k && last.get(k) !== d.id) continue;
+      if (d.status === "failed" && this.definitelyAbsent(d) && this.store.hasLaterSameSource(d)) continue;
       const item = this.item(d, previews);
       if (item) items.push(item);
     }

@@ -99,9 +99,9 @@ export class OwnerFlows {
         if (member && member.origin !== "manual") this.store.enqueue({ projectId, memberId: member.id, kind: "answer", text: this.answerText(decision, member), refType: "decision", refId: decision.id });
       }
       const lead = this.store.getConductor(projectId);
-      if (lead) for (const message of this.store.listReportsMissingDeliveries(projectId)) {
-        const author = message.memberId ? this.store.getMember(message.memberId) : null;
-        if (author?.kind === "worker" && author.id !== lead.id) this.store.enqueue({ projectId, memberId: lead.id, kind: "report", text: this.port.reportText(message), wake: WAKE_POST_KINDS.has(message.kind), refType: "message", refId: message.id });
+      // 0.2.10: 직원이 쓴 보고만 SQL 에서 고른다(예전에는 넘김이 영영 생기지 않는 총괄 자신의 보고까지 30초마다 모두 조립하고 여기서 버렸다).
+      if (lead) for (const message of this.store.listWorkerReportsMissingDeliveries(projectId, lead.id)) {
+        this.store.enqueue({ projectId, memberId: lead.id, kind: "report", text: this.port.reportText(message), wake: WAKE_POST_KINDS.has(message.kind), refType: "message", refId: message.id });
       }
     });
   }
@@ -145,7 +145,7 @@ export class OwnerFlows {
     if (current.targetMemberId && !target) throw new ApiError(409, "그 팀원이 닫혀 다시 보낼 수 없습니다. 새 글로 보내세요", "resend_member_closed");
     await this.port.refreshHealth();
     this.store.requireReachable(current.projectId, target);
-    let deliveries = this.store.listDeliveries(current.projectId).filter(d => d.refType === "message" && d.refId === current.id);
+    let deliveries = this.store.listDeliveriesByRef("message", current.id, current.projectId);
     if (!deliveries.length) deliveries = [this.port.deliveryRecovery.materializeLegacyMessage(current.id)];
     for (const d of deliveries) {
       if (d.status !== "delivered") this.port.deliveryRecovery.beginRecovery(d.id);
@@ -299,7 +299,7 @@ export class OwnerFlows {
   reconcileTodoCorrections(todoId?: string): void {
     this.store.transaction(() => {
       const groups = new Map<string, Delivery[]>();
-      for (const delivery of this.store.listDeliveries()) if (delivery.refType === "todo" && delivery.refId && (!todoId || delivery.refId === todoId)) {
+      for (const delivery of this.store.listDeliveriesByRef("todo", todoId || undefined)) if (delivery.refId) {
         const key = `${delivery.refId}:${delivery.memberId}`;
         groups.set(key, [...(groups.get(key) ?? []), delivery]);
       }

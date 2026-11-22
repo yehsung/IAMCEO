@@ -1164,9 +1164,10 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
       await until(`${handle} 전달`, () => t.runner.sent.some(s => s.memberId === memberId));
       t.runner.fail(memberId, errorText);
     };
+    // 실제 agy 처럼 상태줄 기록에 지금 모델을 싣는다(모델을 정하지 않은 팀장은 이것으로 한도 묶음의 갈래를 안다. 모르면 초기화 시각을 정하지 않는다).
     const status = (memberId: string, quota: Record<string, unknown>) => {
       mkdirSync(join(t.config.home, "context", "gemini"), { recursive: true });
-      writeFileSync(geminiStatusPath(t.config.home, memberId), JSON.stringify(geminiStatusFromPayload(memberId, { conversation_id: "", quota }, new Date())));
+      writeFileSync(geminiStatusPath(t.config.home, memberId), JSON.stringify(geminiStatusFromPayload(memberId, { conversation_id: "", model: { id: "gemini-3.8-flash-low" }, quota }, new Date())));
     };
     const quota = "You have exhausted your quota on this model.";
     const network = 'There was a network issue connecting to the server, please try again. · generating and executing: request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": unexpected EOF';

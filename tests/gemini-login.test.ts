@@ -164,6 +164,9 @@ describe("출력·코드 읽기", () => {
     expect(readGeminiSetupPending(home)).toBe(true);
     writeFileSync(file, JSON.stringify({ onboardingComplete: false, consumerOnboardingComplete: true, enterpriseOnboardingComplete: false, email: EMAIL }));
     expect(readGeminiSetupPending(home)).toBe(false);
+    // 1.5.14 실측: 개인 계정으로 첫 설정을 마친 뒤의 모양.
+    writeFileSync(file, JSON.stringify({ consumerOnboardingComplete: true, enterpriseOnboardingComplete: false, onboardingComplete: true }));
+    expect(readGeminiSetupPending(home)).toBe(false);
     for (const bad of ["{", "null", "[]", JSON.stringify({ other: true })]) { writeFileSync(file, bad); expect(readGeminiSetupPending(home)).toBeNull(); }
   });
 

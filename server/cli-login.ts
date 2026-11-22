@@ -226,7 +226,8 @@ export function parseGeminiLoggedIn(text: string): string | null {
 /**
  * agy 의 첫 설정이 끝나지 않았는가: <geminiHome>/cache/onboarding.json 의 완료 표시(onboardingComplete·consumerOnboardingComplete·
  * enterpriseOnboardingComplete)가 모두 false 면 true, 하나라도 true 면 false. 파일이 없거나 읽지 못하거나 표시가 없으면 null(모른다).
- * UNVERIFIED-INTERACTIVE: 어느 표시가 '끝남'인지는 대표의 첫 설정 뒤에 확인한다(11-22 에는 셋 다 false). 메일 같은 다른 칸은 읽지 않는다.
+ * 1.5.14 실측: 11-22 첫 설정 전에는 셋 다 false, 대표가 개인 계정으로 첫 설정을 마친 뒤(11-23)에는 onboardingComplete·consumerOnboardingComplete 가 true,
+ * enterpriseOnboardingComplete 는 false 였다(하나라도 true 면 끝남이라는 판정과 같다). 메일 같은 다른 칸은 읽지 않는다.
  */
 export function readGeminiSetupPending(geminiHome: string): boolean | null {
   try {

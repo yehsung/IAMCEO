@@ -3,18 +3,21 @@
 // 1) 작업 폴더. agy 는 작업 공간(실행 폴더 + --add-dir 폴더)을 경로 글자 순으로 정렬해 첫째를 '현재 폴더'로 쓴다(1.5.14 실측 8회 일치:
 //    훅 입력의 cwd·workspacePaths[0], run_command 의 기본 폴더, "현재 폴더에 만들어" 의 파일 자리). IAMCEO 주입 폴더(<홈>/run/<id>.gemini/agy/<id>)는
 //    홈의 `.iamceo`('.' 은 영문자보다 앞) 때문에 대개 프로젝트보다 앞서, 고치지 않으면 팀장의 산출물·명령이 주입 폴더에서 돈다. 그래서
-//    - run_command 의 Cwd 가 없거나 주입 폴더 안이면 프로젝트 폴더로 바꿔 쓴다(overwrite, 얕은 병합: agy 가 모델에게 "Changed: Cwd" 를 알린다).
+//    - run_command 는 명령 글 앞에 `cd '<폴더>' && {⏎ … ⏎}` 를 붙여 바꿔 쓴다(overwrite CommandLine, 얕은 병합: agy 가 모델에게 "Changed: CommandLine" 을
+//      알린다). 폴더는 모델이 준 Cwd 가 주입 폴더 밖의 절대 경로면 그것, 없거나 주입 폴더 안이면 프로젝트다. 묶음({ }과 줄바꿈)은 원래 명령의 `;`·`&`·
+//      끝 주석·here-document 가 cd 와 갈라지지 않게 한다. 이미 있는 지속 터미널을 다시 쓰는 호출(RequestedTerminalID)은 건드리지 않는다.
+//      1.5.14 실측(11-23, 헤드리스 대화 41d563a0 와 격리 서버 대화형): overwrite 의 Cwd 는 'Changed: Cwd' 를 알리기만 하고 적용되지 않는다(모델의
+//      run_command 인자에도 Cwd 칸이 없다: CommandLine·WaitMsBeforeAsync·toolSummary). CommandLine 바꿔 쓰기는 적용된다. 예전(2bcc677)의 Cwd 바꿔 쓰기로
+//      프로젝트에서 돈 것처럼 보인 헤드리스 e3·e5 는 모델이 명령 안에서 스스로 cd 한 것이었다.
 //    - 파일을 쓰는 도구의 경로가 주입 폴더 안이면 막는다(deny, 까닭에 작업 폴더를 적는다). 읽기는 막지 않는다(자기 규칙을 읽는 것은 해가 없다).
 //    다른 길은 실측으로 닫혔다: --settings 는 hooks 를 받지 않는다(`Error: --settings: unknown setting "hooks"`, 규칙·MCP 칸도 문서에 없다).
 //    주입 폴더를 프로젝트보다 뒤로 정렬되는 곳에 두려면 IAMCEO 홈 밖(지속되지 않는 임시 폴더)이나 대표의 프로젝트 옆에 둬야 해 하지 않는다.
 //    규칙 첫 조각에도 작업 폴더를 적는다(gemini-inject.ts).
-//    UNVERIFIED-INTERACTIVE(문제 있음): 11-23 대화형 실측(격리 서버 + 실제 agy, 권한 '매번 묻기', 결재함에서 허용 → auto_approve + overwrite Cwd)에서
-//    agy 는 'A pre-tool hook changed the arguments … Changed: Cwd.' 를 기록했는데 pwd 는 여전히 주입 폴더였다. 헤드리스 e4(auto 모드)도 같은 증상이고,
-//    헤드리스 e3·e5(allow·auto_approve)는 프로젝트였다. 대화형에서 Cwd 바꿔 쓰기가 듣는 조건(지속되는 셸·모드·판정 종류)을 확인하고 고쳐야 한다.
 // 2) 결재함 도구 승인(K(E2), Claude 의 PermissionRequest 훅 permission-hook.ts 와 같은 결재 카드). agy 에는 '승인 창을 띄우려 할 때만' 오는 훅이 없고,
 //    PreToolUse 는 정책 판단 전에 모든 호출에 온다. 그래서 훅이 도구의 종류(geminiKind: 명령·작업 폴더 안/밖 파일 쓰기·밖 읽기·연결 도구·웹)를 정해
 //    서버(/agent/permission)에 올리고, 서버가 지금 모드(상태줄의 cycle_mode)에서 agy 가 물을 종류일 때만 카드를 연다(tool-permission.ts geminiNeedsCard).
-//    대표가 허용하면 `auto_approve`(agy 가 물으려던 것을 승인. 대표가 agy 에 둔 거절 규칙은 그대로 듣는다), 거절하면 `deny` + 까닭(모델이 받는다).
+//    대표가 허용하면 `auto_approve`(바꿔 쓴 명령 글과 함께. agy 가 물으려던 것을 승인. 대표가 agy 에 둔 거절 규칙은 그대로 듣는다), 거절하면 `deny` + 까닭(모델이 받는다).
+//    카드에는 모델이 쓴 명령 글과 실제로 돌 폴더(Cwd)를 보인다.
 //    카드가 필요 없거나 답이 없으면(닫힘·시간 초과·서버 없음) 승인 판정 없이 끝난다 = agy 의 원래 창(오늘의 동작). 읽기 전용 도구(작업 폴더 안 읽기)와
 //    IAMCEO 의 MCP 도구(call_mcp_tool ServerName=iamceo, --settings 의 허용 규칙), agy 자기 폴더의 연결 도구 정의 읽기(<agy 홈>/mcp/…, 1.5.14 대화형 실측:
 //    agy 는 묻지 않는다)는 서버에 묻지 않는다.
@@ -96,6 +99,8 @@ function forms(path) {
   return out;
 }
 const within = (path, dirs) => dirs.some((dir) => path === dir || path.startsWith(dir.endsWith('/') ? dir : dir + '/'));
+// sh·bash·zsh 의 작은따옴표 글: 안의 ' 는 '\'' 로 닫았다 연다.
+const shq = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
 try {
   const configPath = process.argv[2];
   const chunks = [];
@@ -117,10 +122,21 @@ try {
   const injectForms = forms(config.injectDir);
   const inInject = (path) => typeof path === 'string' && path.length > 0 && forms(resolve(base, path)).some((form) => within(form, injectForms));
   const overwrite = {};
-  // 1) 작업 폴더
-  if (name === 'run_command') {
+  // 카드에 보일 인자: 명령은 모델이 쓴 글 그대로, 폴더(Cwd)는 실제로 돌 자리.
+  const shown = {};
+  // 1) 작업 폴더. agy 1.5.14 는 overwrite 의 Cwd 를 알리기만 하고 적용하지 않는다(실측). 명령 글 앞에 cd 를 붙여 바꿔 쓴다.
+  //    이미 있는 지속 터미널을 다시 쓰는 호출(RequestedTerminalID)은 그 터미널의 폴더 그대로 둔다(그 터미널을 처음 열 때 cd 가 붙었다).
+  const command = args.CommandLine;
+  const reuse = typeof args.RequestedTerminalID === 'string' && args.RequestedTerminalID.trim() !== '';
+  if (name === 'run_command' && typeof command === 'string' && command.trim() && !reuse) {
     const cwd = args.Cwd;
-    if (typeof cwd !== 'string' || !cwd.trim() || inInject(cwd)) overwrite.Cwd = config.cwd;
+    const given = typeof cwd === 'string' && cwd.trim() !== '';
+    // 모델이 준 폴더가 주입 폴더 밖의 절대 경로면 그 폴더로(agy 가 Cwd 를 무시해도 모델이 뜻한 자리에서 돈다), 없거나 주입 폴더 안이면 프로젝트로.
+    const target = given && absText(cwd) && !inInject(cwd) ? resolve(cwd) : config.cwd;
+    const head = 'cd ' + shq(target) + ' && {\n';
+    if (!command.startsWith(head)) overwrite.CommandLine = head + command + '\n}';
+    if (given && inInject(cwd)) overwrite.Cwd = config.cwd;
+    shown.Cwd = target;
   }
   const paths = PATH_KEYS.map((key) => args[key]).filter((value) => typeof value === 'string' && value.length > 0);
   if (WRITE_TOOLS.includes(name) && paths.some(inInject)) finish(JSON.stringify({ decision: 'deny', reason: String(config.injectDeny || '') }));
@@ -187,8 +203,9 @@ try {
     return null;
   };
   const text = (value, max) => typeof value === 'string' && value.length > 0 ? value.slice(0, max) : null;
-  // 바꿔 쓴 인자(Cwd)가 실제로 돌 값이다. 카드에도 그 값을 보인다.
-  const effective = { ...args, ...overwrite };
+  // 카드에는 모델이 쓴 명령 글과 실제로 돌 폴더를 보인다(앞에 붙인 cd 는 IAMCEO 의 것이라 보이지 않는다). 단계 바꿔 쓰기(Model)는 그대로 보인다.
+  const { CommandLine: _rewritten, Cwd: _cwd, ...rest } = overwrite;
+  const effective = { ...args, ...rest, ...shown };
   let answer = await post('/agent/permission', {
     toolName: name.slice(0, 200),
     toolInput: shrink(effective, 0),

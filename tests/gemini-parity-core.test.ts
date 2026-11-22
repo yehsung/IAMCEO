@@ -354,7 +354,7 @@ describe("결재함 승인: 모드별로 agy 가 물을 종류에만 카드(Clau
 });
 
 describe("결재함 승인: 실제 훅 스크립트 → 실제 서버(/agent/permission) → 대표 답", () => {
-  test("Gemini 팀장의 명령이 카드로 뜨고, 대표가 허용하면 훅이 auto_approve(바로잡은 Cwd 와 함께)를 낸다. 옛 칸만 보내는 요청도 받는다", async () => {
+  test("Gemini 팀장의 명령이 카드로 뜨고, 대표가 허용하면 훅이 auto_approve(프로젝트로 cd 를 붙인 명령 글과 함께)를 낸다. 옛 칸만 보내는 요청도 받는다", async () => {
     const isolated = createIsolatedRuntime();
     const env = { IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: isolated.socketPath, IAMCEO_HERDR_SOCKET: isolated.herdrSocketPath,
       IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin, IAMCEO_GEMINI_BIN: isolated.bins.geminiBin };
@@ -391,12 +391,14 @@ describe("결재함 승인: 실제 훅 스크립트 → 실제 서버(/agent/per
     expect(card.toolPermission).toMatchObject({ tool: "run_command", action: "명령 실행", target: "bun test", cwd: isolated.paths.work });
     const answer = await fetch(`${base}/api/decisions/${card.id}/answer`, { method: "POST", headers: { Authorization: `Bearer ${config.accessCode}`, "Content-Type": "application/json" }, body: JSON.stringify({ choice: "allow" }) });
     expect(answer.status).toBe(200);
-    expect(JSON.parse(await output)).toEqual({ decision: "auto_approve", overwrite: { Cwd: isolated.paths.work } });
+    // agy 1.5.14 는 overwrite 의 Cwd 를 적용하지 않는다(실측). 명령 글 앞의 cd 로 프로젝트에서 돈다. 카드에는 모델이 쓴 글(bun test)만 보인다.
+    const inWork = `cd '${isolated.paths.work.replace(/'/g, "'\\''")}' && {\nbun test\n}`;
+    expect(JSON.parse(await output)).toEqual({ decision: "auto_approve", overwrite: { CommandLine: inWork } });
     expect(await child.exited).toBe(0);
-    // auto 로 바꾸면 같은 명령은 카드 없이 agy 에 맡긴다(바로잡은 Cwd 만).
+    // auto 로 바꾸면 같은 명령은 카드 없이 agy 에 맡긴다(cd 를 붙인 명령 글만).
     store.patchSettings({ permissionMode: "auto" });
     const second = Bun.spawn(["/bin/sh", "-c", command], { stdin: new Blob([input]), stdout: "pipe" });
-    expect(JSON.parse(await new Response(second.stdout).text())).toEqual({ decision: "allow", overwrite: { Cwd: isolated.paths.work } });
+    expect(JSON.parse(await new Response(second.stdout).text())).toEqual({ decision: "allow", overwrite: { CommandLine: inWork } });
     expect(store.listOpenToolPermissions()).toEqual([]);
     // 옛 Claude 훅의 요청 모양(새 칸 없음)도 그대로 받는다.
     const token = store.getMemberToken(member.id);

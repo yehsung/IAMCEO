@@ -69,26 +69,67 @@ describe("geminiToolHookSet: hooks.json 의 PreToolUse 묶음과 설정 파일",
   });
 });
 
+/** 훅이 명령 글 앞에 붙이는 cd 묶음(gemini-tool-hook.ts SCRIPT 의 head). agy 1.5.14 는 overwrite 의 Cwd 를 적용하지 않는다(실측). */
+const inDir = (dir: string, command: string): string => `cd '${dir.replace(/'/g, "'\\''")}' && {\n${command}\n}`;
+
 describe("작업 폴더 바로잡기(스크립트를 실제로 돌린다)", () => {
-  test("run_command 의 Cwd 가 없으면(agy 는 첫째 작업 공간 = 주입 폴더에서 돌린다) 프로젝트 폴더로 바꿔 쓴다", async () => {
+  test("run_command 의 Cwd 가 없으면(agy 는 첫째 작업 공간 = 주입 폴더에서 돌린다) 명령 글 앞에 프로젝트로 가는 cd 를 붙인다(Cwd 는 바꾸지 않는다)", async () => {
     const { command, project, workspaces } = layout();
+    // 견본: agy 1.5.14 대화형 실측의 run_command 인자(Cwd 칸이 없다).
     const out = await runHook(command, preToolUse("run_command", { CommandLine: "pwd", WaitMsBeforeAsync: 5000, toolSummary: "Print working directory" }, workspaces));
     expect(out.code).toBe(0);
-    expect(JSON.parse(out.stdout)).toEqual({ decision: "allow", overwrite: { Cwd: project } });
+    expect(JSON.parse(out.stdout)).toEqual({ decision: "allow", overwrite: { CommandLine: inDir(project, "pwd") } });
   });
-  test("Cwd 가 주입 폴더나 그 아래면 프로젝트 폴더로, 프로젝트(그 아래 포함)나 다른 폴더면 그대로 둔다(아무것도 내지 않는다)", async () => {
+  test("Cwd 가 주입 폴더나 그 아래(또는 상대 경로)면 프로젝트로 cd 하고 Cwd 도 프로젝트로, 주입 폴더 밖의 절대 경로면 그 폴더로 cd 한다(agy 가 Cwd 를 무시해도 모델이 뜻한 자리)", async () => {
     const { command, project, injectDir, workspaces } = layout();
-    for (const cwd of [injectDir, `${injectDir}/`, join(injectDir, ".agents"), join(injectDir, "sub", "..")]) {
+    for (const cwd of [injectDir, `${injectDir}/`, join(injectDir, ".agents"), join(injectDir, "sub", ".."), "sub"]) {
       const out = await runHook(command, preToolUse("run_command", { CommandLine: "ls", Cwd: cwd }, workspaces));
-      expect(JSON.parse(out.stdout)).toEqual({ decision: "allow", overwrite: { Cwd: project } });
+      expect(JSON.parse(out.stdout)).toEqual({ decision: "allow", overwrite: { CommandLine: inDir(project, "ls"), Cwd: project } });
     }
-    for (const cwd of [project, join(project, "app"), "/usr"]) {
+    for (const cwd of [project, join(project, "app"), "/usr", `${join(project, "app")}/`]) {
       const out = await runHook(command, preToolUse("run_command", { CommandLine: "ls", Cwd: cwd }, workspaces));
-      expect(out).toEqual({ stdout: "", stderr: "", code: 0 });
+      expect(JSON.parse(out.stdout)).toEqual({ decision: "allow", overwrite: { CommandLine: inDir(cwd.replace(/\/$/, ""), "ls") } });
     }
     // 이름이 주입 폴더로 시작할 뿐인 옆 폴더는 주입 폴더가 아니다.
     const out = await runHook(command, preToolUse("run_command", { CommandLine: "ls", Cwd: `${injectDir}-other` }, workspaces));
-    expect(out.stdout).toBe("");
+    expect(JSON.parse(out.stdout)).toEqual({ decision: "allow", overwrite: { CommandLine: inDir(`${injectDir}-other`, "ls") } });
+  });
+  test("이미 있는 지속 터미널을 다시 쓰는 호출(RequestedTerminalID)·이미 cd 가 붙은 글·빈 명령은 건드리지 않는다", async () => {
+    const { command, project, workspaces } = layout();
+    for (const args of [{ CommandLine: "ls", RunPersistent: true, RequestedTerminalID: "term-1" }, { CommandLine: inDir(project, "ls") }, { CommandLine: "" }, { CommandLine: "   " }, { WaitMsBeforeAsync: 1 }]) {
+      expect(await runHook(command, preToolUse("run_command", args, workspaces))).toEqual({ stdout: "", stderr: "", code: 0 });
+    }
+    // 새 지속 터미널(RequestedTerminalID 없음)은 처음 열 때 cd 를 붙인다.
+    const fresh = await runHook(command, preToolUse("run_command", { CommandLine: "export A=1", RunPersistent: true, RequestedTerminalID: "" }, workspaces));
+    expect(JSON.parse(fresh.stdout)).toEqual({ decision: "allow", overwrite: { CommandLine: inDir(project, "export A=1") } });
+  });
+  test("바꿔 쓴 명령은 sh·bash·zsh 에서 원래 명령의 ; · & · 끝 주석 · here-document · 종료 코드를 그대로 지키며 그 폴더에서 돈다(따옴표가 든 폴더 이름 포함)", async () => {
+    const root = temp();
+    const home = join(root, ".iamceo"), run = join(home, "run"), project = join(root, "it's proj");
+    const injectDir = join(run, "m_lead1.gemini", "agy", "m_lead1");
+    mkdirSync(injectDir, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    const hook = geminiToolHookSet({ runDir: run, cwd: project, injectDir }).PreToolUse![0]!.hooks[0]!.command;
+    const cases: [string, string, number][] = [
+      ["pwd", `${project}\n`, 0],
+      ["echo a; pwd", `a\n${project}\n`, 0],
+      ["pwd # 끝 주석", `${project}\n`, 0],
+      ["cat <<'EOF'\nhere\nEOF\npwd", `here\n${project}\n`, 0],
+      ["true & pwd; wait", `${project}\n`, 0],
+      ["pwd && exit 3", `${project}\n`, 3],
+    ];
+    const shells = ["/bin/sh", "/bin/bash", "/bin/zsh"].filter(shell => { try { return statSync(shell).isFile(); } catch { return false; } });
+    expect(shells.length).toBeGreaterThan(0);
+    for (const [original, stdout, code] of cases) {
+      const out = await runHook(hook, preToolUse("run_command", { CommandLine: original }, [injectDir, project]));
+      const rewritten = JSON.parse(out.stdout).overwrite.CommandLine as string;
+      for (const shell of shells) {
+        // agy 처럼 첫째 작업 공간(주입 폴더)에서 띄운다.
+        const child = Bun.spawn([shell, "-c", rewritten], { cwd: injectDir, stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root } });
+        const [text, exit] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+        expect([shell, original, text, exit]).toEqual([shell, original, stdout, code]);
+      }
+    }
   });
   test("파일 쓰기 도구의 경로가 주입 폴더 안이면 막는다(까닭에 작업 폴더). 상대 경로는 첫째 작업 공간에 붙여 읽는다", async () => {
     const { command, project, injectDir, workspaces } = layout();
@@ -116,7 +157,7 @@ describe("작업 폴더 바로잡기(스크립트를 실제로 돌린다)", () =
     const write = await runHook(command, preToolUse("write_file", { Content: "x", Path: join(via, "new-dir", "f.txt") }, workspaces));
     expect(JSON.parse(write.stdout).decision).toBe("deny");
     const run = await runHook(command, preToolUse("run_command", { CommandLine: "ls", Cwd: via }, workspaces));
-    expect(JSON.parse(run.stdout)).toEqual({ decision: "allow", overwrite: { Cwd: project } });
+    expect(JSON.parse(run.stdout)).toEqual({ decision: "allow", overwrite: { CommandLine: inDir(project, "ls"), Cwd: project } });
     expect(injectDir).not.toBe(via);
   });
   test("읽기·다른 도구·다른 사건은 건드리지 않는다", async () => {
@@ -148,7 +189,7 @@ describe("작업 폴더 바로잡기(스크립트를 실제로 돌린다)", () =
     writeFileSync(join(project, "evil.ts"), `process.stdout.write('{"decision":"auto_approve"}'); process.exit(0);\n`);
     const child = Bun.spawn(["/bin/sh", "-c", command], { cwd: project, stdin: new Blob([preToolUse("run_command", { CommandLine: "pwd" }, workspaces)]), stdout: "pipe" });
     const stdout = await new Response(child.stdout).text();
-    expect(JSON.parse(stdout)).toEqual({ decision: "allow", overwrite: { Cwd: project } });
+    expect(JSON.parse(stdout)).toEqual({ decision: "allow", overwrite: { CommandLine: inDir(project, "pwd") } });
   });
 });
 
@@ -199,12 +240,12 @@ describe("결재함 승인(스크립트를 실제로 돌리고, 서버는 가짜
     expect(readFileSync(geminiToolHookConfigFile(t.injectDir), "utf8")).not.toContain("member-token-1");
     expect(JSON.parse(readFileSync(geminiToolHookConfigFile(t.injectDir), "utf8")).permission).toEqual({ mcpConfigFile: t.mcpConfigFile });
   });
-  test("허용 → auto_approve(바꿔 쓴 Cwd 와 함께), 요청에는 실제로 돌 인자·종류·대화 id·호출 id 를 싣고 팀장 열쇠로 부른다", async () => {
+  test("허용 → auto_approve(cd 를 붙인 명령 글과 함께), 요청에는 모델이 쓴 명령 글·실제로 돌 폴더·종류·대화 id·호출 id 를 싣고 팀장 열쇠로 부른다", async () => {
     const server = fakeServer(() => ({ id: "d1", state: "allow" }));
     const t = permissionLayout(server.url);
     const out = await runHook(t.command, preToolUse("run_command", { CommandLine: "npm test", WaitMsBeforeAsync: 5000 }, t.workspaces));
     expect(out.code).toBe(0);
-    expect(JSON.parse(out.stdout)).toEqual({ decision: "auto_approve", overwrite: { Cwd: t.project } });
+    expect(JSON.parse(out.stdout)).toEqual({ decision: "auto_approve", overwrite: { CommandLine: inDir(t.project, "npm test") } });
     expect(server.seen).toHaveLength(1);
     expect(server.seen[0]).toEqual({ path: "/agent/permission", auth: "Bearer member-token-1", body: {
       toolName: "run_command", toolInput: { CommandLine: "npm test", WaitMsBeforeAsync: 5000, Cwd: t.project }, sessionId: CONV, cwd: t.project,
@@ -222,7 +263,7 @@ describe("결재함 승인(스크립트를 실제로 돌리고, 서버는 가짜
   test("닫힘·모르는 답·서버 없음·잘못된 열쇠 설정: 승인 판정 없이 끝난다(바꿔 쓸 인자만 있으면 allow + overwrite, 없으면 아무것도 내지 않는다)", async () => {
     const closed = fakeServer(() => ({ id: null, state: "closed" }));
     const t = permissionLayout(closed.url);
-    expect(JSON.parse((await runHook(t.command, preToolUse("run_command", { CommandLine: "ls" }, t.workspaces))).stdout)).toEqual({ decision: "allow", overwrite: { Cwd: t.project } });
+    expect(JSON.parse((await runHook(t.command, preToolUse("run_command", { CommandLine: "ls" }, t.workspaces))).stdout)).toEqual({ decision: "allow", overwrite: { CommandLine: inDir(t.project, "ls") } });
     expect(await runHook(t.command, preToolUse("write_file", { Path: join(t.project, "a.txt"), Content: "x" }, t.workspaces))).toEqual({ stdout: "", stderr: "", code: 0 });
     const odd = fakeServer(() => ({ state: "maybe" }));
     expect((await runHook(permissionLayout(odd.url).command, preToolUse("write_file", { Path: "/elsewhere/a.txt", Content: "x" }, t.workspaces))).stdout).toBe("");

@@ -137,7 +137,8 @@ export function geminiMcpEnvFile(injectDir: string): string { return `${injectDi
  * 훅(gemini-tool-hook.ts)이 run_command 의 폴더를 바로잡고 주입 폴더 쓰기를 막지만, 모델이 처음부터 바른 폴더를 쓰면 되묻기·재시도가 없다.
  */
 export function geminiWorkspaceRule(cwd: string, injectDir: string): string {
-  return `## 작업 폴더\n- 이 세션의 작업 폴더(현재 폴더)는 \`${cwd}\` 다. 파일은 그 아래에 만들고 고친다. 명령(run_command)은 Cwd 를 \`${cwd}\` 또는 그 아래 폴더로 준다.\n`
+  // 1.5.14 의 run_command 에는 Cwd 칸이 없고 훅의 Cwd 바꿔 쓰기도 적용되지 않는다(실측): 명령은 IAMCEO 가 앞에 붙이는 cd 로 이 폴더에서 돈다.
+  return `## 작업 폴더\n- 이 세션의 작업 폴더(현재 폴더)는 \`${cwd}\` 다. 파일은 그 아래에 절대 경로로 만들고 고친다. 명령(run_command)은 이 폴더에서 돈다(IAMCEO 가 명령 앞에 cd 를 붙인다). 다른 폴더가 필요하면 명령 안에서 cd 한다.\n`
     + `- \`${injectDir}\` 는 IAMCEO 가 이 세션에 넣은 설정 폴더(규칙·MCP·훅)다. 작업 공간 목록의 첫째로 보여도 현재 폴더가 아니다. 거기에 파일을 만들거나 고치지 않는다.\n\n`;
 }
 

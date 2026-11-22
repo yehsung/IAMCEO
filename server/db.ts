@@ -989,7 +989,23 @@ export function ensureRevisionColumns(db: Database): void {
       if (!columns.some(c => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
     }
   })();
+  // 판 갈이 열이 생긴 뒤에 만든다(LIVE_INDEXES 는 이 열보다 먼저 돈다). 실패해도 서버는 뜬다: 색인은 빠르게 할 뿐 결과를 바꾸지 않는다.
+  const failed: string[] = [];
+  for (const sql of REVISION_INDEXES) {
+    try { db.exec(sql); }
+    catch { failed.push(/INDEX IF NOT EXISTS (\S+)/.exec(sql)?.[1] ?? sql); }
+  }
+  if (failed.length) console.warn(`[db] 보조 색인을 만들지 못했습니다(다음 시작 때 다시 합니다): ${failed.join(", ")}`);
 }
+
+/**
+ * 0.2.10: 자료의 판 갈이 열(replaces·replaced_by)만 따로 읽는 부분 색인. 두 열은 ALTER 로 html(아티팩트 원본) 뒤에 붙어,
+ * 자료 목록 조회가 그 열을 같이 읽으면 판 갈이를 쓴 자료마다 html 넘침 페이지를 끝까지 지나간다(사본 측정: 목록 2.4ms → 28ms).
+ * 목록은 이 색인만 읽는 조회로 판 갈이를 붙인다(Store.listFiles). LIVE_INDEXES 와 같이 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+ */
+export const REVISION_INDEXES: readonly string[] = [
+  `CREATE INDEX IF NOT EXISTS files_revisions ON files(project_id, id, replaces, replaced_by) WHERE replaces IS NOT NULL OR replaced_by IS NOT NULL`,
+];
 
 const PRE_MIGRATION_KEEP = 3;
 const PRE_MIGRATION_KEEP_MS = 86_400_000;

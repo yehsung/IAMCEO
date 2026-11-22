@@ -8,7 +8,7 @@ import { MIGRATIONS } from "./db.ts";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
-import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type EngineStatus, type HerdrInfo, type TailnetStatus, type Member, type MessagePageOptions, type SyncSnapshot, type FileDoc, type WsEvent } from "../shared/types.ts";
+import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type EngineStatus, type HerdrInfo, type TailnetStatus, type Member, type MessagePageOptions, type SyncSnapshot, type SyncCursor, type FileDoc, type WorkItem, type WsEvent } from "../shared/types.ts";
 import { REPORT_LANGUAGES } from "../shared/types.ts";
 import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
@@ -17,14 +17,14 @@ import type { Bus } from "./bus.ts";
 import { VERSION, type Config } from "./config.ts";
 import { FilePublication, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, resolveInside, saveUpload, type SavedFile } from "./files.ts";
 import type { OrchestratorApi } from "./orchestrator-api.ts";
-import { ApiError, type Store } from "./store.ts";
+import { ApiError, DONE_PAGE_MAX, STATE_WINDOW_DONE, STATE_WINDOW_RECENT_MS, type Store } from "./store.ts";
 import type { ErrorCode } from "../shared/error-codes.ts";
 import { classifyStorageError } from "./storage-errors.ts";
 import { SESSION_ID_RE, stripControls } from "./text.ts";
 import { Pairing, PAIR_CODE_TTL_MS, tailnetUrls, withMagicDnsNames } from "./pairing.ts";
 import { createPushHandler, type PushRoutesContext } from "./push/routes.ts";
 import { TerminalStreams, type SocketData as TerminalSocketData } from "./terminal-stream.ts";
-type SocketData = TerminalSocketData & { lite?: boolean };
+type SocketData = TerminalSocketData & { lite?: boolean; window?: boolean };
 import { ModelCatalogReader } from "./models.ts";
 import { Folders } from "./folders.ts";
 import { checkLocalImportPath, readLocalFile } from "./local-files.ts";
@@ -463,6 +463,14 @@ function parseLimit(url: URL): number | undefined {
   return n;
 }
 
+/** 0.2.10 끝난 항목 쪽 받기의 개수(1~200). 없으면 store 의 기본값(50). */
+function doneLimit(url: URL): number | undefined {
+  const raw = url.searchParams.get("limit");
+  if (raw === null) return undefined;
+  if (!/^[0-9]{1,3}$/.test(raw) || Number(raw) < 1 || Number(raw) > DONE_PAGE_MAX) throw new ApiError(400, "조회 개수가 올바르지 않습니다", "invalid_limit");
+  return Number(raw);
+}
+
 function strictQuery(url: URL, allowed: string[], code: ErrorCode = "invalid_query"): void {
   const seen = new Set<string>();
   for (const key of url.searchParams.keys()) {
@@ -589,6 +597,26 @@ function wantsLite(url: URL): boolean {
   const value = url.searchParams.get("lite");
   if (value !== null && value !== "1" && value !== "0") throw new ApiError(400, "lite 값이 잘못되었습니다", "invalid_lite");
   return value === "1";
+}
+/** 0.2.10: 창 묶음(ProjectState.window). 없거나 0 이면 예전 묶음이다. */
+function wantsWindow(url: URL): boolean {
+  const value = url.searchParams.get("window");
+  if (value !== null && value !== "1" && value !== "0") throw new ApiError(400, "조회 조건이 잘못되었습니다", "invalid_query");
+  return value === "1";
+}
+/**
+ * 0.2.10 창 묶음 소켓(`/ws?v=2&lite=1&window=1`)의 work 사건: 업무 목록을 창 묶음과 같은 규칙으로 줄인다(끝나지 않은 칸 전부 +
+ * 완료 칸은 최근 끝낸 순서로 STATE_WINDOW_DONE 개, 24시간 안에 끝낸 것이 더 많으면 그것 전부). 순서는 받은 그대로(sort_order).
+ * Store 의 workWindow 와 같은 정렬(끝낸 시각 내림차순, 같으면 id 내림차순)을 메모리에서 한다.
+ */
+export function windowWorkEvent(event: Extract<WsEvent, { type: "work" }>, now = Date.now()): Extract<WsEvent, { type: "work" }> & { doneWork: number } {
+  const key = (item: WorkItem) => item.doneAt ?? item.updatedAt ?? item.createdAt;
+  const done = event.work.filter(item => item.sec === "done")
+    .sort((a, b) => key(a) < key(b) ? 1 : key(a) > key(b) ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
+  const cutoff = new Date(now - STATE_WINDOW_RECENT_MS).toISOString();
+  const limit = Math.max(STATE_WINDOW_DONE, done.filter(item => key(item) >= cutoff).length);
+  const kept = new Set(done.slice(0, limit).map(item => item.id));
+  return { ...event, work: event.work.filter(item => item.sec !== "done" || kept.has(item.id)), doneWork: done.length };
 }
 
 /** 권한 방식 확인은 true 로만 바뀐다. 통째로 돌아온 설정의 false 는 '바꾸지 않음'으로 읽는다. */
@@ -833,6 +861,9 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
           .every(port => port in orch && !!orch[port]),
         // 0.2.7 묶음 4: 결재 답 첨부·할 일 닫기 결과를 받는다(새 앱은 이 값이 있을 때만 그 단추를 보인다).
         revisions: true,
+        // 0.2.10: 창 묶음(window=1, 끝난 항목 쪽 받기, 창 묶음 소켓)과 보관 상태 lite. 새 앱은 이 값이 있을 때만 보낸다(옛 서버는 400).
+        windowedState: true,
+        archiveLite: true,
       } };
       return Response.json(body);
     }),
@@ -877,8 +908,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       return Response.json(usageReport(store.db, { days: rawDays === null ? 7 : Number(rawDays), projectId }), { headers: { "Cache-Control": "no-store" } });
     }),
     route("GET", "/api/sync", async (req, url) => {
-      strictQuery(url, ["projectId", "lite"]);
-      const lite = wantsLite(url);
+      strictQuery(url, ["projectId", "lite", "window"]);
+      const lite = wantsLite(url), window = wantsWindow(url);
       const requestedProjectId = url.searchParams.get("projectId");
       if (requestedProjectId !== null && (!requestedProjectId.trim() || Buffer.byteLength(requestedProjectId) > 256)) throw new ApiError(400, "프로젝트 ID가 잘못되었습니다", "invalid_project_id");
       // D5: 버전 머리글을 보낸 앱에만 server·compat 을 싣는다. 앱마다 답이 다르니 캐시 열쇠에도 넣는다.
@@ -887,7 +918,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         // No await from the generation check through serialization. Concurrent readers share these bytes.
         const generation = JSON.stringify([bus.epoch, bus.seq, urls(), tailnetField()]);
         if (syncGeneration !== generation) { syncCache.clear(); syncGeneration = generation; }
-        const key = JSON.stringify([requestedProjectId, lite, versionFields]);
+        const key = JSON.stringify([requestedProjectId, lite, window, versionFields]);
         const cached = syncCache.get(key);
         if (cached !== undefined) return new Response(cached, { headers: { "Content-Type": "application/json" } });
         // 이 뒤 직렬화까지 await가 없다. 도메인 쓰기는 이 데몬의 Store가 소유한다.
@@ -901,7 +932,8 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
           bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr: HERDR_UNUSED,
             home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides, ...engineField(orch), ...tailnetField(), ...versionFields,
             ...cliVersionsField(ctx) },
-          state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!), ...snapshotNotices(requestedProjectId!) } : null,
+          // lite 면 자료 본문을 DB 에서 읽지도 않는다(아래 liteFile 이 빈 본문 칸을 뺀다). window 는 0.2.10 창 묶음.
+          state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!, { lite, window }), ...snapshotNotices(requestedProjectId!) } : null,
           revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
           cursor: bus.cursor,
         };
@@ -979,9 +1011,10 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     route("GET", "/api/projects/:id/state", (_req, url, [id]) => {
       // 보관한 프로젝트는 없는 것으로 친다. 화면이 본사로 돌아간다.
       if (store.requireProject(id!).archived) throw new ApiError(404, "보관된 프로젝트입니다", "project_archived");
-      const state = store.projectState(id!);
+      const lite = wantsLite(url);
+      const state = store.projectState(id!, { lite, window: wantsWindow(url) });
       const snapshot = { ...state, ...snapshotNotices(id!) };
-      return Response.json(wantsLite(url) ? { ...snapshot, files: state.files.map(liteFile) } : snapshot);
+      return Response.json(lite ? { ...snapshot, files: state.files.map(liteFile) } : snapshot);
     }),
     route("GET", "/api/projects/:id/messages", (req, url, params) => {
       // Legacy read-only lookups also serve archived history; state/page use the archive boundary.
@@ -990,8 +1023,20 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     }),
     route("GET", "/api/projects/:id/messages/page", (_req, url, [id]) => Response.json(store.listMessagePage(id!, messagePageQuery(url)))),
     route("GET", "/api/projects/:id/archive/state", (_req, url, [id]) => {
-      strictQuery(url, []);
-      return Response.json(store.archiveState(id!));
+      // 0.2.10: lite=1 이면 자료 본문을 읽지도 싣지도 않는다(capabilities.archiveLite). 본문은 GET /api/files/:id 로 읽는다.
+      strictQuery(url, ["lite"]);
+      const lite = wantsLite(url);
+      const state = store.archiveState(id!, { lite });
+      return Response.json(lite ? { ...state, files: state.files.map(liteFile) } : state);
+    }),
+    // 0.2.10 창 묶음의 '더 보기': 끝난 할 일·완료 업무를 최근 끝낸 순서로 이어 받는다. 새 경로라 출시 앱은 부르지 않는다.
+    route("GET", "/api/projects/:id/todos/done", (_req, url, [id]) => {
+      strictQuery(url, ["cursor", "limit"]);
+      return Response.json(store.listDoneTodosPage(id!, { cursor: url.searchParams.get("cursor") ?? undefined, limit: doneLimit(url) }));
+    }),
+    route("GET", "/api/projects/:id/work/done", (_req, url, [id]) => {
+      strictQuery(url, ["cursor", "limit"]);
+      return Response.json(store.listDoneWorkPage(id!, { cursor: url.searchParams.get("cursor") ?? undefined, limit: doneLimit(url) }));
     }),
     route("GET", "/api/projects/:id/archive/messages/page", (_req, url, [id]) => Response.json(store.listArchiveMessagePage(id!, messagePageQuery(url)))),
     route("GET", "/api/projects/:id/archive/messages", (req, url, params) => {
@@ -1475,6 +1520,16 @@ const WS_TOPIC = "events";
 const WS_V2_TOPIC = "events-v2";
 const WS_LITE_TOPIC = "events-lite";
 const WS_V2_LITE_TOPIC = "events-v2-lite";
+/** 0.2.10 창 묶음 소켓(`/ws?v=2&lite=1&window=1`): v2-lite 와 같고 work 사건만 창 묶음 규칙으로 줄인다(windowWorkEvent). */
+const WS_V2_WINDOW_TOPIC = "events-v2-window";
+/**
+ * `JSON.stringify({ ...event, ...cursor })` 와 같은 글자를, 이미 직렬화한 사건 글자에 순번만 이어 붙여 만든다(큰 업무 목록을 다시 직렬화하지 않는다).
+ * 사건에 epoch·seq 칸이 있으면(지금은 없다) 덮어써야 하므로 예전처럼 다시 직렬화한다.
+ */
+export function withCursor(serialized: string, event: object, cursor: Readonly<SyncCursor>): string {
+  if ("epoch" in event || "seq" in event || !serialized.endsWith("}") || serialized === "{}") return JSON.stringify({ ...event, ...cursor });
+  return `${serialized.slice(0, -1)},${JSON.stringify({ epoch: cursor.epoch, seq: cursor.seq }).slice(1)}`;
+}
 export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   const monitor = ctx.loopMonitor ?? new LoopMonitor();
   const { config, store, bus } = ctx;
@@ -1627,15 +1682,18 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
     // 짝 맺기 코드를 낸 폰에만 접속 코드를 준다. 코드 자체가 인증이라 접속 코드 검사 앞에 둔다.
     if (path === "/pair/claim") return handlePairClaim(req, server);
     if (path === "/ws") {
-      strictQuery(url, ["v", "t", "lite"]);
+      strictQuery(url, ["v", "t", "lite", "window"]);
       const version = url.searchParams.get("v");
       if (version !== null && version !== "2") return fail(400, "실시간 연결 버전이 잘못되었습니다", "realtime_version_invalid");
+      // 0.2.10 창 묶음 소켓: v2·lite 와 함께일 때만 받는다(새 앱만 보낸다).
+      const window = wantsWindow(url);
+      if (window && (version !== "2" || !wantsLite(url))) return fail(400, "조회 조건이 잘못되었습니다", "invalid_query");
       const auth = authorize(req, server);
       if (!auth.ok) return refuseAuth(auth);
       if (version === "2" && url.searchParams.has("t")) return fail(400, "실시간 연결 주소에 접속 코드를 넣지 마세요", "realtime_code_in_url");
       // G: 기기 열쇠로 연 연결은 그 기기를 끊을 때 닫는다. 공용 코드로 연 연결은 지금처럼 코드 세대로 닫는다.
       const deviceId = auth.principal.kind === "device" ? auth.principal.id : undefined;
-      return server.upgrade(req, { data: { kind: "realtime", protocol: version === "2" ? 2 : 1, authGeneration, deviceId, lite: wantsLite(url) } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다", "websocket_required");
+      return server.upgrade(req, { data: { kind: "realtime", protocol: version === "2" ? 2 : 1, authGeneration, deviceId, lite: wantsLite(url), window } }) ? undefined : fail(400, "WebSocket 요청이 아닙니다", "websocket_required");
     }
     if (path.startsWith("/api/")) {
       const auth = authorize(req, server);
@@ -1958,7 +2016,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
             return;
           }
           if (ws.data.kind === "terminal") { closedEpochSockets = true; ws.data.stream.open(ws); return; }
-          ws.subscribe(ws.data.lite ? (ws.data.protocol === 2 ? WS_V2_LITE_TOPIC : WS_LITE_TOPIC) : (ws.data.protocol === 2 ? WS_V2_TOPIC : WS_TOPIC));
+          ws.subscribe(ws.data.window ? WS_V2_WINDOW_TOPIC : ws.data.lite ? (ws.data.protocol === 2 ? WS_V2_LITE_TOPIC : WS_LITE_TOPIC) : (ws.data.protocol === 2 ? WS_V2_TOPIC : WS_TOPIC));
           if (ws.data.protocol === 2) {
             v2Sockets.add(ws);
             ws.send(JSON.stringify({ type: "hello", protocol: 2, ...bus.cursor, heartbeatMs: WS_PING_MS, staleAfterMs: 45_000 }));
@@ -2044,6 +2102,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       server.publish(WS_V2_TOPIC, v2Payload);
       server.publish(WS_LITE_TOPIC, payload);
       server.publish(WS_V2_LITE_TOPIC, v2Payload);
+      server.publish(WS_V2_WINDOW_TOPIC, v2Payload);
     }
   }), WS_PING_MS);
   pingTimer.unref?.();
@@ -2057,16 +2116,25 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       for (const ws of v2Sockets) {
         ws.unsubscribe(WS_V2_TOPIC);
         ws.unsubscribe(WS_V2_LITE_TOPIC);
+        ws.unsubscribe(WS_V2_WINDOW_TOPIC);
         ws.close(1012, "실시간 동기화를 다시 시작하세요");
       }
     }
+    // 0.2.10: 사건마다 한 번만 직렬화한다(예전에는 듣는 주소마다 lite 판을 다시 만들어 업무 목록 전체를 주소 수×2번 더 직렬화했다).
+    // 본문이 실린 file 사건만 lite 판이 다르고, v2 판은 직렬화한 글자에 순번만 이어 붙인다. 보내는 글자는 예전과 같다.
     const payload = JSON.stringify(event);
-    const v2Payload = epochChanged || event.type === "hello" || event.type === "ping" ? null : JSON.stringify({ ...event, ...cursor });
+    const lite = event.type === "file" ? liteEvent(event) as object : event;
+    const litePayload = lite === event ? payload : JSON.stringify(lite);
+    const v2 = !(epochChanged || event.type === "hello" || event.type === "ping");
+    const v2Payload = v2 ? withCursor(payload, event, cursor) : null;
+    const v2LitePayload = v2 ? (lite === event ? v2Payload : withCursor(litePayload, lite, cursor)) : null;
+    const windowPayload = v2 && event.type === "work" ? JSON.stringify({ ...windowWorkEvent(event), ...cursor }) : v2LitePayload;
     for (const server of servers) {
       server.publish(WS_TOPIC, payload);
       if (v2Payload) server.publish(WS_V2_TOPIC, v2Payload);
-      server.publish(WS_LITE_TOPIC, JSON.stringify(liteEvent(event)));
-      if (v2Payload) server.publish(WS_V2_LITE_TOPIC, JSON.stringify({ ...(liteEvent(event) as object), ...cursor }));
+      server.publish(WS_LITE_TOPIC, litePayload);
+      if (v2LitePayload) server.publish(WS_V2_LITE_TOPIC, v2LitePayload);
+      if (windowPayload) server.publish(WS_V2_WINDOW_TOPIC, windowPayload);
     }
   });
 

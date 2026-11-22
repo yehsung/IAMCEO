@@ -572,7 +572,8 @@ final class AppStore: ProjectManagementStore {
         settingsEdit = nil; settingsConflict = nil; todoWrites = [:]; operationResults = [:]; batchResults = [:]
         leaseReceiptOrder = [:]; absentOperations = []; announcedUnresolved = []; writeContextGeneration = UUID()
         strictWriteContract = false; syncSupported = false; realtimeSupported = false; capabilitiesLoaded = false; serverTakesRevisions = false
-        // 0.2.10: 받아 둔 옛 판·'더 보기'는 다른 서버로 바꿀 때만 비운다. 같은 서버로 다시 붙으면 열어 둔 자료 화면이 그대로 쓴다.
+        // 0.2.10: 받아 둔 옛 판·'더 보기'는 다른 서버로 바꿀 때 비운다. 같은 주소로 다시 붙는 동안에는 열어 둔 자료 화면이 그대로 쓰고,
+        // 새 bootstrap 이 같은 서버로 확인되지 않으면(서버 ID·데이터 폴더가 다름) 그것을 받은 때 비운다(아래 sameWindowServer).
         serverArchiveLite = false
         if sameServer { settleWindowExtrasForReconnect() } else { resetWindowExtras() }
         capabilityProbeFailed = false; seededBootstrap = nil; fullPassCursor = nil; lastSnapshotCursor = nil; pushRetryAttempt = 0
@@ -605,6 +606,8 @@ final class AppStore: ProjectManagementStore {
             let initial = try await task.value
             guard epoch == generation, foreground, !Task.isCancelled else { return }
             initialTask = nil
+            // 같은 주소라도 앞 연결과 다른 서버면 앞 서버의 '더 보기' 항목·옛 판이 새 서버의 같은 id 프로젝트에 섞이지 않게 비운다.
+            if sameServer, !Self.sameWindowServer(previousBootstrap, initial) { resetWindowExtras() }
             // 기능 조회는 가벼운 요청이라 화면을 읽기 전에 잠깐만 기다린다. 먼저 끝나면 첫 읽기가 /api/sync 한 번으로 끝난다.
             // 늦으면 기다리지 않고 예전 순서대로 화면부터 읽는다.
             let discovery = Task { [weak self] in

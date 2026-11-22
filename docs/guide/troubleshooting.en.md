@@ -60,7 +60,7 @@ A usage-limit card arrives in 결재함 (Inbox). If you wait, work continues on 
 
 ### The network or the AI service is down
 
-The app shows a waiting banner. Nothing you sent is lost; it is delivered once the outage clears. While the server believes an AI service is down, it sends an empty check request to see whether it is back. For a Gemini (Antigravity CLI) staff member, Antigravity first retries on its own for a little over two minutes; if that fails, the same waiting banner follows.
+The app shows a waiting banner. Nothing you sent is lost; it is delivered once the outage clears. While the server believes an AI service is down, it sends an empty check request to see whether it is back. For a Gemini (Antigravity CLI) staff member, Antigravity first retries on its own for a little over two minutes. Meanwhile that member shows "Retrying network", and if it lasts over a minute or finally fails, the same waiting banner follows.
 
 ### A delivery is left at "전달 확인 필요" (Delivery needs checking)
 

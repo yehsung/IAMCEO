@@ -56,12 +56,28 @@ extension AppStore {
         if !extraFiles.isEmpty { extraFiles = [:] }
     }
 
-    /// 같은 서버로 다시 붙을 때(연결 재시도): 받아 둔 것은 그대로 둔다(열어 둔 옛 판이 '찾을 수 없는 자료'로 바뀌지 않게).
+    /// 같은 주소로 다시 붙을 때(연결 재시도): 받아 둔 것은 그대로 둔다(열어 둔 옛 판이 '찾을 수 없는 자료'로 바뀌지 않게).
     /// 앞 연결에서 받던 중이던 요청은 연결이 바뀌어 반영되지 않으므로 받는 중 표시와 그때의 오류만 내린다.
+    /// 새 연결의 bootstrap 이 다른 서버로 드러나면(sameWindowServer) establishConnection 이 그때 resetWindowExtras 로 비운다.
     func settleWindowExtrasForReconnect() {
         var next = olderDone
         next.loadingTodos = false; next.loadingWork = false; next.todosError = nil; next.workError = nil
         if next != olderDone { olderDone = next }
+    }
+
+    /// 앞 연결의 bootstrap 과 새 연결의 bootstrap 이 같은 서버(같은 데이터)로 확인되는가. 같은 주소로 다시 붙을 때 받아 둔 옛 판·'더 보기'를
+    /// 남길지 정한다. 같은 주소에 다른 서버가 붙으면(같은 Mac 에 다른 데이터 폴더로 띄운 서버, 주소를 넘겨받은 다른 Mac) 앞 서버의 항목이
+    /// 새 서버의 같은 id 프로젝트(본사 hq)에 섞이기 때문이다.
+    /// - 서버 ID 를 둘 다 알면 ID 로 가린다. 데이터 폴더(home)를 둘 다 알고 서로 다르면 ID 가 같아도 다른 서버다(ServerIdentity, 대기열과 같다).
+    /// - ID 를 한쪽이라도 모르면 둘 다 모르고(옛 서버) 데이터 폴더를 둘 다 알며 같을 때만 같은 서버다.
+    /// 확인하지 못하면 다른 서버로 본다: 받아 둔 것은 다시 받으면 되고, 섞여 보이는 것보다 낫다.
+    static func sameWindowServer(_ previous: Bootstrap?, _ current: Bootstrap) -> Bool {
+        guard let previous else { return false }
+        let id = ServerVersionInfo.normalizedID(previous.server?.id), newID = ServerVersionInfo.normalizedID(current.server?.id)
+        let home: String? = previous.home.isEmpty ? nil : previous.home, newHome: String? = current.home.isEmpty ? nil : current.home
+        if let known = ServerIdentity.same(id: id, home: home, as: newID, home: newHome) { return known }
+        guard id == nil, newID == nil, let home, let newHome else { return false }
+        return home == newHome
     }
 
     /// 지금 묶음이 창 묶음인가.
@@ -127,15 +143,38 @@ extension AppStore {
         if canLoadOlderTodos { await loadOlderDoneTodos() }
     }
 
-    /// 스냅숏을 반영할 때(applyWriteContext): 더 받은 할 일 가운데 지금 창에 있는 것은 그 스냅숏의 값과 판 번호로 맞춘다.
-    /// 창에 있는 동안 화면은 창 쪽 값을 쓰지만, 나중에 창 밖으로 밀려도 남은 사본의 값과 판 번호가 같은 때의 짝이 되게 한다.
-    func refreshOlderDoneTodos(reviewed: [String: Todo], revisions: [String: Int]?, projectID: String?) {
-        guard let projectID, olderDone.projectID == projectID, !olderDone.todos.isEmpty else { return }
+    /// 스냅숏을 반영할 때(applyWriteContext): 더 받은 끝난 할 일·완료 업무를 그 스냅숏의 창에 맞춘다(업무도 할 일과 같은 규칙).
+    /// - '더 보기'를 받기 시작한 뒤(다음 위치가 생겼거나, 끝까지 받았거나, 첫 쪽을 받는 중)에는 창의 끝난 항목을 모두 담는다.
+    ///   할 일은 그 스냅숏의 판 번호를 짝으로 단다. 그래서 첫 '더 보기' 뒤 창에 들어왔다가 새로 끝난 일에 밀려난 항목도 목록에 남고,
+    ///   창 밖으로 밀린 뒤에도 같은 때의 값과 판 번호로 체크를 풀 수 있다.
+    ///   창 끝 규칙(DoneOrder.merged)이 거르는 항목은 여기서 버린다: 창 범위인데 창에 없는 것(서버에서 지웠다), 창에 다시 열린 것.
+    ///   남겨 두면 나중에 창 끝이 그보다 새로워질 때 지운 항목이 다시 보인다.
+    /// - 받기 시작하기 전(첫 받기가 실패해 사본만 남은 때)과 창 묶음이 아닌 스냅숏에서는 남은 사본 가운데 창에 있는 것만 그 값으로 맞춘다.
+    func refreshOlderDone(state: ProjectState?, todoRevisions revisions: [String: Int]?) {
+        guard let state, olderDone.projectID == state.project.id else { return }
         var next = olderDone
-        for (index, todo) in next.todos.enumerated() {
-            guard let fresh = reviewed[todo.id] else { continue }
-            next.todos[index] = fresh
-            next.todoRevisions[todo.id] = revisions?[todo.id]
+        if let window = state.window, next.todosCursor != nil || next.todosExhausted || next.loadingTodos {
+            let kept = DoneOrder.merged(current: state.todos, older: next.todos, more: window.todosCursor != nil, finished: \.done, key: DoneOrder.todoKey)
+            let fromWindow = Set(state.todos.lazy.filter(\.done).map(\.id))
+            next.todoRevisions = kept.reduce(into: [:]) { result, todo in
+                result[todo.id] = fromWindow.contains(todo.id) ? revisions?[todo.id] : next.todoRevisions[todo.id]
+            }
+            next.todos = kept
+        } else if !next.todos.isEmpty {
+            let current = Dictionary(state.todos.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            for (index, todo) in next.todos.enumerated() {
+                guard let fresh = current[todo.id] else { continue }
+                next.todos[index] = fresh
+                next.todoRevisions[todo.id] = revisions?[todo.id]
+            }
+        }
+        if let window = state.window, next.workCursor != nil || next.workExhausted || next.loadingWork {
+            next.work = DoneOrder.merged(current: state.work, older: next.work, more: window.workCursor != nil, finished: { $0.sec == "done" }, key: DoneOrder.workKey)
+        } else if !next.work.isEmpty {
+            let current = Dictionary(state.work.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            for (index, item) in next.work.enumerated() {
+                if let fresh = current[item.id] { next.work[index] = fresh }
+            }
         }
         if next != olderDone { olderDone = next }
     }

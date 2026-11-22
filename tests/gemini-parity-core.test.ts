@@ -1,7 +1,7 @@
 // 0.2.10 Gemini(Antigravity CLI) 기능 맞추기(핵심 갈래): 권한 auto 의 실제 모드 확인과 대신하는 모드, 결재함 도구 승인 카드, 서브에이전트 단계.
 // 실제 agy 는 띄우지 않는다. 지휘 쪽은 가짜 실행기(받은 것만 적는다)로, 실행기 쪽은 가짜 core 소켓 + 실제 CoreRunner 로 돈다(tests/fixtures/core-harness.ts).
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bus } from "../server/bus.ts";
@@ -12,7 +12,7 @@ import { CoreError } from "../server/runner/core-client.ts";
 import { CoreRunner, type CoreRunnerDeps } from "../server/runner/core.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
-import type { Backend, Member } from "../shared/types.ts";
+import { DEFAULT_RANKS, GEMINI_SUBAGENT_TIERS, staffConfig, type Backend, type Member } from "../shared/types.ts";
 import { startFakeCore, type FakeCoreOptions } from "./fixtures/core-harness.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 import { describeToolRequest, geminiNeedsCard, geminiToolForCard, ToolPermissions, type GeminiEffectiveMode } from "../server/tool-permission.ts";
@@ -404,5 +404,40 @@ describe("결재함 승인: 실제 훅 스크립트 → 실제 서버(/agent/per
     const old = store.listOpenToolPermissions()[0]!;
     await fetch(`${base}/api/decisions/${old.id}/answer`, { method: "POST", headers: { Authorization: `Bearer ${config.accessCode}`, "Content-Type": "application/json" }, body: JSON.stringify({ choice: "deny" }) });
     expect(await (await legacy).json()).toMatchObject({ state: "deny" });
+  });
+});
+
+// ---- 서브에이전트 단계 ----
+describe("서브에이전트 단계: Gemini 는 모델 이름 대신 단계(flash_lite·flash·pro)를 고른다", () => {
+  test("staffConfig: 단계만 넘긴다(단계가 아닌 옛 값은 inherit = null), effort 는 늘 null. 다른 CLI 는 그대로", () => {
+    const settings = (staff: { model: string | null; effort: null | "low" }) => ({ ranks: { ...DEFAULT_RANKS, staff: { model: "haiku", effort: "low" as const } }, codexRanks: { ...DEFAULT_RANKS, staff: { model: "gpt-6.1-terra", effort: null } }, geminiRanks: { ...DEFAULT_RANKS, staff } });
+    for (const tier of GEMINI_SUBAGENT_TIERS) expect(staffConfig("gemini", settings({ model: tier, effort: null }))).toEqual({ model: tier, effort: null });
+    for (const odd of ["gemini-3.8-flash", "inherit", "Flash", null]) expect(staffConfig("gemini", settings({ model: odd, effort: "low" }))).toEqual({ model: null, effort: null });
+    expect(staffConfig("claude", settings({ model: "pro", effort: null }))).toEqual({ model: "haiku", effort: "low" });
+    expect(staffConfig("codex", settings({ model: "pro", effort: null }))).toEqual({ model: "gpt-6.1-terra", effort: null });
+  });
+
+  test("설정: 단계만 받고(모델 이름은 400 gemini_staff_tier_unknown, effort 는 400), 바꾸면 쉬는 Gemini 팀장을 그 단계로 다시 띄우고 지침에 한 줄 싣는다", async () => {
+    const t = setup({ permissionMode: "default" });
+    const gemini = await t.add("자료 조사", "research", { cli: "gemini" });
+    const claude = await t.add("결제 연동", "payments", { cli: "claude" });
+    expect(t.runner.startsOf(gemini.id)[0]!.member.subagentModel).toBeNull();
+    await expect(t.orch.updateSettings({ geminiRanks: { staff: { model: "gemini-3.8-flash" } } })).rejects.toMatchObject({ status: 400, code: "gemini_staff_tier_unknown" });
+    await expect(t.orch.updateSettings({ geminiRanks: { staff: { model: "flash", effort: "low" } } })).rejects.toMatchObject({ status: 400, code: "effort_unsupported" });
+    const saved = await t.orch.updateSettings({ geminiRanks: { staff: { model: "flash_lite" } } });
+    expect(saved.geminiRanks.staff).toEqual({ model: "flash_lite", effort: null });
+    // 말을 걸기 전의 Gemini 팀장은 곧바로 새 설정으로 다시 뜬다(적용 기록의 staffModel 이 달라졌다). Claude 팀장은 그대로다.
+    await until("단계로 다시 띄움", () => t.runner.startsOf(gemini.id).length === 2);
+    const relaunched = t.runner.startsOf(gemini.id).at(-1)!;
+    expect(relaunched.member.subagentModel).toBe("flash_lite");
+    expect(t.store.getAppliedConfig(gemini.id)).toMatchObject({ staffModel: "flash_lite", staffEffort: null });
+    expect(t.runner.startsOf(claude.id)).toHaveLength(1);
+    const rules = readFileSync(relaunched.opts.systemPromptFile, "utf8");
+    expect(rules).toContain("- 서브에이전트(invoke_subagent)의 단계(Model)는 대표가 정한 flash_lite 다.");
+    // 기본값(inherit)으로 되돌리면 그 줄도 없다.
+    await t.orch.updateSettings({ geminiRanks: { staff: { model: null } } });
+    await until("기본값으로 다시 띄움", () => t.runner.startsOf(gemini.id).length === 3);
+    expect(t.runner.startsOf(gemini.id).at(-1)!.member.subagentModel).toBeNull();
+    expect(readFileSync(t.runner.startsOf(gemini.id).at(-1)!.opts.systemPromptFile, "utf8")).not.toContain("invoke_subagent");
   });
 });

@@ -16,7 +16,10 @@
 //    IAMCEO 의 MCP 도구(call_mcp_tool ServerName=iamceo, --settings 의 허용 규칙)는 서버에 묻지 않는다.
 //    1.5.14 실측: auto_approve·deny 가 run_command·write_file·edit_file·call_mcp_tool·invoke_subagent 에 듣고, 서브에이전트의 도구 호출도 이 훅을 거치며,
 //    훅을 630초 붙잡아도 agy 가 기다린다(제한 시간 700). 한 대화 안에서는 훅이 하나씩 돈다(부모와 서브에이전트는 동시에 돌 수 있다).
-// 3) 서브에이전트 단계는 아래 설정의 tier 가 있을 때 invoke_subagent 의 Model 을 바꿔 쓴다(뒤 커밋).
+// 3) 서브에이전트 단계. 대표가 단계(shared/types.ts GEMINI_SUBAGENT_TIERS: flash_lite·flash·pro)를 골랐으면 invoke_subagent 의 Model 을 그 단계로 바꿔 쓴다
+//    (overwrite, 1.5.14 실측: 내장 research·self 서브에이전트가 그 단계의 모델로 돈다. Model 이 없던 호출 = inherit 도 바뀐다). 고르지 않았으면 손대지 않는다
+//    (inherit: 팀장 모델). 인자 모양은 실측의 평평한 꼴(Prompt·Role·TypeName·Model)과 문서의 Subagents 배열 꼴을 다 받는다.
+//    한계(실측): 사용자 정의 에이전트 정의(.agents/agents/*.md)의 model 이 호출 인자를 이긴다.
 //
 // 지키는 것
 // - 언제나 0 으로 끝난다. 표준 출력에는 판정 JSON 하나를 내거나 아무것도 내지 않는다. agy 1.5.14 실측: 빈 출력 + 0 = agy 의 기본 정책,
@@ -29,6 +32,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { bunScriptCommand, shellQuote as quote } from "./bun-script.ts";
 import type { GeminiHookSet } from "./gemini-hooks.ts";
 import { PERMISSION_HOOK_TIMEOUT_SEC, TOOL_PERMISSION_POLL_MS, TOOL_PERMISSION_TTL_MS } from "./permission-hook.ts";
+import { GEMINI_SUBAGENT_TIERS, isGeminiSubagentTier, type GeminiSubagentTier } from "../../shared/types.ts";
 
 export const GEMINI_TOOL_HOOK_MARKER = "iamceo-gemini-tool-hook";
 /** 판정만 하는 훅의 제한 시간(초). 스크립트는 그 전에 스스로 끝난다(LOCAL_MS). 넘기면 agy 가 끊고 도구를 막는다. */
@@ -116,6 +120,11 @@ try {
   }
   const paths = PATH_KEYS.map((key) => args[key]).filter((value) => typeof value === 'string' && value.length > 0);
   if (WRITE_TOOLS.includes(name) && paths.some(inInject)) finish(JSON.stringify({ decision: 'deny', reason: String(config.injectDeny || '') }));
+  // 3) 서브에이전트 단계
+  if (name === 'invoke_subagent' && TIERS.includes(config.tier)) {
+    if (Array.isArray(args.Subagents)) overwrite.Subagents = args.Subagents.map((item) => (isObject(item) ? { ...item, Model: config.tier } : item));
+    else overwrite.Model = config.tier;
+  }
   const changed = Object.keys(overwrite).length > 0;
   if (changed) fallback = JSON.stringify({ decision: 'allow', overwrite });
   // 2) 결재함 승인: 도구의 종류. 서버가 지금 모드에서 agy 가 물을 종류인지 정한다.
@@ -208,7 +217,7 @@ export function writeGeminiToolHook(runDir: string, options: GeminiToolHookScrip
   if (![local, total, poll].every(value => Number.isSafeInteger(value) && value > 0)) throw new Error("Invalid gemini tool hook limits");
   const content = [`const LOCAL_MS = ${local};`, `const TOTAL_MS = ${total};`, `const POLL_MS = ${poll};`, "const MAX_STRING = 4000;", `const MAX_INPUT = ${16 * 1024 * 1024};`,
     `const WRITE_TOOLS = ${JSON.stringify(GEMINI_WRITE_TOOLS)};`, `const READ_TOOLS = ${JSON.stringify(GEMINI_READ_TOOLS)};`, `const WEB_TOOLS = ${JSON.stringify(GEMINI_WEB_TOOLS)};`,
-    `const PATH_KEYS = ${JSON.stringify(PATH_KEYS)};`, SCRIPT].join("\n");
+    `const PATH_KEYS = ${JSON.stringify(PATH_KEYS)};`, `const TIERS = ${JSON.stringify(GEMINI_SUBAGENT_TIERS)};`, SCRIPT].join("\n");
   writePrivate(path, content);
   return path;
 }
@@ -245,6 +254,8 @@ export interface GeminiToolHookInput extends GeminiToolHookScriptOptions {
    * 주소와 열쇠를 거기서 읽는다(명령줄·설정 파일에 열쇠를 싣지 않는다). 없으면 승인은 agy 가 정한다(묻지 않기 팀장, 받을 서버가 없음).
    */
   permission?: { mcpConfigFile: string } | null;
+  /** 서브에이전트 단계. 없으면(null) invoke_subagent 를 건드리지 않는다(inherit). */
+  tier?: GeminiSubagentTier | null;
 }
 
 /**
@@ -259,10 +270,11 @@ export function geminiToolHookSet(input: GeminiToolHookInput): GeminiHookSet {
   // 주입 폴더의 부모(…/agy)는 처음 띄울 때 아직 없다. 주입 폴더를 쓰는 쪽(gemini-inject.ts)과 같은 권한(0700)으로 만든다.
   mkdirSync(dirname(configFile), { recursive: true, mode: 0o700 });
   const permission = input.permission ? { mcpConfigFile: input.permission.mcpConfigFile } : null;
-  writePrivate(configFile, `${JSON.stringify({ v: 1, cwd: input.cwd, injectDir: input.injectDir, injectDeny: geminiInjectDenyReason(input.cwd, input.injectDir), permission })}\n`);
+  const tier = isGeminiSubagentTier(input.tier) ? input.tier : null;
+  writePrivate(configFile, `${JSON.stringify({ v: 1, cwd: input.cwd, injectDir: input.injectDir, injectDeny: geminiInjectDenyReason(input.cwd, input.injectDir), permission, tier })}\n`);
   const command = `cd ${quote(input.runDir)} 2>/dev/null && ${bunScriptCommand(input.execPath ?? process.execPath, input.runDir, script)} ${quote(configFile)} 2>/dev/null; exit 0`;
-  // 프로세스는 matcher 에 맞는 호출에만 뜬다: 폴더 바로잡기는 명령·쓰기, 승인은 읽기·연결 도구·웹을 더한다.
-  const names = ["run_command", ...GEMINI_WRITE_TOOLS, ...(permission ? [...GEMINI_READ_TOOLS, "call_mcp_tool", ...GEMINI_WEB_TOOLS] : [])];
+  // 프로세스는 matcher 에 맞는 호출에만 뜬다: 폴더 바로잡기는 명령·쓰기, 승인은 읽기·연결 도구·웹, 단계는 invoke_subagent 를 더한다.
+  const names = ["run_command", ...GEMINI_WRITE_TOOLS, ...(permission ? [...GEMINI_READ_TOOLS, "call_mcp_tool", ...GEMINI_WEB_TOOLS] : []), ...(tier ? ["invoke_subagent"] : [])];
   // 승인을 기다리면 대표의 답까지 붙잡는다: 서버가 카드를 닫는 시간보다 넉넉히 길다(Claude 승인 훅과 같다).
   const timeout = permission ? PERMISSION_HOOK_TIMEOUT_SEC : GEMINI_TOOL_HOOK_LOCAL_TIMEOUT_SEC;
   return { PreToolUse: [{ matcher: anchored(names), hooks: [{ type: "command", command, timeout }] }] };

@@ -48,7 +48,7 @@ describe("geminiToolHookSet: hooks.json 의 PreToolUse 묶음과 설정 파일",
     const file = geminiToolHookConfigFile(injectDir);
     expect(file.startsWith(`${injectDir}/`)).toBe(false);
     expect(statSync(file).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ v: 1, cwd: project, injectDir, injectDeny: geminiInjectDenyReason(project, injectDir), permission: null });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ v: 1, cwd: project, injectDir, injectDeny: geminiInjectDenyReason(project, injectDir), permission: null, tier: null });
   });
   test("상대 경로는 던진다", () => {
     expect(() => geminiToolHookSet({ runDir: "run", cwd: "/p", injectDir: "/i" })).toThrow();
@@ -286,5 +286,46 @@ describe("providerLaunch(gemini): 도구 훅의 승인 부분은 Claude 승인 �
       expect(off.hooks.matcher).not.toContain("read_file");
       expect(off.hooks.hooks[0].timeout).toBe(GEMINI_TOOL_HOOK_LOCAL_TIMEOUT_SEC);
     }
+  });
+});
+
+describe("서브에이전트 단계(스크립트를 실제로 돌린다)", () => {
+  function tierLayout(tier: "flash_lite" | "flash" | "pro" | null) {
+    const base = layout();
+    const set = geminiToolHookSet({ runDir: base.run, cwd: base.project, injectDir: base.injectDir, tier });
+    return { ...base, group: set.PreToolUse![0]!, command: set.PreToolUse![0]!.hooks[0]!.command };
+  }
+  test("단계를 골랐으면 invoke_subagent 를 matcher 에 넣고 Model 을 그 단계로 바꿔 쓴다(평평한 인자·Model 이 없던 호출 = inherit 포함)", async () => {
+    const t = tierLayout("flash");
+    expect(t.group.matcher.endsWith("|invoke_subagent)$")).toBe(true);
+    expect(JSON.parse(readFileSync(geminiToolHookConfigFile(t.injectDir), "utf8")).tier).toBe("flash");
+    for (const args of [{ Prompt: "조사", Role: "research", TypeName: "research" }, { Prompt: "조사", Role: "r", TypeName: "self", Model: "pro" }, { Prompt: "조사", TypeName: "research", Model: "inherit" }]) {
+      const out = await runHook(t.command, preToolUse("invoke_subagent", args, t.workspaces));
+      expect(out.code).toBe(0);
+      expect(JSON.parse(out.stdout)).toEqual({ decision: "allow", overwrite: { Model: "flash" } });
+    }
+  });
+  test("문서 모양(Subagents 배열)은 항목마다 Model 을 넣는다", async () => {
+    const t = tierLayout("flash_lite");
+    const out = await runHook(t.command, preToolUse("invoke_subagent", { Subagents: [{ Prompt: "a", Role: "r", TypeName: "research" }, "odd", { Prompt: "b", TypeName: "self", Model: "pro" }] }, t.workspaces));
+    expect(JSON.parse(out.stdout)).toEqual({ decision: "allow", overwrite: { Subagents: [{ Prompt: "a", Role: "r", TypeName: "research", Model: "flash_lite" }, "odd", { Prompt: "b", TypeName: "self", Model: "flash_lite" }] } });
+  });
+  test("단계를 고르지 않았으면(inherit) matcher 에 없고, 불려도 손대지 않는다. 설정 파일의 단계가 아닌 값도 손대지 않는다", async () => {
+    const t = tierLayout(null);
+    expect(t.group.matcher).not.toContain("invoke_subagent");
+    expect(await runHook(t.command, preToolUse("invoke_subagent", { Prompt: "a", TypeName: "research" }, t.workspaces))).toEqual({ stdout: "", stderr: "", code: 0 });
+    const file = geminiToolHookConfigFile(t.injectDir);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), tier: "gemini-4-neon" }));
+    expect((await runHook(t.command, preToolUse("invoke_subagent", { Prompt: "a", TypeName: "research" }, t.workspaces))).stdout).toBe("");
+    // 단계가 아닌 값은 설정 파일에도 싣지 않는다.
+    expect(JSON.parse(readFileSync(geminiToolHookConfigFile(geminiToolHookSet({ runDir: t.run, cwd: t.project, injectDir: t.injectDir, tier: "neon" as never }) && t.injectDir), "utf8")).tier).toBeNull();
+  });
+  test("승인과 함께: invoke_subagent 는 묻지 않는 종류라 서버에 묻지 않고 단계만 바꿔 쓴다", async () => {
+    const server = fakeServer(() => ({ id: "d", state: "allow" }));
+    const t = permissionLayout(server.url);
+    const set = geminiToolHookSet({ runDir: t.run, cwd: t.project, injectDir: t.injectDir, permission: { mcpConfigFile: t.mcpConfigFile }, tier: "pro" });
+    const out = await runHook(set.PreToolUse![0]!.hooks[0]!.command, preToolUse("invoke_subagent", { Prompt: "a", TypeName: "research" }, t.workspaces));
+    expect(JSON.parse(out.stdout)).toEqual({ decision: "allow", overwrite: { Model: "pro" } });
+    expect(server.seen).toEqual([]);
   });
 });

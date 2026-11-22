@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import type { CliProvider, Member, PatchMemberReq, RanksKey, Settings, SettingsPatch } from "../shared/types.ts";
 import { ApiError } from "./store.ts";
 import { resolveCliExecutable } from "./config.ts";
-import { CODEX_EFFORTS, EFFORTS, GEMINI_EFFORTS, memberRank, ranksFor } from "../shared/types.ts";
+import { CODEX_EFFORTS, EFFORTS, GEMINI_EFFORTS, isGeminiSubagentTier, memberRank, ranksFor } from "../shared/types.ts";
+import { ERROR_CODES } from "../shared/error-codes.ts";
 
 export interface ModelOption {
   value: string;
@@ -414,6 +415,12 @@ export class ModelCatalogReader {
       for (const [key, rank] of Object.entries(input[field]!)) {
         if (!rank) continue;
         const rankKey = key as keyof Settings["ranks"];
+        // Gemini 서브에이전트는 모델 이름이 아니라 단계를 고른다(shared/types.ts GEMINI_SUBAGENT_TIERS). effort 는 넘길 길이 없다.
+        if (cli === "gemini" && rankKey === "staff") {
+          if (rank.model != null && !isGeminiSubagentTier(rank.model)) throw new ApiError(400, ERROR_CODES.gemini_staff_tier_unknown.ko, "gemini_staff_tier_unknown");
+          if (rank.effort != null) throw new ApiError(400, `${cli}에서 지원하지 않는 effort입니다`, "effort_unsupported");
+          continue;
+        }
         this.requireModel(cli, rank.model);
         const previous = current?.[field][rankKey];
         const model = rank.model === undefined ? previous?.model : rank.model;

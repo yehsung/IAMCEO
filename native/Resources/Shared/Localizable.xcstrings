@@ -22224,6 +22224,61 @@
         }
       }
     },
+    "Flash Lite · 가장 가벼움" : {
+      "comment" : "0.2.10 Gemini 서브에이전트 단계(설정 → AI 모델의 Gemini 서브에이전트 줄)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Flash Lite · lightest"
+          }
+        }
+      }
+    },
+    "Flash · 빠름" : {
+      "comment" : "0.2.10 Gemini 서브에이전트 단계(설정 → AI 모델의 Gemini 서브에이전트 줄)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Flash · faster"
+          }
+        }
+      }
+    },
+    "Pro · 깊게" : {
+      "comment" : "0.2.10 Gemini 서브에이전트 단계(설정 → AI 모델의 Gemini 서브에이전트 줄)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pro · deeper"
+          }
+        }
+      }
+    },
+    "팀장이 나눠 맡기는 일의 단계 · 실제 모델은 Antigravity가 정함" : {
+      "comment" : "0.2.10 Gemini 서브에이전트 단계(설정 → AI 모델의 Gemini 서브에이전트 줄)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tier for work staff split off · Antigravity picks the actual model"
+          }
+        }
+      }
+    },
+    "%@ 단계" : {
+      "comment" : "0.2.10 Gemini 서브에이전트 단계(설정 → AI 모델의 Gemini 서브에이전트 줄)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ tier"
+          }
+        }
+      }
+    },
     "server.text.chat.member_error" : {
       "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
       "localizations" : {

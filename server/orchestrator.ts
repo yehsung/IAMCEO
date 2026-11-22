@@ -6118,7 +6118,11 @@ export class Orchestrator implements OrchestratorApi {
     const staffEffort = staffConfig(member.cli, settings).effort;
     // B1: 보고 언어가 en 이면 지침 끝에 영어 보고 줄이 붙는다. 세션을 띄울 때마다(깨우기·재시작·압축 뒤 규칙) 지금 설정을 읽는다.
     // 0.2.7 묶음 5(D5-5): 이 프로젝트의 대표 상시 규칙을 지침 끝에 싣는다. 띄울 때마다 지금 것을 읽는다.
-    return renderRole(member.kind, { PROJECT: project.name, NAME: member.name, ROLE: member.role, CONDUCTOR: conductor?.name ?? "총괄", SUBAGENT_EFFORT: staffEffort ? `- 서브에이전트·워크플로를 부를 때 effort=${staffEffort} 을 넘긴다.` : "", REPORT_LANGUAGE: settings.reportLanguage, OWNER_RULES: projectRules(this.store).list(project.id) }, this.config.rolesDir);
+    // Gemini: 대표가 고른 서브에이전트 단계는 도구 훅이 invoke_subagent 의 Model 을 바꿔 쓴다. 팀장이 "Changed: Model" 알림에 놀라지 않게 한 줄 알린다.
+    const tier = member.cli === "gemini" ? staffConfig(member.cli, settings).model : null;
+    const subagentRule = tier ? `- 서브에이전트(invoke_subagent)의 단계(Model)는 대표가 정한 ${tier} 다. IAMCEO 가 그 값으로 맞추므로 Model 인자를 따로 고르지 않는다.`
+      : staffEffort ? `- 서브에이전트·워크플로를 부를 때 effort=${staffEffort} 을 넘긴다.` : "";
+    return renderRole(member.kind, { PROJECT: project.name, NAME: member.name, ROLE: member.role, CONDUCTOR: conductor?.name ?? "총괄", SUBAGENT_EFFORT: subagentRule, REPORT_LANGUAGE: settings.reportLanguage, OWNER_RULES: projectRules(this.store).list(project.id) }, this.config.rolesDir);
   }
 
   /** 시스템 프롬프트·MCP 설정 파일을 쓴다. MCP 설정에 멤버 토큰이 들어가 본인만 읽게 한다. */

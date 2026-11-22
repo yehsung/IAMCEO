@@ -2,7 +2,7 @@
 // IAMCEO additions are invocation-scoped; no global CLI configuration is changed.
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { CLI_INFO, type CliProvider } from "../../shared/types.ts";
+import { CLI_INFO, isGeminiSubagentTier, type CliProvider } from "../../shared/types.ts";
 import type { RunnerMember, StartOpts } from "./types.ts";
 import { CoreError } from "./core-client.ts";
 import { writeStatuslineWrapper } from "./statusline.ts";
@@ -85,7 +85,8 @@ export function providerBin(provider: CoreProvider, bins: ProviderBins): string 
  * - effort 는 모델을 정했을 때만 넘긴다. 모델 없이 --effort 만 주면 agy 가 사용자의 기본 모델로 판정하고, 그 모델이 그 값을 받지 않으면 뜨지 못한다
  *   (1.5.14 실측: `--effort max` → exit 1 `gemini-4-neon has no "max" effort`. 기본 모델은 사용자마다 다르다).
  * - 띄울 때마다 임의 값을 만들어 상태줄 명령의 인자와 터미널 라벨(GEMINI_LAUNCH_LABEL)에 함께 싣는다.
- * - 서브에이전트 모델(subagentModel)은 agy 에 넘길 길이 없어 쓰지 않는다. Claude 용 설정 파일(opts.settingsFile)도 쓰지 않는다.
+ * - 서브에이전트 모델 자리(subagentModel)에는 단계(flash_lite·flash·pro)가 온다: 도구 훅이 invoke_subagent 의 Model 을 바꿔 쓴다(gemini-tool-hook.ts).
+ *   agy 에는 그 밖에 서브에이전트 모델을 넘길 길(옵션·환경 변수)이 없다. Claude 용 설정 파일(opts.settingsFile)은 쓰지 않는다.
  * - 상태 보고(OSC 7501)는 AGY_CLI_OSC7501=on 으로 늘 켠다. MCP 서버의 열쇠는 프로세스 환경·명령줄이 아니라 주입 폴더 옆의 환경 파일(0600)에 둔다(gemini-inject.ts).
  */
 function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins, bin: string): ProviderLaunch {
@@ -107,7 +108,9 @@ function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins,
   // 승인은 Claude 와 같은 조건이다(toolPermissionHook): 받을 서버가 있고(bins.toolPermission), 묻지 않기 팀장이 아니고, IAMCEO_TOOL_PERMISSION=0 이 아닐 때.
   if (bins.contextHome) {
     const permission = member.permissionMode !== "bypassPermissions" && bins.toolPermission === true && process.env.IAMCEO_TOOL_PERMISSION !== "0" ? { mcpConfigFile: opts.mcpConfigFile } : null;
-    try { hookSets.push(geminiToolHookSet({ runDir: join(bins.contextHome, "run"), cwd: member.cwd, injectDir: plannedInjectDir, permission })); }
+    // 서브에이전트 단계(shared/types.ts staffConfig 가 단계만 넘긴다): invoke_subagent 의 Model 을 바꿔 쓴다. 없으면 inherit(팀장 모델).
+    const tier = isGeminiSubagentTier(member.subagentModel) ? member.subagentModel : null;
+    try { hookSets.push(geminiToolHookSet({ runDir: join(bins.contextHome, "run"), cwd: member.cwd, injectDir: plannedInjectDir, permission, tier })); }
     catch (error) { console.warn(`[gemini] ${member.id}: 도구 훅을 만들지 못해 빼고 띄웁니다. 작업 폴더 바로잡기가 없습니다 (${why(error)})`); }
   }
   const injectDir = writeGeminiInjectDir({ memberId: member.id, systemPromptFile: opts.systemPromptFile, mcpConfigFile: opts.mcpConfigFile, cwd: member.cwd, hooks: geminiHooksFile(...hookSets) });

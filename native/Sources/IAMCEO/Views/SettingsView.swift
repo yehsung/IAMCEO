@@ -1102,18 +1102,21 @@ struct SettingsView: View {
         let scope: String
         let cli: RankSettingsCLI
         var id: String { "\(cli.rawValue).\(key)" }
-        /// Codex 서브에이전트는 effort 를 따로 받지 않는다. Gemini 는 서브에이전트 줄 자체가 없다(RankSettingsCLI.editableRanks).
+        /// Codex·Gemini 서브에이전트는 effort 를 따로 받지 않는다(Gemini 는 단계에 묶여 있다).
         var showsEffort: Bool {
             switch cli {
-            case .claude, .gemini: true
-            case .codex: key != "staff"
+            case .claude: true
+            case .codex, .gemini: key != "staff"
             }
         }
+        /// 이 줄에서 모델 대신 고르는 단계(Gemini 서브에이전트). nil 이면 모델 목록이다.
+        var tiers: [String]? { key == "staff" ? cli.subagentTiers : nil }
     }
     private static let rankRows = RankSettingsCLI.allCases.flatMap { cli in [
         RankRow(key: "manager", title: String(localized: "총괄"), scope: String(localized: "본사 AI도 같음"), cli: cli),
         RankRow(key: "lead", title: String(localized: "팀장"), scope: String(localized: "총괄이 일을 맡기는 팀원"), cli: cli),
-        RankRow(key: "staff", title: String(localized: "서브에이전트"), scope: String(localized: "팀장이 나눠 맡기는 일"), cli: cli)
+        RankRow(key: "staff", title: String(localized: "서브에이전트"),
+                scope: cli.subagentTiers == nil ? String(localized: "팀장이 나눠 맡기는 일") : String(localized: "팀장이 나눠 맡기는 일의 단계 · 실제 모델은 Antigravity가 정함"), cli: cli)
     ].filter { cli.editableRanks.contains($0.key) } }
     /// 직급 설정을 보일 CLI. Gemini 는 서버가 알고(모델 목록에 gemini) 설정에 그 직급표가 실려 올 때만 보인다(0.2.9 까지의 서버에는 없다).
     private var rankCLIs: [RankSettingsCLI] { store.offeredCLIs.filter { $0 != .gemini || draft.geminiRanks != nil } }
@@ -1732,7 +1735,7 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    modelMenu(rank).frame(width: Self.modelWidth)
+                    modelColumn(rank).frame(width: Self.modelWidth)
                     Group {
                         if rank.showsEffort { effortMenu(rank) }
                         else {
@@ -1760,7 +1763,7 @@ struct SettingsView: View {
                 Spacer(minLength: 0)
             }
             HStack(spacing: 8) {
-                modelMenu(rank)
+                modelColumn(rank)
                 if rank.showsEffort { effortMenu(rank).frame(width: 124) }
             }
             if let invalid {
@@ -1774,6 +1777,26 @@ struct SettingsView: View {
     }
 
     private func model(of rank: RankRow) -> String { settingsTrim(draft.rankConfig(rank.key, cli: rank.cli)?.model ?? "") }
+
+    /// 모델 칸: Gemini 서브에이전트 줄은 단계 메뉴, 그 밖은 모델 메뉴.
+    @ViewBuilder private func modelColumn(_ rank: RankRow) -> some View {
+        if let tiers = rank.tiers { tierMenu(rank, tiers: tiers) } else { modelMenu(rank) }
+    }
+
+    /// Gemini 서브에이전트의 단계. '기본값'은 팀장 모델 그대로다(서버가 invoke_subagent 를 건드리지 않는다).
+    /// 단계가 아닌 값(0.2.10 이전 미출시 빌드가 저장한 모델 이름)은 서버가 기본값으로 다루므로 기본값으로 보인다.
+    private func tierMenu(_ rank: RankRow, tiers: [String]) -> some View {
+        let value = model(of: rank)
+        let defaultLabel = String(localized: "기본값")
+        let chosen = tiers.contains(value) ? value : nil
+        return SetupMenu(chosen.map(SubagentTier.label) ?? defaultLabel, compact: true, label: String(localized: "\(rank.title) 단계")) {
+            Toggle(defaultLabel, isOn: menuCheck(chosen == nil) { setModel(nil, for: rank) })
+            Divider()
+            ForEach(tiers, id: \.self) { tier in
+                Toggle(SubagentTier.label(tier), isOn: menuCheck(chosen == tier) { setModel(tier, for: rank) })
+            }
+        }
+    }
 
     private func modelMenu(_ rank: RankRow) -> some View {
         let value = model(of: rank)
@@ -1821,6 +1844,8 @@ struct SettingsView: View {
 
     /// Same rule as the daemon: the name goes straight after `--model`, so no flags or spaces.
     private func modelError(for rank: RankRow) -> String? {
+        // 단계 메뉴는 고르기만 한다(글로 넣지 않는다).
+        if rank.tiers != nil { return nil }
         if store.modelCatalog.list(for: rank.cli).unknownCurrent(model(of: rank)) != nil {
             return String(localized: "\(rank.title): 목록에서 모델을 선택해 주세요")
         }

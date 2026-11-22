@@ -909,13 +909,26 @@ export function memberConfig(m: Pick<Member, "kind" | "modelOverride" | "effortO
 }
 
 /**
+ * Gemini(Antigravity CLI) 서브에이전트의 단계: invoke_subagent 의 Model 값 가운데 inherit 밖의 셋(실행 파일의 검사:
+ * "must be one of 'inherit', 'flash', 'pro', 'flash_lite'"). 단계마다 실제 모델은 Antigravity 서버 설정이 정한다(1.5.14 실측 이 계정:
+ * flash_lite → gemini-3.5-flash-lite, flash → gemini-4-hydrogen-tiered-high, pro → gemini-4-hydrogen-tiered-xhigh). 그래서 모델 이름이 아니라 단계를 고른다.
+ * 값이 없으면(null) inherit: 서브에이전트가 팀장 모델을 쓴다(아무것도 덮어쓰지 않는다).
+ */
+export const GEMINI_SUBAGENT_TIERS = ["flash_lite", "flash", "pro"] as const;
+export type GeminiSubagentTier = (typeof GEMINI_SUBAGENT_TIERS)[number];
+export function isGeminiSubagentTier(value: unknown): value is GeminiSubagentTier {
+  return typeof value === "string" && (GEMINI_SUBAGENT_TIERS as readonly string[]).includes(value);
+}
+
+/**
  * 그 CLI 의 세션에 넣는 서브에이전트(직원 직급) 값. Claude 는 모델·effort 둘 다, Codex 는 모델만 넣는다(effort 를 넘길 길이 없다).
- * Gemini(Antigravity CLI)는 서브에이전트의 모델도 effort 도 넘길 길이 없어 둘 다 null 이다: geminiRanks.staff 를 고쳐도 세션을 다시 열지 않는다.
+ * Gemini(Antigravity CLI)는 모델 자리에 단계(GEMINI_SUBAGENT_TIERS)를 넣는다(도구 훅이 invoke_subagent 의 Model 을 바꿔 쓴다). 단계가 아닌 값
+ * (0.2.10 이전의 미출시 빌드가 모델 이름을 저장했다)은 없는 것(inherit)으로 본다. effort 는 넘길 길이 없어 늘 null 이다.
  */
 export function staffConfig(cli: CliProvider | undefined, s: Pick<Settings, RanksKey>): RankConfig {
   switch (cli) {
     case "codex": return { model: s.codexRanks.staff.model, effort: null };
-    case "gemini": return { model: null, effort: null };
+    case "gemini": return { model: isGeminiSubagentTier(s.geminiRanks.staff.model) ? s.geminiRanks.staff.model : null, effort: null };
     case "claude": case undefined: return { model: s.ranks.staff.model, effort: s.ranks.staff.effort };
     // 타입 밖의 값(저장된 옛 행)은 지금까지처럼 Claude 값이다. CLI 를 더하면 아래 줄이 컴파일 오류가 되어 여기를 고치게 한다.
     default: { const unlisted: never = cli; void unlisted; return { model: s.ranks.staff.model, effort: s.ranks.staff.effort }; }

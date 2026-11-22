@@ -38,11 +38,19 @@ enum RankSettingsCLI: String, CaseIterable {
         case .gemini: \.geminiRankTable
         }
     }
-    /// 설정 화면이 이 CLI 에 보이는 직급. Antigravity CLI 는 서브에이전트의 모델을 따로 줄 길이 없어 staff 줄이 없다.
+    /// 설정 화면이 이 CLI 에 보이는 직급. 셋 다 같다: Gemini 의 서브에이전트(staff) 줄은 모델 대신 단계(subagentTiers)를 고른다.
     var editableRanks: [String] {
         switch self {
-        case .claude, .codex: ["manager", "lead", "staff"]
-        case .gemini: ["manager", "lead"]
+        case .claude, .codex, .gemini: ["manager", "lead", "staff"]
+        }
+    }
+    /// 서브에이전트(staff) 줄에서 모델 이름 대신 고르는 단계(서버 shared/types.ts GEMINI_SUBAGENT_TIERS). nil 이면 모델 목록에서 고른다.
+    /// Antigravity CLI 는 서브에이전트의 모델을 단계로만 받고(invoke_subagent 의 Model), 단계마다 실제 모델은 Antigravity 가 정한다.
+    /// 고르지 않으면(기본값) 서브에이전트가 팀장 모델을 쓴다.
+    var subagentTiers: [String]? {
+        switch self {
+        case .claude, .codex: nil
+        case .gemini: ["flash_lite", "flash", "pro"]
         }
     }
     /// 모델을 정해야만 effort 를 고를 수 있는가. Antigravity CLI 는 모델 없이 `--effort` 만 받으면 그 사용자의 기본 모델로 판정해,
@@ -84,6 +92,18 @@ enum RankSettingsCLI: String, CaseIterable {
         case .claude: "claude --resume"
         case .codex: "codex resume"
         case .gemini: "agy --conversation"
+        }
+    }
+}
+
+/// Gemini 서브에이전트 단계의 화면 이름(설정 → AI 모델의 서브에이전트 줄).
+enum SubagentTier {
+    static func label(_ tier: String) -> String {
+        switch tier {
+        case "flash_lite": String(localized: "Flash Lite · 가장 가벼움")
+        case "flash": String(localized: "Flash · 빠름")
+        case "pro": String(localized: "Pro · 깊게")
+        default: tier
         }
     }
 }

@@ -34,10 +34,13 @@ import UIKit
         XCTAssertEqual(RankSettingsCLI.gemini.title, "Gemini")
         XCTAssertEqual(RankSettingsCLI.gemini.efforts, ["low", "medium", "high", "xhigh", "max"])
         XCTAssertEqual(RankSettingsCLI.gemini.models, ["gemini-4-neon", "gemini-4-argon", "gemini-4-hydrogen", "gemini-3.8-flash"])
-        // 서브에이전트(staff) 줄은 Gemini 에 없다.
-        XCTAssertEqual(RankSettingsCLI.gemini.editableRanks, ["manager", "lead"])
+        // 서브에이전트(staff) 줄은 셋 다 있다. Gemini 는 모델 이름 대신 단계(flash_lite·flash·pro)를 고른다(서버 GEMINI_SUBAGENT_TIERS 와 같다).
+        XCTAssertEqual(RankSettingsCLI.gemini.editableRanks, ["manager", "lead", "staff"])
         XCTAssertEqual(RankSettingsCLI.claude.editableRanks, ["manager", "lead", "staff"])
         XCTAssertEqual(RankSettingsCLI.codex.editableRanks, ["manager", "lead", "staff"])
+        XCTAssertEqual(RankSettingsCLI.gemini.subagentTiers, ["flash_lite", "flash", "pro"])
+        XCTAssertNil(RankSettingsCLI.claude.subagentTiers)
+        XCTAssertNil(RankSettingsCLI.codex.subagentTiers)
         // Claude·Codex 의 값은 그대로다.
         XCTAssertEqual(RankSettingsCLI.claude.title, "Claude")
         XCTAssertEqual(RankSettingsCLI.codex.title, "Codex")
@@ -128,6 +131,26 @@ import UIKit
         cleared[keyPath: RankSettingsCLI.gemini.ranksKeyPath]["lead"]?.model = nil
         let undo = try object(AppStore.settingsPatch(base: draft, draft: cleared))
         XCTAssertTrue((undo["geminiRanks"] as? [String: [String: Any]])?["lead"]?["model"] is NSNull)
+    }
+
+    /// Gemini 서브에이전트 줄은 단계를 고른다: 저장 요청에는 staff 의 model(단계) 칸만 실린다(effort 는 없다). 기본값은 비우는 값(null)이다.
+    func testPickingAGeminiSubagentTierSendsOnlyTheStaffTier() throws {
+        let base = Settings(ranks: [:], codexRanks: [:], geminiRanks: ["manager": RankConfig(), "lead": RankConfig(), "staff": RankConfig()])
+        var draft = base
+        draft.setRankModel("flash_lite", rank: "staff", cli: .gemini)
+        let patch = try object(AppStore.settingsPatch(base: base, draft: draft))
+        XCTAssertEqual(Set(patch.keys), ["geminiRanks"])
+        let ranks = try XCTUnwrap(patch["geminiRanks"] as? [String: [String: Any]])
+        XCTAssertEqual(Set(ranks.keys), ["staff"])
+        XCTAssertEqual(Set(ranks["staff"]!.keys), ["model"])
+        XCTAssertEqual(ranks["staff"]?["model"] as? String, "flash_lite")
+        var back = draft
+        back.setRankModel(nil, rank: "staff", cli: .gemini)
+        let undo = try object(AppStore.settingsPatch(base: draft, draft: back))
+        XCTAssertTrue((undo["geminiRanks"] as? [String: [String: Any]])?["staff"]?["model"] is NSNull)
+        // 화면 이름: 단계마다 한 줄, 모르는 값은 그대로.
+        XCTAssertEqual(RankSettingsCLI.gemini.subagentTiers?.map(SubagentTier.label), ["Flash Lite · 가장 가벼움", "Flash · 빠름", "Pro · 깊게"])
+        XCTAssertEqual(SubagentTier.label("gemini-4-neon"), "gemini-4-neon")
     }
 
     /// 패치 계산을 CLI 표로 돌게 바꿨다: Claude·Codex 직급의 패치는 예전과 같은 모양이다.

@@ -150,22 +150,72 @@ export interface GeminiHooksInput {
   recorder?: GeminiHookRecorderOptions;
 }
 
+// ---- hooks.json 모으기 ----
+// 주입 폴더의 hooks.json 은 여러 장치의 처리기를 한 묶음("iamceo")에 모은 것이다: 사건 기록(아래 geminiRecorderHookSet), 도구 호출 직전 판정
+// (gemini-tool-hook.ts: 작업 폴더·서브에이전트 단계·결재함 승인). 장치마다 GeminiHookSet 을 만들고 geminiHooksFile 이 사건별로 잇는다.
+// 새 장치(예: 턴 끝 기록을 더 남기는 Stop 처리기)는 자기 GeminiHookSet 을 만들어 providers.ts 의 geminiHooksFile(...) 인자에 더하면 된다.
+// 같은 사건에 처리기가 여럿이면 agy 는 적힌 차례로 돈다(문서). PreToolUse·PostToolUse 는 matcher 묶음, 나머지는 처리기 목록이다(agy 의 모양 그대로).
+
+/** 처리기 하나. agy 는 `sh -c <command>` 로 돌리고 timeout 초가 지나면 끊는다(SIGKILL, 1.5.14 실측: PreToolUse 면 그 도구가 막힌다). */
+export interface GeminiHookHandler { type: "command"; command: string; timeout: number }
+/** PreToolUse·PostToolUse 의 묶음: matcher(도구 이름 정규식)에 맞는 호출에만 처리기를 돌린다. */
+export interface GeminiHookToolGroup { matcher: string; hooks: GeminiHookHandler[] }
+/** 한 장치의 처리기들. 사건 이름은 agy 의 것 그대로다. */
+export interface GeminiHookSet {
+  SessionStart?: GeminiHookHandler[];
+  PreInvocation?: GeminiHookHandler[];
+  PostInvocation?: GeminiHookHandler[];
+  Stop?: GeminiHookHandler[];
+  PreToolUse?: GeminiHookToolGroup[];
+  PostToolUse?: GeminiHookToolGroup[];
+}
+const HOOK_SET_EVENTS = ["SessionStart", "PreInvocation", "PostInvocation", "Stop", "PreToolUse", "PostToolUse"] as const;
+
 /**
- * 주입 폴더의 `.agents/hooks.json` 에 쓸 값: `{ "iamceo": { "SessionStart": [...], "PreInvocation": [...], "Stop": [...] } }`.
- * 세 사건 모두 같은 명령이다(사건 이름은 입력의 hookEventName 으로 가른다):
+ * 여러 장치의 처리기를 사건별로 이어 hooks.json 값 `{ "iamceo": { <사건>: [...] } }` 을 만든다. 인자의 차례가 같은 사건 안의 차례다.
+ * null·빈 장치는 건너뛴다. 처리기가 하나도 없으면 null 이다(부르는 쪽은 hooks.json 을 두지 않는다).
+ */
+export function geminiHooksFile(...sets: (GeminiHookSet | null | undefined)[]): Record<string, unknown> | null {
+  const merged: Record<string, unknown[]> = {};
+  for (const set of sets) {
+    if (!set) continue;
+    for (const event of HOOK_SET_EVENTS) {
+      const handlers = set[event] as unknown[] | undefined;
+      if (handlers?.length) (merged[event] ??= []).push(...handlers);
+    }
+  }
+  return Object.keys(merged).length ? { [GEMINI_HOOKS_NAME]: merged } : null;
+}
+
+/**
+ * 사건 기록 장치의 처리기: SessionStart·PreInvocation·Stop 에 같은 명령이다(사건 이름은 입력의 hookEventName 으로 가른다):
  * `{ cd <run> && BUN_BE_BUN=1 <실행 파일> --config=<빈 설정> --no-env-file <스크립트> <사건 폴더> <팀장>; } >/dev/null 2>&1; printf '{}'; exit 0`
  * 팀장의 작업 폴더에 있는 bunfig.toml(preload)·.env 를 읽지 않는다(bun-script.ts). 표준 출력의 `{}` 는 셸이 찍으므로 스크립트가 돌지 못해도 나온다.
- * 잘못된 팀장 ID·상대 경로면 던진다. 부르는 쪽(providers.ts)은 던지면 훅 없이 CLI 를 띄운다.
+ * (이 `{}` 꼴은 판정이 없는 사건에만 쓴다. PreToolUse 에 `{}` 를 내면 agy 가 도구를 막는다: gemini-tool-hook.ts.)
+ * 잘못된 팀장 ID·상대 경로면 던진다. 부르는 쪽(providers.ts)은 던지면 기록 훅 없이 CLI 를 띄운다.
  */
-export function geminiHooksConfig(input: GeminiHooksInput): Record<string, unknown> {
+export function geminiRecorderHookSet(input: GeminiHooksInput): GeminiHookSet {
   if (!MEMBER_ID_RE.test(input.memberId)) throw new Error("Invalid member id for gemini hook events");
   if (!isAbsolute(input.eventsDir)) throw new Error("Gemini hook events directory must be absolute");
   const runDir = dirname(input.eventsDir);
   const script = writeGeminiHookRecorder(runDir, input.recorder);
   const run = `${bunScriptCommand(input.recorder?.execPath ?? process.execPath, runDir, script)} ${quote(input.eventsDir)} ${quote(input.memberId)}`;
   const command = `{ cd ${quote(runDir)} && ${run}; } >/dev/null 2>&1; printf '{}'; exit 0`;
-  const handler = { type: "command", command, timeout: GEMINI_HOOK_TIMEOUT_SEC };
-  return { [GEMINI_HOOKS_NAME]: Object.fromEntries(GEMINI_HOOK_EVENTS.map(name => [name, [handler]])) };
+  const handler: GeminiHookHandler = { type: "command", command, timeout: GEMINI_HOOK_TIMEOUT_SEC };
+  return Object.fromEntries(GEMINI_HOOK_EVENTS.map(name => [name, [handler]])) as GeminiHookSet;
+}
+
+/** 이 hooks.json(주입 폴더에 쓴 것)에 사건 기록 장치의 PreInvocation 처리기가 실렸나. 못 읽으면 false. */
+export function geminiHooksRecordTurns(hooksFile: string): boolean {
+  try {
+    const value = JSON.parse(readFileSync(hooksFile, "utf8")) as Record<string, Record<string, { command?: unknown }[]> | undefined>;
+    return (value[GEMINI_HOOKS_NAME]?.PreInvocation ?? []).some(handler => typeof handler?.command === "string" && handler.command.includes(GEMINI_HOOK_RECORDER_MARKER));
+  } catch { return false; }
+}
+
+/** 사건 기록 장치만 실은 hooks.json 값: `{ "iamceo": { "SessionStart": [...], "PreInvocation": [...], "Stop": [...] } }`. */
+export function geminiHooksConfig(input: GeminiHooksInput): Record<string, unknown> {
+  return geminiHooksFile(geminiRecorderHookSet(input))!;
 }
 
 export interface GeminiHookRecord {

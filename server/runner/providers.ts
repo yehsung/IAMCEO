@@ -2,14 +2,15 @@
 // IAMCEO additions are invocation-scoped; no global CLI configuration is changed.
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { CLI_INFO, type CliProvider } from "../../shared/types.ts";
+import { CLI_INFO, isGeminiSubagentTier, type CliProvider } from "../../shared/types.ts";
 import type { RunnerMember, StartOpts } from "./types.ts";
 import { CoreError } from "./core-client.ts";
 import { writeStatuslineWrapper } from "./statusline.ts";
 import { hookEventsDir, hookSettings, mergeHooks } from "./hooks.ts";
 import { permissionHook } from "./permission-hook.ts";
 import { subagentEnv } from "./env.ts";
-import { geminiHookEventsDir, geminiHooksConfig } from "./gemini-hooks.ts";
+import { geminiHookEventsDir, geminiHooksFile, geminiRecorderHookSet, type GeminiHookSet } from "./gemini-hooks.ts";
+import { geminiToolHookSet } from "./gemini-tool-hook.ts";
 import { geminiInjectDir, geminiSettings, writeGeminiInjectDir } from "./gemini-inject.ts";
 import { geminiStatusLine } from "./gemini-statusline.ts";
 
@@ -84,7 +85,8 @@ export function providerBin(provider: CoreProvider, bins: ProviderBins): string 
  * - effort 는 모델을 정했을 때만 넘긴다. 모델 없이 --effort 만 주면 agy 가 사용자의 기본 모델로 판정하고, 그 모델이 그 값을 받지 않으면 뜨지 못한다
  *   (1.5.14 실측: `--effort max` → exit 1 `gemini-4-neon has no "max" effort`. 기본 모델은 사용자마다 다르다).
  * - 띄울 때마다 임의 값을 만들어 상태줄 명령의 인자와 터미널 라벨(GEMINI_LAUNCH_LABEL)에 함께 싣는다.
- * - 서브에이전트 모델(subagentModel)은 agy 에 넘길 길이 없어 쓰지 않는다. Claude 용 설정 파일(opts.settingsFile)도 쓰지 않는다.
+ * - 서브에이전트 모델 자리(subagentModel)에는 단계(flash_lite·flash·pro)가 온다: 도구 훅이 invoke_subagent 의 Model 을 바꿔 쓴다(gemini-tool-hook.ts).
+ *   agy 에는 그 밖에 서브에이전트 모델을 넘길 길(옵션·환경 변수)이 없다. Claude 용 설정 파일(opts.settingsFile)은 쓰지 않는다.
  * - 상태 보고(OSC 7501)는 AGY_CLI_OSC7501=on 으로 늘 켠다. MCP 서버의 열쇠는 프로세스 환경·명령줄이 아니라 주입 폴더 옆의 환경 파일(0600)에 둔다(gemini-inject.ts).
  */
 function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins, bin: string): ProviderLaunch {
@@ -92,16 +94,26 @@ function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins,
   if (opts.resume && !member.sessionId) throw new CoreError("session_unknown", "Antigravity conversation id is unknown; reattach the existing core terminal or explicitly start a fresh session");
   const events = bins.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0";
   // 경로로 쓸 수 없는 팀장 id·상대 경로면 여기서 던진다(띄우지 않는다). 아래의 '빼고 띄웁니다' 줄이 띄우지도 않을 것에 남지 않게 먼저 본다.
-  geminiInjectDir(opts.systemPromptFile, member.id);
+  const plannedInjectDir = geminiInjectDir(opts.systemPromptFile, member.id);
   // 훅·상태줄을 만들지 못해도 CLI 는 띄운다(기록이 없을 뿐이다). 지침·MCP 를 쓰지 못하면 띄우지 않는다.
-  let hooks: Record<string, unknown> | null = null;
+  // 훅은 장치마다 따로 만든다(gemini-hooks.ts geminiHooksFile): 한 장치를 만들지 못해도 나머지는 그대로 싣는다.
+  const hookSets: GeminiHookSet[] = [];
   // 만들지 못한 것은 서버 기록에 한 줄 남긴다: 그 세션은 뜨지만 대화 id·문맥 %·전달 수신 확인의 근거가 줄어든다. 까닭은 오류 종류만 적는다(경로·열쇠는 적지 않는다).
   const why = (error: unknown): string => (error as NodeJS.ErrnoException)?.code ?? (error instanceof Error ? error.name : "error");
   if (bins.contextHome && events) {
-    try { hooks = geminiHooksConfig({ memberId: member.id, eventsDir: geminiHookEventsDir(bins.contextHome) }); }
+    try { hookSets.push(geminiRecorderHookSet({ memberId: member.id, eventsDir: geminiHookEventsDir(bins.contextHome) })); }
     catch (error) { console.warn(`[gemini] ${member.id}: 훅 기록을 만들지 못해 훅 없이 띄웁니다. 전달 수신 확인과 대화 id 의 둘째 근거(훅 기록)가 없습니다 (${why(error)})`); }
   }
-  const injectDir = writeGeminiInjectDir({ memberId: member.id, systemPromptFile: opts.systemPromptFile, mcpConfigFile: opts.mcpConfigFile, hooks });
+  // 도구 호출 직전 판정(작업 폴더 바로잡기, 결재함 승인). 사건 기록과 따로다: IAMCEO_HOOK_EVENTS=0 이어도 싣는다(산출물이 주입 폴더에 생기지 않게).
+  // 승인은 Claude 와 같은 조건이다(toolPermissionHook): 받을 서버가 있고(bins.toolPermission), 묻지 않기 팀장이 아니고, IAMCEO_TOOL_PERMISSION=0 이 아닐 때.
+  if (bins.contextHome) {
+    const permission = member.permissionMode !== "bypassPermissions" && bins.toolPermission === true && process.env.IAMCEO_TOOL_PERMISSION !== "0" ? { mcpConfigFile: opts.mcpConfigFile } : null;
+    // 서브에이전트 단계(shared/types.ts staffConfig 가 단계만 넘긴다): invoke_subagent 의 Model 을 바꿔 쓴다. 없으면 inherit(팀장 모델).
+    const tier = isGeminiSubagentTier(member.subagentModel) ? member.subagentModel : null;
+    try { hookSets.push(geminiToolHookSet({ runDir: join(bins.contextHome, "run"), cwd: member.cwd, injectDir: plannedInjectDir, permission, tier })); }
+    catch (error) { console.warn(`[gemini] ${member.id}: 도구 훅을 만들지 못해 빼고 띄웁니다. 작업 폴더 바로잡기가 없습니다 (${why(error)})`); }
+  }
+  const injectDir = writeGeminiInjectDir({ memberId: member.id, systemPromptFile: opts.systemPromptFile, mcpConfigFile: opts.mcpConfigFile, cwd: member.cwd, hooks: geminiHooksFile(...hookSets) });
   // 이 띄우기의 값. 상태줄 명령이 기록마다 적고, 실행기는 터미널 라벨의 같은 값으로 이 터미널의 기록을 가려낸다.
   const launchId = crypto.randomUUID().replaceAll("-", "");
   let statusLine: { type: "command"; command: string } | null = null;
@@ -111,15 +123,14 @@ function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins,
   }
   const args: string[] = [];
   if (opts.resume && member.sessionId) args.push("--conversation", member.sessionId);
-  args.push("--add-dir", injectDir, "--settings", JSON.stringify(geminiSettings({ cwd: member.cwd, injectDir, permissionMode: member.permissionMode, statusLine })));
+  args.push("--add-dir", injectDir, "--settings", JSON.stringify(geminiSettings({ cwd: member.cwd, injectDir, permissionMode: member.permissionMode, autoFallback: member.geminiAutoFallback === true, statusLine })));
   // 모델을 정하지 않았으면 effort 도 넘기지 않는다(위 설명): agy 의 기본 모델·기본 effort 로 뜬다.
   if (member.model) {
     args.push("--model", member.model);
     if (member.effort) args.push("--effort", member.effort);
   }
-  // default(전부 묻기)는 플래그가 없다: 위 설정의 agentMode "" 가 그 뜻이다.
+  // default(전부 묻기)·auto 는 플래그가 없다: 위 설정의 agentMode("" · "auto", 대신하는 모드면 "accept-edits")가 그 뜻이다.
   if (member.permissionMode === "bypassPermissions") args.push("--dangerously-skip-permissions");
-  else if (member.permissionMode === "auto") args.push("--mode", "auto");
   return { argv: [bin, ...args], env: { AGY_CLI_OSC7501: "on", IAMCEO_MEMBER_ID: member.id }, sessionId: opts.resume ? member.sessionId : null, labels: { [GEMINI_LAUNCH_LABEL]: launchId } };
 }
 

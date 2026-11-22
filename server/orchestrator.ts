@@ -75,7 +75,7 @@ import { providerLaunch } from "./runner/providers.ts";
 import { CoreRunner, codexBackgroundTerminals, ensureCoreServer, eofLogBaseline, type CoreCompactState, type CoreRunnerDeps, type CoreRunnerOptions } from "./runner/core.ts";
 import { approvalSummary } from "./runner/core-approval.ts";
 import { CLAUDE_BACKGROUND_REASON, CLAUDE_LOGIN_ERRORS, CLAUDE_LOGIN_REASON } from "./runner/claude-turn.ts";
-import { ToolPermissions, type ToolPermissionPoll, type ToolPermissionRequest } from "./tool-permission.ts";
+import { ToolPermissions, type GeminiEffectiveMode, type ToolPermissionPoll, type ToolPermissionRequest } from "./tool-permission.ts";
 import { exactSource, measureContext } from "./runner/context.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity, RunnerReattachResult, DeliveryRepair } from "./runner/types.ts";
 import { ApiError, type AppliedConfig, type ExecutionJournal, type NewDelivery, type Store } from "./store.ts";
@@ -314,6 +314,11 @@ interface Runtime {
   holdUntil: number;
   /** 새 설정으로 다시 열기를 포기한 설정. 설정이 또 바뀌면 다시 시도한다. */
   configGaveUp: string | null;
+  /**
+   * Gemini(Antigravity CLI): 권한 auto 로 띄운 실행이 auto 로 뜨지 않았다(상태줄의 cycle_mode 가 default). 다음 띄우기부터 auto 를 대신하는 모드
+   * (accept-edits + 터미널 샌드박스, gemini-inject.ts)로 띄운다. 메모리에만 있다: 서버를 다시 켜면 auto 를 다시 해 본다.
+   */
+  geminiAutoFallback?: boolean;
   /** 서버가 이 직원의 CLI 를 새로 띄운 시각. 곧바로 끝나는 세션을 세는 데만 쓴다. */
   launchedAt: number | null;
   /** 띄우자마자 끝난 횟수(연속)와 마지막 시각. 턴이 한 번이라도 끝나거나 대표가 직접 깨우면 0 으로 돌아간다. */
@@ -697,7 +702,8 @@ export class Orchestrator implements OrchestratorApi {
     // K(E2): 허용하며 남긴 메모는 훅의 답에 실을 수 없어 팀장의 다음 입력으로 보낸다(결재와 묶지 않는다: 전달 실패가 카드를 다시 열지 않게).
     this.toolPermissions = new ToolPermissions({ store: this.store, notify: (title, body) => this.notifyInbox(title, body),
       deliverNote: (member, decision) => { this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "answer", text: formatAnswer(decision) }); void this.pump(member.id); },
-      stillBlocked: member => this.notifyInbox(textRef("notice.approval_wait.title", { name: member.name }), textRef("notice.tool_card_unanswered")) });
+      stillBlocked: member => this.notifyInbox(textRef("notice.approval_wait.title", { name: member.name }), textRef("notice.tool_card_unanswered")),
+      geminiMode: member => this.geminiEffectiveMode(member) });
     this.store.repairRejectedLimit();
     this.apiRecovery = new ApiRecovery({ ...deps.apiRecovery, store: this.store,
       notify: (projectId, text, alertOwner = true) => { this.systemMessage(projectId, text); if (alertOwner) this.store.afterCommit(() => this.notifyInbox(textRef("notice.api_usage.title"), text)); },
@@ -2408,7 +2414,8 @@ export class Orchestrator implements OrchestratorApi {
         if (target.cli === "gemini" && model && !this.models.listed("gemini", model)) throw new ApiError(400, "Gemini용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요", "cli_switch_model_mismatch_gemini");
         // Gemini(Antigravity CLI)는 띄우기 인자를 만들면서 주입 폴더(규칙·MCP·훅 파일)를 고쳐 쓴다(runner/providers.ts). 실행기와 같은 기록 폴더를 줘야
         // 미리 해 보는 이 검사가, 아직 떠 있는 같은 팀장 세션의 훅 파일을 지우지 않는다(운영 조립의 contextHome 은 데이터 홈이다).
-        const bins = target.cli === "gemini" ? { ...this.config, contextHome: this.config.home } : this.config;
+        // 결재함 승인 훅도 실행기와 같게 싣는다(아니면 이 검사가 떠 있는 세션의 훅 설정에서 승인 부분을 지운다).
+        const bins = target.cli === "gemini" ? { ...this.config, contextHome: this.config.home, toolPermission: targetRunner.toolPermissionHooks } : this.config;
         try { providerLaunch(this.runnerMember(target, project), this.writeRunFiles(target, project, !!target.sessionId), bins); }
         catch (e) { throw new ApiError(400, `CLI 설정을 적용할 수 없습니다: ${(e as Error).message}`, "cli_config_failed"); }
       }
@@ -4719,7 +4726,34 @@ export class Orchestrator implements OrchestratorApi {
     const staff = staffConfig(member.cli, settings);
     // 0.2.8: 앱에서 다른 계정으로 로그인한 뒤면 그 세대. 한 번도 없었으면 칸을 두지 않는다(예전 세션의 적용 기록과 글자까지 같다).
     const account = this.accountEpoch(member.cli);
-    return { model, effort, staffModel: staff.model, staffEffort: staff.effort, ...(account ? { account } : {}) };
+    // Gemini: auto 가 들지 않은 팀장은 대신하는 모드로 다시 연다(칸이 다르면 쉴 때 같은 대화를 이어 연다). 칸이 없으면 예전 적용 기록과 글자까지 같다.
+    const geminiMode = this.geminiAutoFallback(member) ? { geminiMode: "auto-fallback" as const } : {};
+    return { model, effort, staffModel: staff.model, staffEffort: staff.effort, ...(account ? { account } : {}), ...geminiMode };
+  }
+
+  /**
+   * Gemini 팀장의 지금 모드(결재함 승인 카드의 판정, tool-permission.ts geminiNeedsCard). 띄운 뜻(권한 방식, 지금 세션이 대신하는 모드로 떴나)에서 시작해
+   * 실행기가 알려 준 실제 모드(상태줄의 cycle_mode, CoreRunner.geminiMode)가 있으면 그것을 따른다.
+   * 묻지 않기 팀장에게는 승인 훅을 싣지 않는다. 그래도 요청이 왔다면(띄운 뒤 권한 방식을 바꿨다) agy 는 띄울 때의 정책으로 묻고 있으니 default 로 본다.
+   */
+  private geminiEffectiveMode(member: Member): GeminiEffectiveMode {
+    const fallback = this.store.getAppliedConfig(member.id)?.geminiMode === "auto-fallback";
+    const launched: GeminiEffectiveMode = this.store.getSettings().permissionMode === "auto" ? (fallback ? "fallback" : "auto") : "default";
+    const runner = this.runners.get(this.backendOf(member)) as (Runner & { geminiMode?(memberId: string): { cycleMode: string; sandbox: boolean | null } | null }) | undefined;
+    const seen = runner?.geminiMode?.(member.id) ?? null;
+    switch (seen?.cycleMode) {
+      case undefined: return launched;
+      case "auto": return "auto";
+      // 대신하는 모드로 띄운 세션이 샌드박스를 켠 채 accept-edits 면 그 모드다. 사람이 Shift+Tab 으로 고른 accept-edits(샌드박스 없음)는 명령을 묻는다.
+      case "accept-edits": return fallback && seen.sandbox !== false ? "fallback" : "accept-edits";
+      case "default": case "plan": return "default";
+      default: return launched;
+    }
+  }
+
+  /** 이 Gemini 팀장을 권한 auto 대신의 모드로 띄울 것인가(권한 방식이 auto 이고 이 서버에서 그 팀장의 auto 가 들지 않은 적이 있다). */
+  private geminiAutoFallback(member: Pick<Member, "id" | "cli">): boolean {
+    return member.cli === "gemini" && this.store.getSettings().permissionMode === "auto" && this.runtime(member.id).geminiAutoFallback === true;
   }
 
   // ---- 0.2.8: AI 계정 로그인 뒤 새 계정 적용 ----
@@ -4853,7 +4887,9 @@ export class Orchestrator implements OrchestratorApi {
     const have = this.store.getAppliedConfig(member.id);
     return want.model !== (have?.model ?? null) || want.effort !== (have?.effort ?? null) || want.staffModel !== (have?.staffModel ?? null) || want.staffEffort !== (have?.staffEffort ?? null)
       // 0.2.8: 앱에서 다른 계정으로 로그인했다. 이 세션은 이전 계정으로 떠 있다.
-      || (want.account ?? 0) !== (have?.account ?? 0);
+      || (want.account ?? 0) !== (have?.account ?? 0)
+      // 0.2.10: Gemini 의 auto 가 들지 않아 대신하는 모드로 바꾼다(또는 서버를 다시 켜 auto 를 다시 해 본다).
+      || (want.geminiMode ?? null) !== (have?.geminiMode ?? null);
   }
 
   /** 쉬는 세션을 새 설정으로 다시 연다(같은 대화를 이어 띄운다). 이번 전달을 그대로 이어가도 되면 true. */
@@ -5600,7 +5636,29 @@ export class Orchestrator implements OrchestratorApi {
       case "pane":
         this.store.patchMember(member.id, { paneId: e.paneId });
         return;
+      case "gemini_mode":
+        if (e.initial) this.onGeminiMode(member, e.cycleMode);
+        return;
     }
+  }
+
+  /**
+   * Gemini(Antigravity CLI) 터미널이 실제로 든 모드를 알렸다(CoreRunner, 상태줄의 cycle_mode). 권한 auto 로 띄웠는데 default 면 auto 가 들지 않은 것이다:
+   * 1.5.14 실측으로 로그인 직후 실험 플래그를 받지 못한 실행(20여 번 중 3번)이 그렇게 떨어지고, auto 를 쓸 수 없는 계정·환경(기업 계정, 샌드박스 없음)도 같다.
+   * 그대로 두면 그 팀장은 '매번 묻기'로 돈다(명령·파일 고치기마다 승인). 그래서 다음 띄우기부터 auto 를 대신하는 모드(accept-edits + 터미널 샌드박스)로
+   * 띄운다: desiredConfig 의 칸이 바뀌어 쉬는 때에 같은 대화를 이어 연다(말을 걸기 전이면 새로 띄운다). 활동에 한 줄 남긴다.
+   * 터미널에서 처음 자리 잡은 모드만 본다(그 뒤의 바뀜은 사람이 Shift+Tab 으로 바꾼 것이다). 대신하는 모드로 띄운 실행은 손대지 않는다.
+   */
+  private onGeminiMode(member: Member, cycleMode: string): void {
+    if (member.cli !== "gemini" || member.origin !== "runner" || cycleMode !== "default") return;
+    if (this.store.getSettings().permissionMode !== "auto") return;
+    const rt = this.runtime(member.id);
+    if (rt.geminiAutoFallback) return;
+    // 이 터미널이 auto 를 바라고 띄운 것이어야 한다(적용 기록에 대신하는 모드 칸이 없다).
+    if (this.store.getAppliedConfig(member.id)?.geminiMode) return;
+    rt.geminiAutoFallback = true;
+    this.store.appendActivity(member.id, "system", textRef("activity.gemini_auto_fallback"));
+    void this.pump(member.id);
   }
 
   /** 지금의 막힘에서 이미 알린 까닭들. 메모리에만 있다. */
@@ -6048,6 +6106,7 @@ export class Orchestrator implements OrchestratorApi {
       ...this.memberRun(member, settings),
       subagentModel: staffConfig(member.cli, settings).model,
       permissionMode: settings.permissionMode,
+      ...(this.geminiAutoFallback(member) ? { geminiAutoFallback: true } : {}),
       kind: member.kind,
       origin: member.origin,
       sessionGeneration: this.store.getMember(member.id) ? this.store.memberRevisions(member.id).sessionGeneration : undefined,
@@ -6060,7 +6119,11 @@ export class Orchestrator implements OrchestratorApi {
     const staffEffort = staffConfig(member.cli, settings).effort;
     // B1: 보고 언어가 en 이면 지침 끝에 영어 보고 줄이 붙는다. 세션을 띄울 때마다(깨우기·재시작·압축 뒤 규칙) 지금 설정을 읽는다.
     // 0.2.7 묶음 5(D5-5): 이 프로젝트의 대표 상시 규칙을 지침 끝에 싣는다. 띄울 때마다 지금 것을 읽는다.
-    return renderRole(member.kind, { PROJECT: project.name, NAME: member.name, ROLE: member.role, CONDUCTOR: conductor?.name ?? "총괄", SUBAGENT_EFFORT: staffEffort ? `- 서브에이전트·워크플로를 부를 때 effort=${staffEffort} 을 넘긴다.` : "", REPORT_LANGUAGE: settings.reportLanguage, OWNER_RULES: projectRules(this.store).list(project.id) }, this.config.rolesDir);
+    // Gemini: 대표가 고른 서브에이전트 단계는 도구 훅이 invoke_subagent 의 Model 을 바꿔 쓴다. 팀장이 "Changed: Model" 알림에 놀라지 않게 한 줄 알린다.
+    const tier = member.cli === "gemini" ? staffConfig(member.cli, settings).model : null;
+    const subagentRule = tier ? `- 서브에이전트(invoke_subagent)의 단계(Model)는 대표가 정한 ${tier} 다. IAMCEO 가 그 값으로 맞추므로 Model 인자를 따로 고르지 않는다.`
+      : staffEffort ? `- 서브에이전트·워크플로를 부를 때 effort=${staffEffort} 을 넘긴다.` : "";
+    return renderRole(member.kind, { PROJECT: project.name, NAME: member.name, ROLE: member.role, CONDUCTOR: conductor?.name ?? "총괄", SUBAGENT_EFFORT: subagentRule, REPORT_LANGUAGE: settings.reportLanguage, OWNER_RULES: projectRules(this.store).list(project.id) }, this.config.rolesDir);
   }
 
   /** 시스템 프롬프트·MCP 설정 파일을 쓴다. MCP 설정에 멤버 토큰이 들어가 본인만 읽게 한다. */

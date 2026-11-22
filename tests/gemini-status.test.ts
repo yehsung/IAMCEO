@@ -67,12 +67,14 @@ const RECORD: GeminiStatusRecord = {
   subagentsUnknown: 1,
   planTier: "Google AI Ultra",
   launch: null,
+  cycleMode: "auto",
+  sandbox: null,
 };
 /** 모양이 다른 입력에서 나오는 빈 기록. */
 const EMPTY: GeminiStatusRecord = {
   v: 1, memberId: "m_lead1", at: "2026-11-21T03:00:00.000Z", conversationId: null, transcriptPath: null,
   model: { id: null, effort: null }, context: { usedPct: null, windowSize: null, inputTokens: null, outputTokens: null },
-  quota: {}, costUsd: null, agentState: null, subagents: 0, subagentsUnknown: 0, planTier: null, launch: null,
+  quota: {}, costUsd: null, agentState: null, subagents: 0, subagentsUnknown: 0, planTier: null, launch: null, cycleMode: null, sandbox: null,
 };
 const LAUNCH = "0f8fad5bd9cb469fa16570867728950e";
 
@@ -331,5 +333,41 @@ describe("기록 읽기", () => {
     expect(readGeminiStatus(home, "m_big")).toBeNull();
     put(home, "m_big", JSON.stringify({ ...RECORD, memberId: "m_big" }) + " ".repeat(1024));
     expect(readGeminiStatus(home, "m_big")).toEqual({ ...RECORD, memberId: "m_big" });
+  });
+});
+
+describe("모드(cycle_mode)·샌드박스: 권한 auto 가 실제로 들었는지의 근거", () => {
+  test("cycle_mode 글은 그대로, 칸이 없으면 default(상태줄 입력으로 보일 때만), 그 밖은 모름", () => {
+    const mode = (payload: Record<string, unknown>) => geminiStatusFromPayload("m_lead1", payload, NOW).cycleMode;
+    expect(mode({ agent_state: "idle", cycle_mode: "auto" })).toBe("auto");
+    expect(mode({ agent_state: "idle", cycle_mode: "accept-edits" })).toBe("accept-edits");
+    expect(mode({ agent_state: "idle" })).toBe("default");
+    expect(mode({ agent_state: "idle", cycle_mode: null })).toBe("default");
+    // agent_state 가 없거나 빈 글이면 상태줄 입력으로 믿지 않는다: 칸이 없어도 default 로 읽지 않는다.
+    expect(mode({})).toBeNull();
+    expect(mode({ agent_state: "" })).toBeNull();
+    for (const bad of [7, "", "x".repeat(41), "a\nb", { v: "auto" }]) expect(mode({ agent_state: "idle", cycle_mode: bad })).toBeNull();
+  });
+  test("sandbox.enabled 는 참·거짓일 때만", () => {
+    const sandbox = (value: unknown) => geminiStatusFromPayload("m_lead1", { agent_state: "idle", sandbox: value }, NOW).sandbox;
+    expect(sandbox({ enabled: true })).toBe(true);
+    expect(sandbox({ enabled: false })).toBe(false);
+    for (const bad of [undefined, null, true, { enabled: "yes" }, []]) expect(sandbox(bad)).toBeNull();
+  });
+  test("이 칸을 모르던 래퍼의 기록도 읽는다(모름 = null). 있는데 모양이 다르면 깨진 기록이다", () => {
+    const home = mkdtempSync(join(tmpdir(), "iamceo-gst-mode-"));
+    try {
+      const path = geminiStatusPath(home, "m_lead1");
+      mkdirSync(dirname(path), { recursive: true });
+      const { cycleMode: _c, sandbox: _s, ...old } = RECORD;
+      writeFileSync(path, JSON.stringify(old));
+      expect(readGeminiStatus(home, "m_lead1")).toEqual({ ...RECORD, cycleMode: null, sandbox: null });
+      writeFileSync(path, JSON.stringify({ ...RECORD, cycleMode: "default", sandbox: true }));
+      expect(readGeminiStatus(home, "m_lead1")).toEqual({ ...RECORD, cycleMode: "default", sandbox: true });
+      writeFileSync(path, JSON.stringify({ ...RECORD, cycleMode: 3 }));
+      expect(readGeminiStatus(home, "m_lead1")).toBeNull();
+      writeFileSync(path, JSON.stringify({ ...RECORD, sandbox: "on" }));
+      expect(readGeminiStatus(home, "m_lead1")).toBeNull();
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 });

@@ -143,6 +143,7 @@ enum ServerErrorText {
         "cli_switch_busy": (ko: "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요", en: "Work or a session action is in progress. Switch the CLI after the turn ends"),
         "cli_switch_delivery_unknown": (ko: "전달 여부가 확인되지 않은 입력이 있어 CLI를 바꿀 수 없습니다", en: "Some input has an unconfirmed delivery, so the CLI can't be switched"),
         "cli_switch_model_mismatch": (ko: "Codex용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요", en: "Pick a model for Codex, or set the staff member's model back to the default"),
+        "gemini_staff_tier_unknown": (ko: "Gemini 서브에이전트는 단계(flash_lite·flash·pro)만 고를 수 있습니다", en: "For Gemini subagents, pick a tier (flash_lite, flash or pro)"),
         "cli_switch_model_mismatch_gemini": (ko: "Gemini용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요", en: "Pick a model for Gemini, or set the staff member's model back to the default"),
         "cli_config_failed": (ko: "CLI 설정을 적용할 수 없습니다", en: "Couldn't apply the CLI settings"),
         "model_unknown": (ko: "목록에 없는 모델입니다", en: "That model is not on the list"),

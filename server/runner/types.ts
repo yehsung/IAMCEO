@@ -31,6 +31,11 @@ export interface RunnerMember {
   /** 서브에이전트 모델. CLI 를 띄울 때 환경변수로 넘긴다. null 이면 넘기지 않는다. */
   subagentModel: string | null;
   permissionMode: PermissionMode;
+  /**
+   * Antigravity CLI 만: 권한 auto 를 대신하는 모드(accept-edits + 터미널 샌드박스)로 띄운다. 그 팀장의 앞 실행이 auto 로 뜨지 않았을 때 서버가 켠다
+   * (gemini-inject.ts geminiSettings 의 autoFallback). 없으면 false.
+   */
+  geminiAutoFallback?: boolean;
   kind: MemberKind;
   /** adopted 는 옛 실행기 시절 넘겨받은 명부다. core 는 그 세션을 띄우지도 끝내지도 않는다(unsupported). */
   origin?: MemberOrigin;
@@ -183,6 +188,14 @@ export type RunnerEvent = RunnerObservation & (
   | { type: "subagents"; memberId: string; quality: "exact" | "estimated" | "unknown"; count: number | null }
   | { type: "compacted"; memberId: string }
   | { type: "pane"; memberId: string; paneId: string }
+  /**
+   * Antigravity CLI 만: 이 터미널의 agy 가 실제로 든 모드(상태줄 입력의 cycle_mode, gemini-status.ts). 띄운 뒤 자리 잡은 값이 바뀔 때만 낸다.
+   * cycleMode: "auto"·"accept-edits"·"plan", 칸이 없으면 "default"(문서: default 모드에서는 빠진다). sandbox: 상태줄의 sandbox.enabled(모르면 null).
+   * 서버는 권한 auto 로 띄웠는데 처음 자리 잡은 모드가 default 면 다음 띄우기를 대신하는 모드로 바꾼다(Orchestrator).
+   */
+  | { type: "gemini_mode"; memberId: string; cycleMode: string; sandbox: boolean | null;
+      /** 이 터미널에서 처음 자리 잡은 모드인가. 처음이 아니면 사람이 터미널에서 바꾼 것이다(Shift+Tab). */
+      initial: boolean }
 );
 
 export interface TerminalControlAction { action: "claim" | "release" | "input" | "key"; leaseId?: string; text?: string; key?: string }

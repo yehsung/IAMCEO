@@ -113,6 +113,7 @@ export const SERVER_TEXTS = {
   "activity.decision_closed_by_answer_group": { ko: "결재 #{id}를 대표 답 #{answer}에 따라 닫았습니다 (같은 그룹)", en: "Closed decision #{id} based on your answer #{answer} (same group)" },
   "activity.restart_reopened": { ko: "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 세션을 이어서 열었습니다", en: "The Mac or the engine restarted; the session that closed was reopened to continue" },
   // 0.2.10: Gemini(Antigravity CLI)는 이어 열 대화를 열지 못하면 오류 없이 새 대화를 연다. 대화 id 가 바뀐 것으로 안다.
+  "activity.gemini_auto_fallback": { ko: "Antigravity CLI가 이번 실행에서 auto 모드로 뜨지 않았습니다. 쉬는 때에 같은 대화를 auto 대신의 모드(파일 고치기·샌드박스 안 명령만 자동 승인)로 다시 엽니다", en: "Antigravity CLI didn't start in auto mode this time. When idle, the same conversation reopens in a mode that stands in for auto (only file edits and sandboxed commands are approved automatically)" },
   "activity.gemini_resume_lost": { ko: "이전 대화를 이어 열지 못해 새 대화로 열렸습니다. 앞 대화의 맥락은 없습니다", en: "Couldn't reopen the previous conversation, so a new one was opened. The earlier context is gone" },
   "activity.gemini_conversation_changed": { ko: "대화가 새로 열렸습니다. 앞 대화의 맥락은 이어지지 않습니다", en: "A new conversation was opened. The earlier context doesn't carry over" },
   "activity.missing_report_final": { ko: "결과 보고 누락: 보완 요청 뒤에도 결과가 남지 않았습니다", en: "Missing result report: no result even after it was asked for" },

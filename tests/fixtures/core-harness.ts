@@ -27,7 +27,7 @@ import type { CoreTerminal } from "../../server/runner/core-client.ts";
 import { transcriptPath } from "../../server/runner/transcript.ts";
 import { geminiStatusFromPayload, geminiStatusPath } from "../../server/runner/gemini-status.ts";
 import { geminiStatusLineLaunch } from "../../server/runner/gemini-statusline.ts";
-import { geminiHookEventsDir } from "../../server/runner/gemini-hooks.ts";
+import { geminiHookEventsDir, geminiHooksRecordTurns } from "../../server/runner/gemini-hooks.ts";
 import { parseGeminiMcpEnv } from "../../server/runner/gemini-inject.ts";
 import type { Runner } from "../../server/runner/types.ts";
 import { Store } from "../../server/store.ts";
@@ -132,6 +132,11 @@ export interface FakeCoreOptions {
    * "none": 상태줄 명령이 한 번도 돌지 않는다(기록이 없다). 훅 기록은 어느 경우에나 그대로 남는다.
    */
   geminiStatus?: "full" | "no_conversation" | "none";
+  /**
+   * 가짜 agy 가 auto 모드를 쓸 수 없는 계정·환경인가. 그러면 --settings 의 agentMode "auto" 를 받아도 default 로 뜬다(상태줄에 cycle_mode 가 없다, 문서).
+   * 기본(false)은 agentMode 그대로다: "auto"·"accept-edits"·"plan" 은 cycle_mode 에 싣고 ""(default) 는 뺀다.
+   */
+  geminiAutoUnavailable?: boolean;
 }
 interface Holder {
   terminal: CoreTerminal; run: FakeRun; history: string; screen: string | null; draft: string;
@@ -175,7 +180,11 @@ export async function startFakeCore(options: FakeCoreOptions) {
     const path = geminiStatusPath(options.contextHome, member);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const conversation = options.geminiStatus === "no_conversation" ? "" : holder.run.sessionId ?? "";
-    const payload = { session_id: conversation, conversation_id: conversation, model: { id: "fake-model", display_name: "fake-model" }, agent_state: holder.turn ? "working" : "idle", ...extra };
+    // 모드: 띄울 때의 --settings agentMode(문서 docs_cli_statusline.md: default 모드에서는 cycle_mode 가 빠진다). sandbox 는 enableTerminalSandbox.
+    const agentMode = holder.run.settings?.agentMode;
+    const cycleMode = typeof agentMode === "string" && agentMode && !(agentMode === "auto" && options.geminiAutoUnavailable) ? { cycle_mode: agentMode } : {};
+    const sandbox = { sandbox: { enabled: holder.run.settings?.enableTerminalSandbox === true } };
+    const payload = { session_id: conversation, conversation_id: conversation, model: { id: "fake-model", display_name: "fake-model" }, agent_state: holder.turn ? "working" : "idle", ...cycleMode, ...sandbox, ...extra };
     const launch = typeof statusLine.command === "string" ? geminiStatusLineLaunch(statusLine.command) : null;
     const tmp = `${path}.${crypto.randomUUID()}.tmp`;
     writeFileSync(tmp, JSON.stringify(geminiStatusFromPayload(member, payload, new Date(), launch)), { mode: 0o600 });
@@ -184,7 +193,8 @@ export async function startFakeCore(options: FakeCoreOptions) {
   /** 가짜 agy 의 훅: 주입 폴더에 hooks.json 이 있으면 서버의 기록 스크립트가 남길 줄을 같은 모양으로 사건 파일에 덧붙인다(본문 없이 표지만). */
   function geminiHook(holder: Holder, entry: Record<string, unknown>) {
     const member = holder.run.memberId;
-    if (!options.contextHome || !member || !holder.run.addDir || !existsSync(join(holder.run.addDir, ".agents", "hooks.json"))) return;
+    // 주입 폴더의 hooks.json 에 기록 사건이 실렸을 때만이다(도구 훅 PreToolUse 만 있으면 기록 줄이 생기지 않는다).
+    if (!options.contextHome || !member || !holder.run.addDir || !geminiHooksRecordTurns(join(holder.run.addDir, ".agents", "hooks.json"))) return;
     const dir = geminiHookEventsDir(options.contextHome);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     appendFileSync(join(dir, `${member}.jsonl`), `${JSON.stringify({ v: 1, cli: "gemini", at: Date.now(), conversationId: holder.run.sessionId, ...entry })}\n`, { mode: 0o600 });
@@ -547,7 +557,7 @@ export interface CoreSetupOptions {
   notifier?: (title: string, body: string) => void;
   /** CoreRunner 의 간격·제한 시간. 기본은 빠른 시험용 값(pollMs 20 등)이다. */
   runnerDeps?: AssemblyOverrides["runnerDeps"];
-  fake?: Pick<FakeCoreOptions, "version" | "endState" | "startState" | "geminiStatus">;
+  fake?: Pick<FakeCoreOptions, "version" | "endState" | "startState" | "geminiStatus" | "geminiAutoUnavailable">;
   /**
    * 옛 herdr 소켓 설정 자리. 주면 환경 변수(IAMCEO_HERDR_SOCKET)와 설정 파일(herdrSocket) 양쪽에 적는다.
    * 서버는 이 값을 읽지 않는다: 적혀 있어도 그 소켓을 열지 않는다는 것을 시험할 때 쓴다.

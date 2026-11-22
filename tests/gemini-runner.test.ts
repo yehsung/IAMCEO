@@ -10,7 +10,7 @@ import { CoreRunner, codexExecutionPreference, geminiMayHaveConversed, type Core
 import { CoreError } from "../server/runner/core-client.ts";
 import { geminiStatusFromPayload, geminiStatusPath, readGeminiStatus } from "../server/runner/gemini-status.ts";
 import { GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE } from "../server/runner/gemini-screen.ts";
-import { geminiHookEventsDir } from "../server/runner/gemini-hooks.ts";
+import { geminiHookEventsDir, geminiHooksRecordTurns } from "../server/runner/gemini-hooks.ts";
 import { GEMINI_LAUNCH_LABEL } from "../server/runner/providers.ts";
 import { geminiStatusLineLaunch } from "../server/runner/gemini-statusline.ts";
 import type { DeliveryDispatch } from "../server/service-contracts.ts";
@@ -1023,7 +1023,10 @@ describe("전달 수신 증거: 훅 기록(PreInvocation)의 표지", () => {
     const started = await quiet.start(f.member, f.opts);
     const live = { ...f.member, paneId: started.paneId };
     expect(quiet.deliveryHookMark(live)).toBeUndefined();
-    expect(existsSync(join(f.home, "run", "agy", "m_gem1", ".agents", "hooks.json"))).toBe(false);
+    // 기록 사건은 싣지 않는다(도구 훅 PreToolUse 만 있다: 작업 폴더 바로잡기는 기록과 따로다).
+    const hooksFile = join(f.home, "run", "agy", "m_gem1", ".agents", "hooks.json");
+    expect(Object.keys(JSON.parse(readFileSync(hooksFile, "utf8")).iamceo)).toEqual(["PreToolUse"]);
+    expect(geminiHooksRecordTurns(hooksFile)).toBe(false);
     expect(await quiet.send(live, `전달 ${ITEM}\n\n${BUNDLE}`, f.opts)).toMatchObject({ ok: true });
     await until("턴 끝", () => f.core.turns("m_gem1")[0]?.outcome === "done");
     expect(existsSync(geminiHookEventsDir(f.home))).toBe(false);

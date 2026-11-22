@@ -363,6 +363,10 @@ const ToolPermissionRequestSchema = z.object({
   cwd: optionalText(4096),
   permissionMode: optionalText(64),
   agentId: optionalText(128),
+  // 0.2.10: Gemini(Antigravity CLI) 도구 훅(runner/gemini-tool-hook.ts)이 더 싣는 선택 칸. 옛 훅은 보내지 않고, 옛 서버는 모르는 칸을 버린다(z.object).
+  cli: optionalText(16),
+  geminiKind: optionalText(32),
+  toolCallId: optionalText(128),
 });
 const ToolPermissionWaitSchema = z.strictObject({ id: z.string().min(1).max(64) });
 const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

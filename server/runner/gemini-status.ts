@@ -40,6 +40,14 @@ export interface GeminiStatusRecord {
    * null: 값을 받지 않은 명령이 썼다(이 칸을 모르던 래퍼의 기록 포함).
    */
   launch: string | null;
+  /**
+   * agy 가 지금 든 모드: 상태줄 입력의 cycle_mode 글 그대로("auto"·"accept-edits"·"plan"), 칸이 없으면 "default"(문서: default 모드에서는 빠진다).
+   * null: 칸이 글이 아니거나, 이 칸을 모르던 래퍼의 기록이다(모름).
+   * UNVERIFIED-INTERACTIVE: 실제 상태줄 입력은 아직 본 적이 없다(문서 docs_cli_statusline.md 의 칸 이름). 대표의 agy 첫 설정 뒤 실제 값으로 확인한다.
+   */
+  cycleMode: string | null;
+  /** 상태줄 입력의 sandbox.enabled(터미널 샌드박스가 켜졌나). 모르면 null(이 칸을 모르던 래퍼의 기록 포함). UNVERIFIED-INTERACTIVE(위와 같다). */
+  sandbox: boolean | null;
 }
 
 const MEMBER_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -68,6 +76,7 @@ export function geminiStatusPath(contextHome: string, memberId: string): string 
  * - email 을 비롯해 아래에 없는 칸은 옮기지 않는다.
  * - 서브에이전트: status 가 "running" 인 항목 수를 subagents 에, "running"·"completed" 가 아닌 항목 수를 subagentsUnknown 에 적는다.
  * - launch(넷째 인자, 없어도 된다): 상태줄 명령이 받은 띄우기 값. 모양이 다르거나 없으면 기록의 launch 는 null 이다.
+ * - 모드: cycle_mode 가 없으면 "default"(agent_state 가 글인 입력일 때만, 아니면 null), 글이면 그 글(40자까지), 그 밖이면 null. sandbox.enabled 가 참·거짓이면 그 값, 아니면 null.
  * memberId 모양이 다르면 던진다.
  *
  * 이 함수는 바깥 이름을 하나도 쓰지 않는다(안에서 다 정한다). 상태줄 래퍼는 서버 밖의 독립 스크립트라 이 모듈을 import 하지 못하므로,
@@ -131,6 +140,9 @@ export function geminiStatusFromPayload(memberId: string, payload: unknown, now:
     subagentsUnknown: Math.min(unsure, 10_000),
     planTier: text(input.plan_tier, 80),
     launch: typeof launch === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(launch) ? launch : null,
+    // 칸이 없다는 것을 default 로 읽는 것은 상태줄 입력으로 보일 때(agent_state 가 글)만이다. 모양이 다른 입력은 모름(null)이다.
+    cycleMode: input.cycle_mode === undefined || input.cycle_mode === null ? (text(input.agent_state, 40) !== null ? "default" : null) : text(input.cycle_mode, 40),
+    sandbox: typeof object(input.sandbox).enabled === "boolean" ? object(input.sandbox).enabled as boolean : null,
   };
 }
 
@@ -159,6 +171,8 @@ function parseRecord(value: unknown, memberId: string): GeminiStatusRecord | nul
   const count = (v: unknown): boolean => Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= MAX_SUBAGENTS;
   if (value.subagentsUnknown !== undefined && !nullOr(value.subagentsUnknown, count)) return null;
   if (value.launch !== undefined && !nullOr(value.launch, v => typeof v === "string" && LAUNCH.test(v))) return null;
+  if (value.cycleMode !== undefined && !nullOr(value.cycleMode, isText(40))) return null;
+  if (value.sandbox !== undefined && !nullOr(value.sandbox, v => typeof v === "boolean")) return null;
   const names = Object.keys(quota);
   if (names.length > MAX_QUOTA) return null;
   const buckets: [string, GeminiStatusRecord["quota"][string]][] = [];
@@ -188,6 +202,8 @@ function parseRecord(value: unknown, memberId: string): GeminiStatusRecord | nul
     subagentsUnknown: (value.subagentsUnknown ?? null) as number | null,
     planTier: value.planTier as string | null,
     launch: (value.launch ?? null) as string | null,
+    cycleMode: (value.cycleMode ?? null) as string | null,
+    sandbox: (value.sandbox ?? null) as boolean | null,
   };
 }
 

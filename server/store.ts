@@ -169,6 +169,11 @@ export interface AppliedConfig {
    * 세대가 다르면 쉴 때 같은 대화를 새 계정으로 다시 연다.
    */
   account?: number;
+  /**
+   * 0.2.10(Gemini): "auto-fallback" 이면 권한 auto 대신의 모드(accept-edits + 터미널 샌드박스)로 띄운 세션이다. 없으면 권한 방식 그대로 띄웠다.
+   * 다르면 쉴 때 같은 대화를 다시 연다(Orchestrator.onGeminiMode).
+   */
+  geminiMode?: "auto-fallback";
 }
 
 export interface NewDecision {

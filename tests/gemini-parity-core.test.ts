@@ -13,7 +13,7 @@ import { CoreRunner, type CoreRunnerDeps } from "../server/runner/core.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import { DEFAULT_RANKS, GEMINI_SUBAGENT_TIERS, staffConfig, type Backend, type Member } from "../shared/types.ts";
-import { startFakeCore, type FakeCoreOptions } from "./fixtures/core-harness.ts";
+import { coreSetup, startFakeCore, type FakeCoreOptions } from "./fixtures/core-harness.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 import { describeToolRequest, geminiNeedsCard, geminiToolForCard, ToolPermissions, type GeminiEffectiveMode } from "../server/tool-permission.ts";
 import { geminiToolHookSet } from "../server/runner/gemini-tool-hook.ts";
@@ -439,5 +439,23 @@ describe("서브에이전트 단계: Gemini 는 모델 이름 대신 단계(flas
     await until("기본값으로 다시 띄움", () => t.runner.startsOf(gemini.id).length === 3);
     expect(t.runner.startsOf(gemini.id).at(-1)!.member.subagentModel).toBeNull();
     expect(readFileSync(t.runner.startsOf(gemini.id).at(-1)!.opts.systemPromptFile, "utf8")).not.toContain("invoke_subagent");
+  });
+});
+
+describe("운영 배선(가짜 core + 실제 CoreRunner + createOrchestrator)", () => {
+  test("설정을 바꾸기 전에 미리 해 보는 검사가 떠 있는 Gemini 세션의 승인 훅을 지우지 않는다(다시 띄우기가 막혀도 승인 카드가 남는다)", async () => {
+    const t = await coreSetup({});
+    cleanups.push(() => t.close());
+    t.store.patchSettings({ permissionMode: "default" });
+    const member = (await t.orch.addMember(t.project.id, { name: "자료 조사", handle: "research", role: "조사", cli: "gemini" })).member;
+    await t.idle(member.id);
+    const configFile = join(t.home, "run", `${member.id}.gemini`, "agy", `${member.id}.hook.json`);
+    const permissionOf = () => JSON.parse(readFileSync(configFile, "utf8")).permission;
+    expect(permissionOf()).toEqual({ mcpConfigFile: join(t.home, "run", `${member.id}.gemini`, "mcp.json") });
+    // 입력칸에 대표가 쓰던 글이 있어 옛 터미널을 끝내지 못한다: 미리 해 보는 검사(훅 설정을 다시 쓴다)만 돌고 다시 띄우기는 막힌다.
+    t.core.setDraft(member.id, "쓰던 글");
+    await t.orch.changeMemberModel(member.id, { modelOverride: "gemini-3.8-flash" }).catch(() => null);
+    expect(t.runs(member.id)).toHaveLength(1);
+    expect(permissionOf()).toEqual({ mcpConfigFile: join(t.home, "run", `${member.id}.gemini`, "mcp.json") });
   });
 });

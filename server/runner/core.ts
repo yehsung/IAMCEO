@@ -936,6 +936,11 @@ export class CoreRunner implements FullRunner {
     this.geminiModes.set(track, { cycleMode: record.cycleMode, sandbox: record.sandbox });
     this.event(track, { type: "gemini_mode", memberId: track.member.id, cycleMode: record.cycleMode, sandbox: record.sandbox, initial: !last });
   }
+  /**
+   * 이 실행기가 띄우는 CLI 에 결재함 도구 승인 훅을 싣는가(운영 조립은 true). 총괄이 Gemini 를 다시 띄우기 전에 미리 해 보는 검사(providerLaunch)가
+   * 같은 값으로 주입 폴더의 훅 설정을 써야, 아직 떠 있는 그 팀장 세션의 승인 부분이 빠지지 않는다.
+   */
+  get toolPermissionHooks(): boolean { return this.options.toolPermission === true; }
   /** 이 팀장의 지금 터미널이 든 모드(observeGeminiMode 가 자리 잡았다고 본 값). 모르면 null. 결재함 승인 카드의 판정이 쓴다. */
   geminiMode(memberId: string): { cycleMode: string; sandbox: boolean | null } | null {
     const track = this.tracks.get(memberId);

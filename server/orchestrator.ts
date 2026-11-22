@@ -2414,7 +2414,8 @@ export class Orchestrator implements OrchestratorApi {
         if (target.cli === "gemini" && model && !this.models.listed("gemini", model)) throw new ApiError(400, "Gemini용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요", "cli_switch_model_mismatch_gemini");
         // Gemini(Antigravity CLI)는 띄우기 인자를 만들면서 주입 폴더(규칙·MCP·훅 파일)를 고쳐 쓴다(runner/providers.ts). 실행기와 같은 기록 폴더를 줘야
         // 미리 해 보는 이 검사가, 아직 떠 있는 같은 팀장 세션의 훅 파일을 지우지 않는다(운영 조립의 contextHome 은 데이터 홈이다).
-        const bins = target.cli === "gemini" ? { ...this.config, contextHome: this.config.home } : this.config;
+        // 결재함 승인 훅도 실행기와 같게 싣는다(아니면 이 검사가 떠 있는 세션의 훅 설정에서 승인 부분을 지운다).
+        const bins = target.cli === "gemini" ? { ...this.config, contextHome: this.config.home, toolPermission: targetRunner.toolPermissionHooks } : this.config;
         try { providerLaunch(this.runnerMember(target, project), this.writeRunFiles(target, project, !!target.sessionId), bins); }
         catch (e) { throw new ApiError(400, `CLI 설정을 적용할 수 없습니다: ${(e as Error).message}`, "cli_config_failed"); }
       }

@@ -111,8 +111,17 @@ struct HomeView: View {
     /// AI가 '필요 없어짐'으로 정리한 할 일은 할 일도, 한 일도 아니다.
     private var visibleTodos: [Todo] { store.todos.filter { $0.outcome != "dropped" || todoNeedsNotice($0.id) }.sorted { $0.createdAt < $1.createdAt } }
     private var liveTodos: [Todo] { visibleTodos.filter { !$0.done || todoNeedsNotice($0.id) } }
-    /// Same order reversed: newest-created first.
-    private var doneTodos: [Todo] { visibleTodos.filter { $0.done && !todoNeedsNotice($0.id) }.reversed() }
+    /// Same order reversed: newest-created first. 0.2.10 창 묶음이면 최근 끝낸 순서(서버의 창·'더 보기'와 같은 순서라 더 받은 것이 아래에 붙는다).
+    private var doneTodos: [Todo] {
+        if let done = store.windowedDoneTodos { return done.filter { $0.outcome != "dropped" && !todoNeedsNotice($0.id) } }
+        return visibleTodos.filter { $0.done && !todoNeedsNotice($0.id) }.reversed()
+    }
+    /// '완료한 할 일 n'의 n. 창 묶음이면 서버가 센 수(필요 없음 뺀 것)에서 확인 중이라 위로 올라간 것을 뺀다.
+    private func doneTodoCount(_ done: [Todo]) -> Int {
+        guard let window = store.stateWindow else { return done.count }
+        let lifted = store.todos.filter { $0.done && $0.outcome != "dropped" && todoNeedsNotice($0.id) }.count
+        return max(done.count, window.doneTodos - lifted)
+    }
 
     private func work(_ section: WorkSection) -> [WorkItem] {
         store.work.filter { $0.sec == section.rawValue }.sorted { $0.order < $1.order }
@@ -533,9 +542,15 @@ struct HomeView: View {
                                                members: store.members, notices: store.deliveryNotices)
         if let todoError { rows.append(.todoError(todoError)) }
         let done = doneTodos
-        if !done.isEmpty {
-            rows.append(.doneFold(done.count))
-            if showDoneTodos { rows += done.map(HomeTurnRow.todo) }
+        // 창 묶음이면 창 안의 끝난 것이 모두 '필요 없음'이어도 서버가 센 완료가 있으면 접기를 둔다(펼쳐 더 받는다).
+        let doneCount = doneTodoCount(done)
+        if doneCount > 0 {
+            rows.append(.doneFold(doneCount))
+            if showDoneTodos {
+                rows += done.map(HomeTurnRow.todo)
+                // 0.2.10 창 묶음: 오래전에 끝낸 할 일은 눌러서 더 받는다.
+                if store.canLoadOlderTodos || store.olderDone.loadingTodos { rows.append(.olderTodos(store.olderDone.loadingTodos)) }
+            }
         }
         return HomeTurn(rows: rows, waiting: waiting, count: count)
     }
@@ -586,6 +601,18 @@ struct HomeView: View {
             doneFoldButton(count)
                 .padding(.leading, titleInset)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        case .olderTodos(let loading):
+            HStack(spacing: 8) {
+                HomeQuietLink(text: loading ? String(localized: "이전 완료를 불러오는 중") : String(localized: "이전 완료 더 보기")) {
+                    Task { await store.loadOlderDoneTodos() }
+                }
+                .disabled(loading)
+                if let error = store.olderDone.error, !loading {
+                    Text(error).font(CEFont.secondary).foregroundStyle(CE.danger).lineLimit(2)
+                }
+            }
+            .padding(.leading, titleInset)
+            .accessibilityLabel(loading ? "이전 완료를 불러오는 중" : "이전에 완료한 할 일 더 보기")
         }
     }
 
@@ -1033,7 +1060,9 @@ struct HomeView: View {
     @ViewBuilder private var progressCard: some View {
         if !store.work.isEmpty {
             let done = work(.done), doing = work(.doing), next = work(.next), hold = work(.hold)
-            let total = store.work.count
+            // 0.2.10 창 묶음: 완료 칸은 최근 것만 오므로 수는 서버가 센 전체 수를 쓴다(오늘 끝낸 것은 창에 모두 있다: 24시간 안의 것을 다 싣는다).
+            let doneCount = store.doneWorkTotal
+            let total = store.work.count - done.count + doneCount
             let today = done.filter { item in parseISODate(item.doneAt).map { Calendar.current.isDateInToday($0) } ?? false }.count
             let parts = [(WorkSection.doing, doing.count), (WorkSection.next, next.count), (WorkSection.hold, hold.count)].filter { $0.1 > 0 }
             // Doing items are not listed: the 팀 rows already say who works on what. 보류 first, then 예정, five in all,
@@ -1046,14 +1075,14 @@ struct HomeView: View {
             HomeCard(title: String(localized: "진척"), more: isHq ? nil : String(localized: "일 목록"), onMore: isHq ? nil : { router.go(.team) }) {
                 VStack(alignment: .leading, spacing: 9) {
                     HomeProgressBar(segments: [
-                        (done.count, Self.workColor(.done)), (doing.count, Self.workColor(.doing)),
+                        (doneCount, Self.workColor(.done)), (doing.count, Self.workColor(.doing)),
                         (next.count, Self.workColor(.next)), (hold.count, Self.workColor(.hold)),
                     ])
-                    progressLine(done: done.count, total: total, parts: parts, today: today)
+                    progressLine(done: doneCount, total: total, parts: parts, today: today)
                 }
                 .padding(.top, 2).padding(.bottom, rows.isEmpty ? 6 : 8)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(progressLabel(done: done.count, total: total, parts: parts, today: today))
+                .accessibilityLabel(progressLabel(done: doneCount, total: total, parts: parts, today: today))
                 if !groups.isEmpty {
                     HomeDivider()
                     VStack(alignment: .leading, spacing: 0) {
@@ -1317,6 +1346,8 @@ private enum HomeTurnRow: Identifiable {
     case todo(Todo)
     case todoError(String)
     case doneFold(Int)
+    /// 0.2.10 창 묶음: 펼친 완료 목록 끝의 '이전 완료 더 보기'(불러오는 중이면 true).
+    case olderTodos(Bool)
 
     var id: String {
         switch self {
@@ -1330,13 +1361,14 @@ private enum HomeTurnRow: Identifiable {
         case .todo(let todo): "todo:\(todo.id)"
         case .todoError: "todo-error"
         case .doneFold: "done-fold"
+        case .olderTodos: "older-todos"
         }
     }
 
     /// Follow-up lines (more, a todo error) belong to the row above them.
     var dividerAbove: Bool {
         switch self {
-        case .moreDecisions, .todoError: false
+        case .moreDecisions, .todoError, .olderTodos: false
         default: true
         }
     }

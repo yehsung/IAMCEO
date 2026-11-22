@@ -1618,6 +1618,50 @@
         }
       }
     },
+    "이전 완료 더 보기" : {
+      "comment" : "0.2.10 창 묶음(오래전에 끝낸 할 일·업무 더 보기, 기기에 남긴 마지막 상태)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show earlier finished"
+          }
+        }
+      }
+    },
+    "이전 완료를 불러오는 중" : {
+      "comment" : "0.2.10 창 묶음(오래전에 끝낸 할 일·업무 더 보기, 기기에 남긴 마지막 상태)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Loading earlier finished items"
+          }
+        }
+      }
+    },
+    "이전에 완료한 할 일 더 보기" : {
+      "comment" : "0.2.10 창 묶음(오래전에 끝낸 할 일·업무 더 보기, 기기에 남긴 마지막 상태)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show earlier finished to-dos"
+          }
+        }
+      }
+    },
+    "기기에는 최근 것만 남겨 두었습니다." : {
+      "comment" : "0.2.10 창 묶음(오래전에 끝낸 할 일·업무 더 보기, 기기에 남긴 마지막 상태)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Only recent items were kept on this device."
+          }
+        }
+      }
+    },
     "%lld건은 카드별 결과를 확인하세요. 메모는 남겼습니다." : {
       "localizations" : {
         "en" : {

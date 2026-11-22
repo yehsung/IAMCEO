@@ -166,6 +166,10 @@ extension AppStore {
             if serverTakesRevisions != revisions { serverTakesRevisions = revisions }
             realtimeSupported = capabilities.contractVersion == 2 && capabilities.capabilities?.realtime == true
             syncSupported = capabilities.contractVersion == 2 && (capabilities.capabilities?.realtime == true || strictWriteContract)
+            // 0.2.10: 창 묶음·보관 상태 lite. 옛 서버는 이 값이 없어 예전 요청 그대로다(되돌린 서버의 400 은 APIClient 가 받아 끈다).
+            // 화면은 이 값이 아니라 받은 묶음의 window 로 가르므로, 켜지기 전에 읽은 예전 묶음도 그대로 맞다.
+            serverArchiveLite = capabilities.capabilities?.archiveLite == true
+            await api.setWindowedState(capabilities.capabilities?.windowedState == true)
         } catch {
             guard epoch == generation, phase == foregroundGeneration else { return }
             if (error as? APIError)?.status == 401 { handle(error); return }
@@ -185,11 +189,12 @@ extension AppStore {
         let supportsSync = syncSupported, optionalWriteContext = !realtimeSupported
         let explicitSelection = isLoading
         let seeded = seededBootstrap
+        let archiveLite = serverArchiveLite
         seededBootstrap = nil
         lastSyncAttemptAt = Date()
         let task = Task { () throws -> RefreshSnapshot in
             func readArchive(_ id: String) async throws -> ProjectState? {
-                do { return try await api.archiveState(projectID: id) }
+                do { return try await api.archiveState(projectID: id, lite: archiveLite).state }
                 catch let error as APIError where error.status == 404 {
                     try Task.checkCancellation()
                     let archived = try await api.archivedProjects()

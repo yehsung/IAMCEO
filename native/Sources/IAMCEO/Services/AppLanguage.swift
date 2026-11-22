@@ -110,6 +110,8 @@ func loadErrorNoun(_ what: String) -> String {
     case "지난 결재": return "past decisions"
     case "입력": return "input"
     case "화면": return "screen"
+    case "완료한 할 일": return "finished to-dos"
+    case "완료한 업무": return "finished work"
     default: return what.range(of: #"\p{Hangul}"#, options: .regularExpression) == nil ? what : "item"
     }
 }

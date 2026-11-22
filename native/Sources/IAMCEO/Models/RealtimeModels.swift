@@ -87,6 +87,10 @@ struct CapabilityFlags: Codable, Sendable {
     var operations: Bool? = nil
     /// 0.2.7: 결재 답 첨부·할 일 닫기 결과(필요 없음·팀장에게 맡김)를 받는 서버. 옛 서버는 없다.
     var revisions: Bool? = nil
+    /// 0.2.10: 창 묶음(`window=1`: 끝난 할 일·업무는 최근 것만, 옛 판 자료는 빼고)과 끝난 항목 쪽 받기를 받는 서버. 옛 서버는 없다.
+    var windowedState: Bool? = nil
+    /// 0.2.10: 보관 상태를 자료 본문 없이(`archive/state?lite=1`) 주는 서버. 옛 서버는 없다.
+    var archiveLite: Bool? = nil
 }
 
 /// Both legacy invalidations and v2 changes retain the original domain payload.
@@ -106,6 +110,8 @@ struct RealtimeEvent: Decodable, Sendable {
     var decision: Decision? = nil
     var todo: Todo? = nil
     var work: [WorkItem]? = nil
+    /// 0.2.10 창 묶음 소켓의 work 사건만: 완료 칸 전체 수(work 는 창으로 줄어 있다).
+    var doneWork: Int? = nil
     var message: Message? = nil
     var file: FileDoc? = nil
     var activity: Activity? = nil
@@ -148,7 +154,7 @@ struct RealtimeEvent: Decodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case type, protocolVersion = "protocol", epoch, seq, heartbeatMs, staleAfterMs
-        case projects, project, member, projectId, memberId, decision, todo, work, message, file, activity, settings, herdr
+        case projects, project, member, projectId, memberId, decision, todo, work, doneWork, message, file, activity, settings, herdr
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -188,6 +194,7 @@ struct RealtimeEvent: Decodable, Sendable {
         case "work":
             projectId = try c.decode(String.self, forKey: .projectId)
             work = try c.requiredLossyArray(WorkItem.self, forKey: .work)
+            doneWork = try? c.decodeIfPresent(Int.self, forKey: .doneWork)
         case "message": message = try c.decode(Message.self, forKey: .message)
         case "file": file = try c.decode(FileDoc.self, forKey: .file)
         case "activity":

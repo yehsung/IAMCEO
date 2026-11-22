@@ -749,7 +749,32 @@ export interface ProjectState {
   messages: Message[]; // 최근 200, 오래된 → 최신
   files: FileDoc[];
   deliveryNotices?: DeliveryNotices;
+  /** 0.2.10: 창 묶음(`window=1`)을 요청했을 때만 싣는다. 있으면 todos·work·files 가 아래 규칙으로 줄어 있다. */
+  window?: ProjectStateWindow;
 }
+
+/**
+ * 0.2.10 창 묶음(`GET /api/sync?…&window=1`, `GET /api/projects/:id/state?window=1`). 새 앱만 보낸다(`capabilities.windowedState`).
+ * - todos: 안 끝난 것 전부 + 끝난 것 가운데 최근 끝낸 순서로 50개(24시간 안에 끝낸 것이 더 많으면 그것 전부). 순서는 예전과 같다(만든 순).
+ * - work: 끝나지 않은 칸 전부 + 완료 칸은 할 일과 같은 규칙. 순서는 예전과 같다(sort_order).
+ * - files: 새 판이 같은 프로젝트에 있는 옛 판(replacedBy)을 뺀다. 옛 판은 `GET /api/files/:id/versions` 와 `GET /api/files/:id` 로 연다.
+ * 더 오래 끝난 것은 `GET /api/projects/:id/todos/done`·`/work/done` 에 아래 cursor 를 넘겨 받는다.
+ */
+export interface ProjectStateWindow {
+  /** 끝난 할 일 전체 수(창 밖 포함). */
+  doneTodos: number;
+  /** 완료 칸 업무 전체 수(창 밖 포함). */
+  doneWork: number;
+  /** 창에서 뺀 옛 판 자료 수. */
+  olderFileVersions: number;
+  /** 창 밖에 끝난 할 일이 더 있으면 그 다음 쪽 위치, 없으면 null. */
+  todosCursor: string | null;
+  /** 창 밖에 완료 업무가 더 있으면 그 다음 쪽 위치, 없으면 null. */
+  workCursor: string | null;
+}
+
+/** 0.2.10: 끝난 할 일·업무를 최근 끝낸 순서로 이어 받는 쪽(`GET /api/projects/:id/todos/done`·`/work/done`). */
+export interface DonePage<T> { items: T[]; nextCursor: string | null }
 
 /** 보관함 GET 전용 DTO. 늦은 manual 기록이 가능하므로 불변 DB snapshot은 아니다. */
 export interface ArchiveProjectState extends ProjectState { project: Project & { archived: true } }
@@ -782,7 +807,8 @@ export type WsEvent =
   | { type: "member_removed"; projectId: string; memberId: string }
   | { type: "decision"; decision: Decision }
   | { type: "todo"; todo: Todo }
-  | { type: "work"; projectId: string; work: WorkItem[] }
+  /** 0.2.10: 창 묶음 소켓(`/ws?v=2&lite=1&window=1`)은 work 를 창 묶음 규칙으로 줄여 싣고 완료 칸 전체 수 doneWork 를 더한다. 다른 소켓은 예전처럼 전체 목록이다. */
+  | { type: "work"; projectId: string; work: WorkItem[]; doneWork?: number }
   | { type: "message"; message: Message }
   | { type: "file"; file: FileDoc }
   | { type: "activity"; projectId: string; activity: Activity }

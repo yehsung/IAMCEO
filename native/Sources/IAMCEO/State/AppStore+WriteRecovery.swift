@@ -266,12 +266,17 @@ extension AppStore {
         if settingsEdit == nil, let revision = snapshot.revisions?.settings {
             settingsEdit = SettingsEdit(base: snapshot.bootstrap.settings, draft: snapshot.bootstrap.settings, revision: revision)
         }
+        // 0.2.10 창 묶음은 오래전에 끝낸 할 일을 싣지 않는다(판 번호는 모두 싣는다). 쓰기가 들어갔다면 그 할 일은 다시 열렸거나 방금 끝나
+        // 창 안에 있으므로, 창 밖인데 판 번호가 오른 것은 그 뒤 다른 쪽이 다시 바꾼 것이다: 확인하지 못한 채 '충돌'로 알린다.
+        let windowed = snapshot.state?.window != nil
         for pending in Array(journal.todos.values) where pending.namespace == writeNamespace {
-            guard let revision = snapshot.revisions?.todos?[pending.id], let todo = reviewedTodos[pending.id] else { continue }
+            guard let revision = snapshot.revisions?.todos?[pending.id] else { continue }
+            let todo = reviewedTodos[pending.id]
+            if todo == nil && !windowed { continue }
             if revision > pending.revision {
                 try saveJournal { $0.todos.removeValue(forKey: Self.scoped(pending.namespace, pending.id)) }
-                todoWrites[pending.id] = (todo.done == pending.done && (pending.dropped != true || todo.outcome == "dropped")
-                    && pending.outcome.map({ $0 == todo.outcome }) ?? true) ? .confirmedCurrent : .conflict
+                todoWrites[pending.id] = todo.map { todo in (todo.done == pending.done && (pending.dropped != true || todo.outcome == "dropped")
+                    && pending.outcome.map({ $0 == todo.outcome }) ?? true) ? .confirmedCurrent : .conflict } ?? .conflict
             } else if !pendingActions.contains("todo:\(pending.id)"), let created = pending.createdAt, wallClock() - created >= Self.lostWriteLimit {
                 // 요청 제한 시간을 한참 넘겨도 revision이 그대로면 도착하지 않은 변경이다. 닫아야 다시 누를 수 있다.
                 try saveJournal { $0.todos.removeValue(forKey: Self.scoped(pending.namespace, pending.id)) }

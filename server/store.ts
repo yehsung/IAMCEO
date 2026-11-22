@@ -15,6 +15,7 @@ import type {
   Backend,
   CliProvider,
   Decision,
+  DonePage,
   DecisionCloseKind,
   DecisionCloseFollowUp,
   DecisionOption,
@@ -39,6 +40,7 @@ import type {
   Project,
   ProjectConnection,
   ProjectState,
+  ProjectStateWindow,
   ProjectSummary,
   Rank,
   Settings,
@@ -728,6 +730,20 @@ function toMessage(r: Row): Message {
   };
 }
 
+/** 0.2.10: 끝난 할 일·업무의 쪽 위치. (정렬 열쇠, id)를 base64url JSON 으로 싼다. 앱은 받은 그대로 돌려줄 뿐 풀지 않는다. */
+function encodeDoneCursor(key: string, id: string): string {
+  return Buffer.from(JSON.stringify([key, id])).toString("base64url");
+}
+function parseDoneCursor(raw: string): [string, string] {
+  if (raw.length > 0 && raw.length <= 1024 && /^[A-Za-z0-9_-]+$/.test(raw)) {
+    try {
+      const value: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+      if (Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && typeof value[1] === "string") return [value[0], value[1]];
+    } catch { /* 아래에서 거절한다 */ }
+  }
+  throw new ApiError(400, "조회 조건이 잘못되었습니다", "invalid_query");
+}
+
 /** 예전 자료에는 kind 가 없다. 첨부와 본문으로 정한다. */
 function deriveFileKind(body: string, attachments: { name: string; mime: string }[]): FileKind {
   const first = attachments[0];
@@ -740,18 +756,36 @@ function deriveFileKind(body: string, attachments: { name: string; mime: string 
 
 // html(아티팩트 원본)은 getFileHtml로만 읽는다. 목록·단건 조회가 매번 통째로 읽지 않게 열을 명시한다.
 const FILE_COLUMNS = "id, kind, project_id, title, who, member_id, summary, body, path, attachments, created_at, sort_order";
+/** 0.2.10: 본문을 뺀 목록(lite). kind 가 없는 예전 자료만 본문이 비었는지 본다(CASE 라 kind 가 있는 행은 본문을 읽지 않는다). */
+const FILE_LITE_COLUMNS = "id, kind, project_id, title, who, member_id, summary, CASE WHEN kind IS NULL THEN body <> '' END AS body_present, path, attachments, created_at, sort_order";
+/** 0.2.10 창 묶음: 끝난 할 일·업무를 최근 끝낸 순서로 이만큼(24시간 안에 끝낸 것이 더 많으면 그것 전부) 싣는다. 쪽 받기의 기본 개수도 같다. */
+export const STATE_WINDOW_DONE = 50;
+export const STATE_WINDOW_RECENT_MS = 86_400_000;
+export const DONE_PAGE_MAX = 200;
+/** 끝난 할 일·업무의 정렬 열쇠(최근 끝낸 것이 먼저, 같으면 id 큰 것이 먼저). 쪽 위치(cursor)도 이 두 값이다. */
+const TODO_DONE_KEY = "COALESCE(done_at, created_at)";
+const WORK_DONE_KEY = "COALESCE(done_at, updated_at, created_at)";
+export interface StateReadOptions {
+  /** 자료 본문을 DB 에서 읽지 않는다(응답의 lite=1 과 같다). */
+  lite?: boolean;
+  /** 0.2.10 창 묶음(ProjectState.window). 새 앱만 요청한다. */
+  window?: boolean;
+}
 
 function toFile(r: Row): FileDoc {
   const attachments = json<Attachment[]>(r.attachments);
+  // 0.2.10: lite 목록(FILE_LITE_COLUMNS)은 본문을 읽지 않는다. 본문 칸은 빈 글자로 두고(보내는 쪽 liteFile 이 칸을 뺀다),
+  // kind 가 없는 예전 자료는 '본문이 있는가'(body_present)만으로 정한다(deriveFileKind 는 본문의 유무만 본다).
+  const lite = !("body" in r);
   return {
     id: r.id,
-    kind: r.kind ?? deriveFileKind(r.body, attachments),
+    kind: r.kind ?? deriveFileKind(lite ? (r.body_present ? "-" : "") : r.body, attachments),
     projectId: r.project_id,
     title: r.title,
     who: r.who,
     memberId: r.member_id,
     summary: r.summary,
-    body: r.body,
+    body: lite ? "" : r.body,
     path: r.path,
     attachments,
     createdAt: r.created_at,
@@ -2187,23 +2221,101 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     }));
   }
 
-  projectState(id: string): ProjectState {
-    return this.withDeliveryRead(id, () => this.readProjectState(id));
+  /**
+   * 프로젝트 상태 묶음. 선택 없이 부르면 예전과 같은 전체 묶음이다(출시 앱 0.2.2~0.2.9 가 받는 모양).
+   * lite: 자료 본문을 읽지 않는다(본문 칸은 빈 글자, 보내는 쪽이 칸을 뺀다). window: 0.2.10 창 묶음(ProjectStateWindow).
+   */
+  projectState(id: string, opts: StateReadOptions = {}): ProjectState {
+    return this.withDeliveryRead(id, () => this.readProjectState(id, opts));
   }
 
-  private readProjectState(id: string): ProjectState {
+  private readProjectState(id: string, opts: StateReadOptions = {}): ProjectState {
     const project = this.requireProject(id);
+    const members = this.listMembers(id);
+    const decisions = this.listDecisions(id);
+    const doneDecisionCount = this.row("SELECT COUNT(*) AS n FROM decisions WHERE project_id = ? AND status != 'open'", id)!.n as number;
+    if (opts.window) {
+      const todos = this.todoWindow(id), work = this.workWindow(id);
+      const files = this.fileList(id, { lite: opts.lite, latestOnly: true });
+      const window: ProjectStateWindow = { doneTodos: todos.total, doneWork: work.total, olderFileVersions: files.omitted,
+        todosCursor: todos.cursor, workCursor: work.cursor };
+      return { project, members, decisions, doneDecisionCount, todos: todos.items, work: work.items,
+        messages: this.listMessages(id, { limit: 200 }), files: files.files, window };
+    }
     return {
       project,
-      members: this.listMembers(id),
-      decisions: this.listDecisions(id),
-      doneDecisionCount: this.row("SELECT COUNT(*) AS n FROM decisions WHERE project_id = ? AND status != 'open'", id)!.n as number,
+      members,
+      decisions,
+      doneDecisionCount,
       todos: this.listTodos(id),
       work: this.listWork(id),
       messages: this.listMessages(id, { limit: 200 }),
       // 0.2.7 묶음 4: 최신 판에 판 수를 더한다(옛 판은 replacedBy 로 가린다. 모든 판은 GET /api/files/:id/versions 로도).
-      files: this.listFilesWithVersions(id),
+      files: this.listFilesWithVersions(id, { lite: opts.lite }),
     };
+  }
+
+  /**
+   * 0.2.10 창 묶음의 끝난 항목: 최근 끝낸 순서로 STATE_WINDOW_DONE 개, 24시간 안에 끝낸 것이 더 많으면 그것 전부.
+   * 늘 '최근 끝낸 순서의 앞부분'이라 그 다음 쪽은 마지막 항목의 (열쇠, id) 로 이어 받는다.
+   */
+  private doneWindowLimit(table: "todos" | "work", projectId: string, now = Date.now()): { limit: number; total: number; shown: number } {
+    const [key, finished] = table === "todos" ? [TODO_DONE_KEY, "done != 0"] : [WORK_DONE_KEY, "sec = 'done'"];
+    // shown: 화면이 '완료'로 세는 수. 할 일은 '필요 없음'(dropped)을 뺀다(홈 '완료한 할 일 n'), 업무는 완료 칸 전부.
+    const shown = table === "todos" ? "COALESCE(SUM(COALESCE(outcome, '') != 'dropped'), 0)" : "COUNT(*)";
+    const r = this.row(`SELECT COUNT(*) AS total, ${shown} AS shown, COALESCE(SUM(${key} >= ?), 0) AS recent FROM ${table} WHERE project_id = ? AND ${finished}`,
+      new Date(now - STATE_WINDOW_RECENT_MS).toISOString(), projectId)!;
+    return { limit: Math.max(STATE_WINDOW_DONE, r.recent as number), total: r.total as number, shown: r.shown as number };
+  }
+
+  /** 안 끝난 할 일 전부 + 끝난 할 일의 창. 순서는 listTodos 와 같다(만든 순). */
+  private todoWindow(projectId: string): { items: Todo[]; total: number; cursor: string | null } {
+    const { limit, total, shown } = this.doneWindowLimit("todos", projectId);
+    const rows = this.rows(`SELECT * FROM todos WHERE project_id = ?1 AND (done = 0 OR id IN (
+        SELECT id FROM todos WHERE project_id = ?1 AND done != 0 ORDER BY ${TODO_DONE_KEY} DESC, id DESC LIMIT ?2))
+      ORDER BY created_at, rowid`, projectId, limit);
+    return { items: rows.map(toTodo), total: shown, cursor: total > limit ? this.doneCursorAt("todos", projectId, limit) : null };
+  }
+
+  /** 끝나지 않은 업무 전부 + 완료 칸의 창. 순서는 listWork 와 같다(sort_order). */
+  private workWindow(projectId: string): { items: WorkItem[]; total: number; cursor: string | null } {
+    const { limit, total } = this.doneWindowLimit("work", projectId);
+    const rows = this.rows(`SELECT * FROM work WHERE project_id = ?1 AND (sec != 'done' OR id IN (
+        SELECT id FROM work WHERE project_id = ?1 AND sec = 'done' ORDER BY ${WORK_DONE_KEY} DESC, id DESC LIMIT ?2))
+      ORDER BY sort_order, rowid`, projectId, limit);
+    return { items: rows.map(toWork), total, cursor: total > limit ? this.doneCursorAt("work", projectId, limit) : null };
+  }
+
+  /** 최근 끝낸 순서로 count 번째 항목(창의 마지막)의 쪽 위치. 정렬은 SQL 그대로라 쪽 받기와 어긋나지 않는다. */
+  private doneCursorAt(table: "todos" | "work", projectId: string, count: number): string | null {
+    const [key, finished] = table === "todos" ? [TODO_DONE_KEY, "done != 0"] : [WORK_DONE_KEY, "sec = 'done'"];
+    const r = this.row(`SELECT ${key} AS done_key, id FROM ${table} WHERE project_id = ? AND ${finished} ORDER BY done_key DESC, id DESC LIMIT 1 OFFSET ?`, projectId, count - 1);
+    return r ? encodeDoneCursor(r.done_key, r.id) : null;
+  }
+
+  /** 0.2.10: 끝난 할 일을 최근 끝낸 순서로 이어 받는다(창 묶음의 todosCursor 다음부터). 보관한 프로젝트는 없는 것으로 친다. */
+  listDoneTodosPage(projectId: string, opts: { cursor?: string; limit?: number } = {}): DonePage<Todo> {
+    return this.donePage("todos", projectId, opts, toTodo);
+  }
+
+  /** 0.2.10: 완료 칸 업무를 최근 끝낸 순서로 이어 받는다(창 묶음의 workCursor 다음부터). */
+  listDoneWorkPage(projectId: string, opts: { cursor?: string; limit?: number } = {}): DonePage<WorkItem> {
+    return this.donePage("work", projectId, opts, toWork);
+  }
+
+  private donePage<T>(table: "todos" | "work", projectId: string, opts: { cursor?: string; limit?: number }, map: (r: Row) => T): DonePage<T> {
+    if (this.requireProject(projectId).archived) throw new ApiError(404, "보관된 프로젝트입니다", "project_archived");
+    const limit = opts.limit ?? STATE_WINDOW_DONE;
+    if (!Number.isInteger(limit) || limit < 1 || limit > DONE_PAGE_MAX) throw new ApiError(400, "조회 개수가 올바르지 않습니다", "invalid_limit");
+    const [key, finished] = table === "todos" ? [TODO_DONE_KEY, "done != 0"] : [WORK_DONE_KEY, "sec = 'done'"];
+    const after = opts.cursor === undefined ? null : parseDoneCursor(opts.cursor);
+    const rows = after
+      ? this.rows(`SELECT *, ${key} AS done_key FROM ${table} WHERE project_id = ? AND ${finished} AND (${key} < ? OR (${key} = ? AND id < ?))
+          ORDER BY done_key DESC, id DESC LIMIT ?`, projectId, after[0], after[0], after[1], limit + 1)
+      : this.rows(`SELECT *, ${key} AS done_key FROM ${table} WHERE project_id = ? AND ${finished} ORDER BY done_key DESC, id DESC LIMIT ?`, projectId, limit + 1);
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return { items: page.map(map), nextCursor: rows.length > limit && last ? encodeDoneCursor(last.done_key, last.id) : null };
   }
 
   // ---- 직원 ----
@@ -3077,9 +3189,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.messagePage(projectId, opts, true);
   }
 
-  archiveState(projectId: string): ArchiveProjectState {
+  archiveState(projectId: string, opts: { lite?: boolean } = {}): ArchiveProjectState {
     return this.transaction(() => {
-      const state = this.projectState(projectId);
+      const state = this.projectState(projectId, { lite: opts.lite });
       if (!state.project.archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
       return { ...state, project: { ...state.project, archived: true } };
     });
@@ -3335,28 +3447,53 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return (this.row("SELECT html FROM files WHERE id = ?", id)?.html as string | null | undefined) ?? null;
   }
 
-  listFiles(projectId: string): FileDoc[] {
-    return this.rows(`SELECT ${this.fileColumns} FROM files WHERE project_id = ? ORDER BY sort_order DESC, rowid DESC`, projectId).map(toFile);
+  /**
+   * 프로젝트의 자료(최신 것이 먼저). 판 갈이 열(replaces·replaced_by)은 html 뒤에 붙은 열이라 이 조회에서 함께 읽지 않고,
+   * 값이 있는 행만 담은 부분 색인(db.ts REVISION_INDEXES files_revisions)을 읽는 따로 조회로 붙인다. 결과는 예전과 같다.
+   * lite 면 본문도 읽지 않는다(본문 칸은 빈 글자).
+   */
+  listFiles(projectId: string, opts: { lite?: boolean } = {}): FileDoc[] {
+    const rows = this.rows(`SELECT ${opts.lite ? FILE_LITE_COLUMNS : FILE_COLUMNS} FROM files WHERE project_id = ? ORDER BY sort_order DESC, rowid DESC`, projectId);
+    if (this.fileColumns !== FILE_COLUMNS) {
+      const links = new Map(this.rows("SELECT id, replaces, replaced_by FROM files WHERE project_id = ? AND (replaces IS NOT NULL OR replaced_by IS NOT NULL)", projectId)
+        .map((r) => [r.id as string, r]));
+      if (links.size) for (const row of rows) {
+        const link = links.get(row.id);
+        if (link) { row.replaces = link.replaces; row.replaced_by = link.replaced_by; }
+      }
+    }
+    return rows.map(toFile);
   }
 
   /**
    * 0.2.7 묶음 4: 화면의 자료 목록(프로젝트 상태). 모든 판을 그대로 싣고(옛 판은 replacedBy 가 있다), 최신 판에 판 수(versions, 2 이상)를 더한다.
    * 옛 판을 빼지 않는다: 출시 앱은 보고·결재의 자료를 이 목록에서 찾아 연다(빼면 옛 판을 가리키는 보고를 열 수 없다).
    * 새 앱은 replacedBy 가 있는 판을 목록에서 감추고 '이전 판'으로 보인다.
+   * 0.2.10: latestOnly(창 묶음)면 새 판이 목록에 있는 옛 판을 뺀다(앱의 FileVersions.listed 와 같은 규칙). 뺀 수를 omitted 로 센다.
    */
-  listFilesWithVersions(projectId: string): FileDoc[] {
-    const files = this.listFiles(projectId);
+  listFilesWithVersions(projectId: string, opts: { lite?: boolean } = {}): FileDoc[] {
+    return this.fileList(projectId, { ...opts, latestOnly: false }).files;
+  }
+
+  private fileList(projectId: string, opts: { lite?: boolean; latestOnly: boolean }): { files: FileDoc[]; omitted: number } {
+    const files = this.listFiles(projectId, opts);
     const byId = new Map(files.map((file) => [file.id, file]));
-    return files.map((file) => {
-      if (file.replacedBy && byId.has(file.replacedBy)) return file;
+    const result: FileDoc[] = [];
+    let omitted = 0;
+    for (const file of files) {
+      if (file.replacedBy && byId.has(file.replacedBy)) {
+        if (opts.latestOnly) omitted++; else result.push(file);
+        continue;
+      }
       let versions = 1;
       const seen = new Set([file.id]);
       for (let previous = file.replaces; previous && byId.has(previous) && !seen.has(previous); previous = byId.get(previous)!.replaces) {
         seen.add(previous);
         versions++;
       }
-      return versions > 1 ? { ...file, versions } : file;
-    });
+      result.push(versions > 1 ? { ...file, versions } : file);
+    }
+    return { files: result, omitted };
   }
 
   /** 0.2.7 묶음 4: 이 자료의 모든 판(최신 판이 먼저). 판 갈이가 없으면 그 자료 하나. */

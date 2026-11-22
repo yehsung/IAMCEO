@@ -28,6 +28,13 @@ export interface ServerCapabilities {
      * 옛 서버는 v1 몸의 모르는 칸을 버려 '팀장에게 맡김'이 '했음'으로, 첨부가 빠진 답으로 나가고, v2 몸은 400 이다.
      */
     revisions?: boolean;
+    /**
+     * 0.2.10: `/api/sync`·`/api/projects/:id/state` 의 `window=1`(창 묶음, ProjectState.window), `/ws?v=2&lite=1&window=1`,
+     * `GET /api/projects/:id/todos/done`·`/work/done` 을 받는다. 옛 서버의 `/api/sync` 는 모르는 query 를 400 으로 거절하므로 새 앱은 이 값을 보고 보낸다.
+     */
+    windowedState?: boolean;
+    /** 0.2.10: `GET /api/projects/:id/archive/state?lite=1`(자료 본문을 뺀 보관 상태)을 받는다. 옛 서버는 400 이다. */
+    archiveLite?: boolean;
   };
 }
 

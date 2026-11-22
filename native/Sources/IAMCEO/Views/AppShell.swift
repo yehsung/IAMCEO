@@ -1170,11 +1170,18 @@ struct StatusStrips: View {
             return Strip(id: "last-seen", tone: .neutral, icon: "clock.arrow.circlepath",
                          text: String(localized: "마지막으로 본 상태 · \(age) · 최신 상태를 받는 중입니다"), busy: true)
         }
+        // 0.2.10: 기기에 최근 것만 남겨 둔 상태면(크기 상한) 그렇다고 덧붙인다. 오래된 기록은 연결되면 다시 보인다.
+        let partial = store.lastSeen?.partial == true ? String(localized: "기기에는 최근 것만 남겨 두었습니다.") : nil
         return Strip(id: "last-seen", tone: .attention, icon: "clock.arrow.circlepath",
                      text: isMac ? String(localized: "마지막으로 본 상태 · \(age). 지금과 다를 수 있어 읽기만 됩니다.")
                                  : String(localized: "마지막으로 본 상태 · \(age). 지금과 다를 수 있어 읽기만 됩니다. Wi-Fi·Tailscale과 Mac의 IAMCEO를 확인해 주세요."),
-                     detail: store.connectionIssue.map(ConnectionRecovery.reason), actionTitle: String(localized: "다시 연결"),
+                     detail: Self.joinedDetail(partial, store.connectionIssue.map(ConnectionRecovery.reason)), actionTitle: String(localized: "다시 연결"),
                      action: { Task { await store.reconnectFromLastSeen() } }, lines: 3)
+    }
+
+    private static func joinedDetail(_ parts: String?...) -> String? {
+        let text = parts.compactMap { $0 }.joined(separator: " ")
+        return text.isEmpty ? nil : text
     }
 
     private var strips: [Strip] {

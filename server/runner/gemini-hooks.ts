@@ -7,10 +7,16 @@
 // - 표준 출력은 언제나 `{}` 다(아무것도 바꾸지 않는다는 답). 기록 스크립트가 실패하거나 실행 파일이 사라져도 셸이 `{}` 를 찍고 0 으로 끝낸다.
 // - 스크립트는 0.5초 안에 스스로 끝낸다(SAFETY_MS). 기록을 못 남겨도 에이전트를 붙잡지 않는다.
 // - 글 본문은 남기지 않는다. 받은 글에서는 IAMCEO 전달 표지(#iamceo_…)와 글자 수만 남긴다(Claude 훅 기록과 같다, hooks.ts).
+//   받은 글이 맨 `/compact` 이면 그 사실(compact: true)만 남긴다(압축을 받았다는 근거, CoreRunner.checkCompact).
+// - 턴 끝(Stop)의 오류 글(error)은 발췌만 남긴다: 제어 문자를 칸으로, 메일 주소를 <email> 로 바꾸고 400자에서 자른다. 사람이 쓴 글이 아니라 agy 가
+//   알린 실패 까닭(예: `generating and executing: request failed: Post "https://…": unexpected EOF`)이고, 서버가 장애·사용 한도·그 밖을 가르는 근거다
+//   (server/gemini-errors.ts). 실측(헤드리스 1.5.14): 연결이 끊겨 재시도를 다 쓴 턴의 Stop 은 terminationReason "ERROR" 와 이 글을 싣는다.
 // - Claude 훅 기록(run/events)과 파일을 섞지 않는다: 그쪽 읽기는 자기 다섯 사건 밖의 줄을 못 읽은 줄로 세고, Stop 줄을 Claude 턴 끝의 근거로 읽는다.
 //   그래서 폴더를 따로 둔다(run/gemini-events). 파일 이름·돌리기·자리(HookEventsMark)는 같아 같은 읽기(HookFileReader)를 쓴다.
 //
-// 이 기록의 쓰임은 둘이다. 턴의 시작·끝 판정은 지금처럼 OSC 상태 보고로만 한다.
+// 이 기록의 쓰임은 넷이다. 턴의 시작·끝 판정은 지금처럼 OSC 상태 보고로만 한다.
+// - 턴 끝(Stop)의 terminationReason·error 발췌가 그 턴이 오류로 끝난 까닭이다(readGeminiTurnStop → 장애·한도 자동 이어가기).
+// - 맨 `/compact` 의 PreInvocation(compact) 뒤 Stop(TERMINAL_CUSTOM_HOOK)이 서버가 넣은 압축이 끝났다는 둘째 근거다(첫째는 대화 기록의 CHECKPOINT 줄).
 // - 모델 호출 직전(PreInvocation)의 lastUserInput 에 든 전달 표지가 '그 글이 CLI 에 들어갔다'는 수신 증거다(readGeminiDeliveryEvidence).
 // - 그 줄의 conversationId 가 대화 id 의 둘째 근거다(readGeminiHookConversation): 상태줄 기록에서 id 를 얻지 못했을 때, 서버가 그 터미널에 넣은
 //   전달 묶음의 표지가 든 줄만 그 터미널의 대화로 묶는다. 훅 입력의 conversationId 는 실제 agy(1.5.14)로 확인했다.
@@ -18,7 +24,7 @@ import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, 
 import { dirname, isAbsolute, join } from "node:path";
 import type { DeliveryEvidence } from "../../shared/types.ts";
 import { bunScriptCommand, shellQuote as quote } from "./bun-script.ts";
-import { HookFileReader, hookEventsTrusted, isHookEventsMark } from "./hook-events.ts";
+import { HookFileReader, hookEventsMark, hookEventsTrusted, isHookEventsMark } from "./hook-events.ts";
 import { hookEventsFile } from "./hooks.ts";
 
 export const GEMINI_HOOK_RECORDER_MARKER = "iamceo-gemini-hook-recorder";
@@ -34,6 +40,8 @@ const SAFETY_MS = 400;
 /** 입력이 이보다 크면 앞부분과 끝부분만 본다(전달 묶음 표지는 글 끝에 있다). */
 const MAX_INPUT_BYTES = 4 * 1024 * 1024;
 const TAIL_BYTES = 64 * 1024;
+/** Stop 의 오류 글 발췌 상한(글자). */
+export const GEMINI_STOP_ERROR_MAX = 400;
 const MEMBER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SESSION_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
 const MARKER_RE = /^#iamceo_(?:b_[A-Za-z0-9_-]{22}|[A-Za-z0-9_-]{22})$/;
@@ -101,13 +109,19 @@ try {
         record.markers = [...new Set(found ?? [])].slice(0, 64);
         record.chars = prompt !== null ? prompt.length : null;
         if (truncated || prompt === null) record.truncated = true;
+        // 맨 /compact(압축 명령)를 받았다. 글은 남기지 않고 그 사실만 남긴다.
+        if (prompt !== null && prompt.trim() === '/compact') record.compact = true;
       }
       if (event === 'Stop') {
         const reason = input ? input.terminationReason : raw('terminationReason');
         record.reason = typeof reason === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(reason) ? reason : 'other';
         record.fullyIdle = input && typeof input.fullyIdle === 'boolean' ? input.fullyIdle : null;
-        // 오류 글은 남기지 않는다. 있었는지만 남긴다.
         record.failed = !!(input && typeof input.error === 'string' && input.error.length > 0);
+        // 오류 글은 발췌만: 제어 문자 → 칸, 메일 → <email>, ERROR_MAX 자에서 자른다.
+        if (record.failed) {
+          const clean = input.error.slice(0, 4096).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>').replace(/\s+/g, ' ').trim();
+          if (clean) record.error = clean.length > ERROR_MAX ? clean.slice(0, ERROR_MAX - 1) + '…' : clean;
+        }
       }
       write(dir, member, JSON.stringify(record) + '\n');
     }
@@ -131,7 +145,7 @@ export function writeGeminiHookRecorder(runDir: string, options: GeminiHookRecor
   const safety = options.safetyTimeoutMs ?? SAFETY_MS;
   const maxFile = options.maxFileBytes ?? GEMINI_HOOK_EVENTS_MAX_BYTES;
   if (!Number.isSafeInteger(safety) || safety <= 0 || !Number.isSafeInteger(maxFile) || maxFile <= 0) throw new Error("Invalid gemini hook recorder limits");
-  const content = `const SAFETY_MS = ${safety};\nconst MAX_FILE_BYTES = ${maxFile};\nconst MAX_INPUT = ${MAX_INPUT_BYTES};\nconst TAIL = ${TAIL_BYTES};\nconst EVENT_NAMES = ${JSON.stringify(GEMINI_HOOK_EVENTS)};\n${SCRIPT}`;
+  const content = `const SAFETY_MS = ${safety};\nconst MAX_FILE_BYTES = ${maxFile};\nconst MAX_INPUT = ${MAX_INPUT_BYTES};\nconst TAIL = ${TAIL_BYTES};\nconst ERROR_MAX = ${GEMINI_STOP_ERROR_MAX};\nconst EVENT_NAMES = ${JSON.stringify(GEMINI_HOOK_EVENTS)};\n${SCRIPT}`;
   let same = false;
   try { same = readFileSync(path, "utf8") === content; } catch { /* 처음 */ }
   if (!same) {
@@ -181,8 +195,12 @@ export interface GeminiHookRecord {
   /** Stop: terminationReason(NO_TOOL_CALL=정상, ERROR, USER_CANCELED, MAX_INVOCATIONS …). 모르는 모양이면 other. */
   reason?: string;
   fullyIdle?: boolean | null;
-  /** Stop: 오류 글이 있었다. 글은 남기지 않는다. */
+  /** Stop: 오류 글이 있었다. */
   failed?: boolean;
+  /** Stop: 오류 글의 발췌(제어 문자 없음, 메일은 <email>, 400자까지). 이 칸을 모르던 기록 스크립트의 줄에는 없다. */
+  error?: string;
+  /** PreInvocation: 받은 글이 맨 `/compact` 였다. */
+  compact?: boolean;
 }
 
 /** 한 줄을 엄격하게 푼다. 모르는 모양이면 null. */
@@ -199,11 +217,13 @@ export function parseGeminiHookLine(line: string): GeminiHookRecord | null {
     out.markers = Array.isArray(r.markers) ? r.markers.filter((m): m is string => typeof m === "string" && MARKER_RE.test(m)).slice(0, 64) : [];
     out.chars = typeof r.chars === "number" && Number.isSafeInteger(r.chars) && r.chars >= 0 ? r.chars : null;
     if (r.truncated === true) out.truncated = true;
+    if (r.compact === true) out.compact = true;
   }
   if (out.event === "Stop") {
     out.reason = typeof r.reason === "string" && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(r.reason) ? r.reason : "other";
     out.fullyIdle = typeof r.fullyIdle === "boolean" ? r.fullyIdle : null;
     out.failed = r.failed === true;
+    if (out.failed && typeof r.error === "string" && r.error.trim() && r.error.length <= GEMINI_STOP_ERROR_MAX && !/[\u0000-\u001f\u007f]/.test(r.error)) out.error = r.error;
   }
   return out;
 }
@@ -331,4 +351,45 @@ export function geminiHookLastWrite(eventsDir: string, memberId: string): number
     if (stat.size > 0) last = Math.max(last ?? 0, stat.mtimeMs);
   }
   return last;
+}
+
+/**
+ * 이 터미널의 턴 끝(Stop)을 찾는 읽기(CoreRunner 의 터미널마다 하나). 터미널에 붙을 때의 사건 파일 끝부터 앞으로만 읽고,
+ * 아직 어느 턴 끝에도 쓰지 않은 줄을 pending 에 모은다(최근 256줄까지). 턴 끝을 판정한 뒤 부르는 쪽이 비운다(clearGeminiTurn).
+ */
+export interface GeminiTurnWatch { reader: HookFileReader<GeminiHookRecord>; pending: GeminiHookRecord[] }
+const TURN_PENDING_MAX = 256;
+
+/** 붙을 때 만든다. 훅을 넣지 않는 환경(eventsDir null)이거나 팀장 id 모양이 다르면 null. 사건 파일이 아직 없으면 생길 때 처음부터 읽는다. */
+export function geminiTurnWatch(eventsDir: string | null, memberId: string): GeminiTurnWatch | null {
+  if (!eventsDir || !MEMBER_ID_RE.test(memberId)) return null;
+  try { return { reader: new HookFileReader(eventsDir, memberId, parseGeminiHookLine, undefined, hookEventsMark(eventsDir, memberId) ?? undefined), pending: [] }; }
+  catch { return null; }
+}
+
+/**
+ * 지금 끝난 턴의 Stop 기록. 새로 덧붙은 줄을 읽어 pending 에 더한 뒤, 이 대화(conversationId 를 둘 다 알면 같아야 한다)의 줄 가운데
+ * 마지막 PreInvocation 뒤의 첫 Stop 이다: 앞 턴의 Stop 이 늦게 덧붙었어도 이 턴의 모델 호출(PreInvocation) 앞에 있으므로 섞이지 않는다.
+ * PreInvocation 이 하나도 없으면(모델을 부르기 전에 끝난 턴, 훅이 없었던 줄) anyStop 일 때만 마지막 Stop 이다.
+ * 서브에이전트의 줄(다른 대화 id)은 보지 않는다. 사건 폴더·파일이 이 사용자 것이 아니거나 남이 쓸 수 있으면 읽지 않는다. 던지지 않는다.
+ */
+export function readGeminiTurnStop(watch: GeminiTurnWatch | null, eventsDir: string | null, conversationId: string | null, anyStop = false): GeminiHookRecord | null {
+  if (!watch || !eventsDir || !hookEventsTrusted(eventsDir, watch.reader.memberId)) return null;
+  try {
+    for (let pass = 0; pass < 8; pass++) {
+      const { records, invalid } = watch.reader.read();
+      watch.pending.push(...records);
+      if (!records.length && !invalid) break;
+    }
+  } catch { return null; }
+  if (watch.pending.length > TURN_PENDING_MAX) watch.pending.splice(0, watch.pending.length - TURN_PENDING_MAX);
+  const mine = watch.pending.filter(record => !conversationId || !record.conversationId || record.conversationId === conversationId);
+  const pre = mine.findLastIndex(record => record.event === "PreInvocation");
+  if (pre >= 0) return mine.slice(pre + 1).find(record => record.event === "Stop") ?? null;
+  return anyStop ? mine.findLast(record => record.event === "Stop") ?? null : null;
+}
+
+/** 턴 끝을 판정했다: 모은 줄을 비운다(다음 턴은 그 뒤의 줄만 본다). */
+export function clearGeminiTurn(watch: GeminiTurnWatch | null): void {
+  if (watch) watch.pending.length = 0;
 }

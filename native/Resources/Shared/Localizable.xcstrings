@@ -23958,6 +23958,23 @@
         }
       }
     },
+    "server.text.activity.gemini_auto_compact_off" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Context is still {pct}, above the threshold, after automatic compaction, so automatic compaction is off for this session. Compact it yourself from Team if needed"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "자동 압축 뒤에도 문맥이 {pct}로 기준 이상이라 이 세션에서는 자동 압축을 더 하지 않습니다. 필요하면 팀 화면에서 직접 압축하세요"
+          }
+        }
+      }
+    },
     "server.text.activity.trust_auto" : {
       "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
       "localizations" : {

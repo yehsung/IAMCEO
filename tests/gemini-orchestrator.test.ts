@@ -13,7 +13,10 @@ import { openDb } from "../server/db.ts";
 import { removeDeletedProjectFiles } from "../server/lifecycle/project-data.ts";
 import { rehearsalEnvironment } from "../server/lifecycle/rehearse.ts";
 import { GeminiModelsRefresher, geminiModelsCachePath, writeGeminiModelsCache, type ModelOption } from "../server/models.ts";
-import { createOrchestrator, geminiModelsRefresherOptions, geminiRunDir, Orchestrator, type AgentToolsImpl, type OrchestratorTimings, type PostInput } from "../server/orchestrator.ts";
+import { createOrchestrator, geminiModelsRefresherOptions, geminiRunDir, Orchestrator, type AgentToolsImpl, type OrchestratorDeps, type OrchestratorTimings, type PostInput } from "../server/orchestrator.ts";
+import { GeminiQuotaReader } from "../server/gemini-quota.ts";
+import { GEMINI_PROBE_URL } from "../server/gemini-errors.ts";
+import { geminiStatusFromPayload, geminiStatusPath } from "../server/runner/gemini-status.ts";
 import { RESTART_RESUME_TEXT } from "../server/restart-wake.ts";
 import { CoreError } from "../server/runner/core-client.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
@@ -107,13 +110,14 @@ function isolatedConfig(): { root: string; work: string; config: Config; env: Re
   return { root, work: dirs.work, config: loadConfig(env), env };
 }
 
-function setup(opts: { geminiModels?: GeminiModelsRefresher; notifier?: (title: string, body: string) => void; timings?: Partial<OrchestratorTimings> } = {}) {
+function setup(opts: { geminiModels?: GeminiModelsRefresher; geminiQuota?: GeminiQuotaReader; apiRecovery?: OrchestratorDeps["apiRecovery"]; notifier?: (title: string, body: string) => void; timings?: Partial<OrchestratorTimings> } = {}) {
   const { root, work, config } = isolatedConfig();
   const db = openDb(config.dbPath);
   const store = new Store(db, new Bus());
   store.patchSettings({ boardTidyHours: 0 });
   const runner = new FakeRunner();
-  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["core", runner]]), timings: { tickMs: 60_000, healthMs: 60_000, ...opts.timings }, ...(opts.geminiModels ? { geminiModels: opts.geminiModels } : {}), ...(opts.notifier ? { notifier: opts.notifier } : {}) });
+  const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["core", runner]]), timings: { tickMs: 60_000, healthMs: 60_000, ...opts.timings }, ...(opts.geminiModels ? { geminiModels: opts.geminiModels } : {}),
+    ...(opts.geminiQuota ? { geminiQuota: opts.geminiQuota } : {}), ...(opts.apiRecovery ? { apiRecovery: opts.apiRecovery } : {}), ...(opts.notifier ? { notifier: opts.notifier } : {}) });
   cleanups.push(async () => { await orch.shutdown(); db.close(); });
   const project = store.createProject({ name: "시험", cwd: work });
   const runDir = join(config.home, "run");
@@ -856,20 +860,25 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
     expect(existsSync(join(geminiRunDir(t.config.home, gemini.id), "mcp.json"))).toBe(true);
   });
 
-  test("압축: Gemini 팀장은 지원하지 않는다고 거절하고 실행기를 부르지 않는다(화면·총괄 도구 모두)", async () => {
+  test("압축: Gemini 팀장도 화면·총괄 도구(team_compact) 모두 받아 실행기에 넘긴다. 대화 id 를 모르면 지금처럼 409 session_id_unknown", async () => {
     const t = setup();
     const lead = await t.orch.ensureConductor(t.project.id);
     const gemini = await t.add("자료 조사", "research", { cli: "gemini" });
-    const refused = await t.orch.compactMember(gemini.id).then(() => null, (e: unknown) => e);
-    expect(refused).toBeInstanceOf(ApiError);
-    expect(refused).toMatchObject({ status: 400, code: "compact_unsupported_gemini" });
-    expect((refused as ApiError).message).toContain("Gemini(Antigravity CLI)");
+    // 말을 건 적이 없어 대화 id 가 없다: 압축할 대화가 없다.
+    const early = await t.orch.compactMember(gemini.id).then(() => null, (e: unknown) => e);
+    expect(early).toMatchObject({ status: 409, code: "session_id_unknown" });
+    const conversation = t.runner.learn(gemini.id);
+    await until("대화 id", () => t.store.requireMember(gemini.id).sessionId === conversation);
+    await t.orch.compactMember(gemini.id);
+    await until("화면 압축", () => t.runner.compacts.includes(gemini.id));
+    expect(t.store.getContextState(gemini.id)?.compaction).toMatchObject({ trigger: "manual" });
+    // 앞 압축이 끝난 뒤(실행기가 끝을 알린 것으로 친다) 총괄 도구로 다시.
+    const state = t.store.ensureContextState(gemini.id);
+    t.store.saveContextState({ ...state, compaction: { ...state.compaction!, phase: "succeeded", finishedAt: new Date().toISOString() } });
+    t.runner.emit({ type: "compacted", memberId: gemini.id, runId: state.compaction!.id });
     const viaTool = await t.tool(lead, "team_compact", { member: "research" });
-    expect(viaTool.isError).toBe(true);
-    expect(viaTool.text).toContain("압축할 수 없습니다");
-    expect(t.runner.compacts).toEqual([]);
-    expect(t.store.getContextState(gemini.id)?.compaction ?? null).toBeNull();
-    expect(t.priv<{ compactRequest: string | null }>("runtime", gemini.id).compactRequest).toBeNull();
+    expect(viaTool.isError).toBeFalsy();
+    await until("도구 압축", () => t.runner.compacts.filter(id => id === gemini.id).length === 2);
   });
 
   test("첫 설정·로그인 막힘: 실행기의 막힘 사건으로 들어오면 '터미널에서 직접 끝내 달라'고 알리고, 기다리던 지시는 넣지 않은 채 둔다", async () => {
@@ -1101,7 +1110,7 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
     expect(lines("activity.gemini_resume_lost")).toHaveLength(2);
   });
 
-  test("자동 압축: 문맥이 기준을 넘어도 Gemini 팀장에게는 압축을 넣지 않고 전달을 그대로 보낸다. Claude 팀장은 예전처럼 압축부터 한다", async () => {
+  test("자동 압축: Gemini 팀장도 정확한 측정이 기준을 넘으면 압축부터 한다(Claude 와 같다). 자동 압축 뒤 첫 측정도 기준 이상이면 그 세션에서는 더 하지 않는다", async () => {
     const t = setup();
     const created = await t.add("자료 조사", "research", { cli: "gemini" });
     const claude = await t.add("화면 개발", "ui", { cli: "claude" });
@@ -1124,46 +1133,114 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
     expect(t.store.getContextState(claude.id)?.compaction).toMatchObject({ trigger: "auto" });
     expect(t.runner.sent.filter(s => s.memberId === claude.id)).toEqual([]);
     await t.orch.assign(t.project.id, "research", { text: "다음 자료 찾기" });
-    await until("Gemini 팀장에게 전달", () => t.runner.sent.some(s => s.memberId === gemini.id && s.text.includes("다음 자료 찾기")));
-    expect(t.runner.compacts).toEqual([claude.id]);
-    expect(t.store.getContextState(gemini.id)?.compaction ?? null).toBeNull();
+    await until("Gemini 팀장 압축", () => t.runner.compacts.includes(gemini.id));
+    const auto = t.store.getContextState(gemini.id)!.compaction!;
+    expect(auto).toMatchObject({ trigger: "auto" });
+    expect(t.runner.sent.filter(s => s.memberId === gemini.id)).toEqual([]);
+    // 실행기가 압축 끝을 알렸다(대화 기록의 CHECKPOINT). 기다리던 전달이 나간다.
+    const done = t.store.ensureContextState(gemini.id);
+    t.store.saveContextState({ ...done, measurement: null, compaction: { ...done.compaction!, phase: "succeeded", finishedAt: new Date().toISOString() } });
+    t.runner.emit({ type: "compacted", memberId: gemini.id, runId: auto.id });
+    await until("압축 뒤 전달", () => t.runner.sent.some(s => s.memberId === gemini.id && s.text.includes("다음 자료 찾기")));
+    // 압축 뒤 첫 측정이 여전히 기준(70%) 이상: 이 세션에서는 자동 압축을 더 하지 않는다(활동 한 줄).
+    const member = t.store.requireMember(gemini.id);
+    t.runner.end(gemini.id);
+    t.runner.emit({ type: "context_usage", memberId: gemini.id, sessionId: member.sessionId!, tokens: 850_000, shownPct: null, model: "gemini-4-neon", exact: { window: 1_000_000, source: "statusline" },
+      turn: 5, sessionGeneration: t.store.memberRevisions(gemini.id).sessionGeneration, terminalId: member.paneId, observedAt: new Date().toISOString() });
+    await until("자동 압축 끔", () => t.store.listActivity(gemini.id, 100).some(a => a.textCode === "activity.gemini_auto_compact_off"));
+    expect(t.store.getContextState(gemini.id)?.baseline?.geminiAutoOff).toBe(t.store.memberRevisions(gemini.id).sessionGeneration);
+    overLimit(t.store.requireMember(gemini.id));
+    await t.orch.assign(t.project.id, "research", { text: "그다음 자료" });
+    // 앞 턴(보고 보완 요청 포함)을 끝내 가며 기다린다.
+    await until("다음 전달", () => { if (t.runner.isBusy(gemini.id)) t.runner.end(gemini.id); return t.runner.sent.some(s => s.memberId === gemini.id && s.text.includes("그다음 자료")); });
+    expect(t.runner.compacts.filter(id => id === gemini.id)).toHaveLength(1);
   });
 
-  test("턴 오류: Gemini 는 오류 글로 한도·연결 문제를 가르지 않고 일반 오류로 알린다. 같은 글의 Codex 턴은 예전처럼 한도·장애로 간다", async () => {
-    const t = setup();
-    const quota = "RESOURCE_EXHAUSTED: You exceeded your current quota (rate limit). Try again in 2h 5m";
-    const network = "connection error: fetch failed (ECONNRESET)";
+  test("턴 오류: Gemini 는 agy 의 오류 글로 한도·장애·인증을 가른다. 한도는 보류 + 'Gemini' 카드(초기화 시각은 상태줄의 다 쓴 묶음), 장애는 탐침 영향, 인증은 일반 오류", async () => {
+    const probes: string[] = [];
+    const t = setup({ apiRecovery: { probe: async url => { probes.push(url); throw new Error("offline"); }, intervalMs: 1 } });
     const failTurn = async (handle: string, memberId: string, errorText: string) => {
       await t.orch.assign(t.project.id, handle, { text: `${handle} 일` });
       await until(`${handle} 전달`, () => t.runner.sent.some(s => s.memberId === memberId));
       t.runner.fail(memberId, errorText);
     };
-    const first = await t.add("자료 조사", "research", { cli: "gemini" });
-    const second = await t.add("문서 정리", "docs", { cli: "gemini" });
-    await failTurn("research", first.id, quota);
-    await failTurn("docs", second.id, network);
-    await until("Gemini 오류 표시", () => t.store.requireMember(first.id).status === "error" && t.store.requireMember(second.id).status === "error");
-    // CLI 가 알린 글 그대로 오류로 남는다. 한도 보류·한도 카드·장애 상태를 만들지 않는다.
-    expect(t.store.requireMember(first.id)).toMatchObject({ status: "error", lastError: quota });
-    expect(t.store.requireMember(second.id)).toMatchObject({ status: "error", lastError: network });
-    expect(t.orch.apiRecovery.usageLimited(first.id)).toBe(false);
-    expect(t.orch.apiRecovery.holdReason(first.id)).toBeNull();
-    expect(t.orch.apiRecovery.holdReason(second.id)).toBeNull();
-    expect(t.orch.apiRecovery.outage()).toBeNull();
-    expect(t.store.listDecisions(t.project.id).filter(d => d.usageLimit)).toEqual([]);
-    const errors = t.store.listMessages(t.project.id, { limit: 100 }).filter(m => m.textCode === "chat.member_error");
-    expect(errors).toHaveLength(2);
-    expect(errors.some(m => m.body.includes(quota))).toBe(true);
+    const status = (memberId: string, quota: Record<string, unknown>) => {
+      mkdirSync(join(t.config.home, "context", "gemini"), { recursive: true });
+      writeFileSync(geminiStatusPath(t.config.home, memberId), JSON.stringify(geminiStatusFromPayload(memberId, { conversation_id: "", quota }, new Date())));
+    };
+    const quota = "You have exhausted your quota on this model.";
+    const network = 'There was a network issue connecting to the server, please try again. · generating and executing: request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": unexpected EOF';
+    const transient = "RESOURCE_EXHAUSTED: Error 429 rate limit";
+    const auth = "Verification required. Please complete verification in your browser to continue.";
+    const limited = await t.add("자료 조사", "research", { cli: "gemini" });
+    const offline = await t.add("문서 정리", "docs", { cli: "gemini" });
+    const busy = await t.add("번역", "translate", { cli: "gemini" });
+    const login = await t.add("검수", "review", { cli: "gemini" });
+    const reset = new Date(Date.now() + 3 * 3_600_000).toISOString();
+    status(limited.id, { "gemini-5h": { remaining_fraction: 0, reset_time: reset }, "3p-5h": { remaining_fraction: 1, reset_time: new Date(Date.now() + 9 * 3_600_000).toISOString() } });
+    status(busy.id, { "gemini-5h": { remaining_fraction: 0.4, reset_time: reset } });
+    await failTurn("research", limited.id, quota);
+    await until("한도 보류", () => t.orch.apiRecovery.usageLimited(limited.id));
+    const card = t.store.listDecisions(t.project.id).find(d => d.usageLimit)!;
+    expect(card.usageLimit).toMatchObject({ cli: "gemini", memberIds: [limited.id], resetsAt: reset });
+    expect(card.title).toBe("Gemini 사용 한도 도달 · 팀원 1명 멈춤");
+    expect(t.store.requireMember(limited.id)).toMatchObject({ status: "error", blockedReason: "usage_limit" });
+    // 연결 문제는 장애다. Gemini 팀장이 있으면 탐침이 agy 가 닿는 주소도 본다.
+    await failTurn("docs", offline.id, network);
+    await until("장애", () => t.orch.apiRecovery.outage() !== null);
+    expect(t.orch.apiRecovery.outage()!.affectedMemberIds).toEqual([offline.id]);
+    await t.orch.apiRecovery.tick();
+    expect(probes).toContain(GEMINI_PROBE_URL);
+    // 429 만 말하는 글인데 상태줄의 묶음이 하나도 바닥나지 않았다: 잠깐의 용량 제한이라 한도가 아니라 장애로 다룬다.
+    await failTurn("translate", busy.id, transient);
+    await until("용량 제한은 장애", () => t.orch.apiRecovery.outage()?.affectedMemberIds.includes(busy.id) ?? false);
+    expect(t.orch.apiRecovery.usageLimited(busy.id)).toBe(false);
+    // 로그인 글은 지금처럼 일반 오류로 알린다(한도·장애로 보류하지 않는다).
+    await failTurn("review", login.id, auth);
+    await until("인증 오류", () => t.store.requireMember(login.id).status === "error");
+    expect(t.store.requireMember(login.id).lastError).toBe(auth);
+    expect(t.orch.apiRecovery.holdReason(login.id)).toBeNull();
+    expect(t.store.listMessages(t.project.id, { limit: 100 }).filter(m => m.textCode === "chat.member_error").map(m => m.body).join("\n")).toContain("Verification required");
+  });
 
-    // 같은 글이라도 Codex 턴은 예전 그대로: 한도 글은 한도 카드로, 연결 문제 글은 장애로 간다.
-    const codex = await t.add("서버 개발", "api", { cli: "codex" });
-    const other = await t.add("배포", "deploy", { cli: "codex" });
-    await failTurn("api", codex.id, quota);
-    await until("Codex 한도 보류", () => t.orch.apiRecovery.usageLimited(codex.id));
-    expect(t.store.listDecisions(t.project.id).filter(d => d.usageLimit).map(d => d.usageLimit!.cli)).toEqual(["codex"]);
-    await failTurn("deploy", other.id, network);
-    await until("Codex 장애", () => t.orch.apiRecovery.outage() !== null);
-    expect(t.orch.apiRecovery.outage()!.affectedMemberIds).toEqual([other.id]);
+  test("한도로 멈춘 Gemini 팀장의 카드: /usage 로 초기화 시각을 정하고, 남은 묶음의 모델을 선택지로 낸다. 고르면 같은 대화를 그 모델로 이어 연다", async () => {
+    const usage = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "agy-headless", "1.5.14", "usage.json"), "utf8"));
+    const reset = new Date(Date.now() + 2 * 3_600_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    // Gemini Models 묶음의 5시간 칸이 바닥났다. Claude and GPT models·Gemini 4 Argon 묶음은 남아 있다.
+    usage.command.data.groups[0].buckets[1] = { ...usage.command.data.groups[0].buckets[1], remaining_fraction: 0, reset_time: reset };
+    const spawns: string[] = [];
+    const t = setup({ geminiQuota: new GeminiQuotaReader({ bin: "/bin/sh", cwd: join(tmpdir(), "unused"), spawn: async (_bin, cwd) => { spawns.push(cwd); return { exitCode: 0, stdout: JSON.stringify(usage) }; } }) });
+    // 실제 `agy models`(1.5.14) 출력을 parseAgyModels 로 묶은 모양: effort 를 뗀 값과 표시 이름. 묶음을 모르는 모델(Orchestrator (Argon))도 섞여 있다.
+    writeGeminiModelsCache(geminiModelsCachePath(t.config.home), [
+      { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash", efforts: ["low", "medium", "high"] },
+      { value: "gemini-4-neon", label: "Gemini 4 Neon", efforts: ["low", "medium", "high", "xhigh"] },
+      { value: "gemini-pro-orchestrator-neon", label: "Orchestrator (Neon)", efforts: [] },
+      { value: "gemini-4-argon", label: "Gemini 4 Argon", efforts: ["low", "medium", "high"] },
+      { value: "gemini-pro-orchestrator-g1-pro", label: "Orchestrator (Argon)", efforts: [] },
+      { value: "claude-opus-5-5", label: "Claude Opus 5.5", efforts: ["low", "medium", "high"] },
+      { value: "gpt-oss-120b", label: "GPT-OSS 120B", efforts: ["medium"] },
+    ], new Date());
+    const created = await t.add("자료 조사", "research", { cli: "gemini", modelOverride: "gemini-3.8-flash" });
+    const conversation = t.runner.learn(created.id);
+    await until("대화 id", () => t.store.requireMember(created.id).sessionId === conversation);
+    await t.orch.assign(t.project.id, "research", { text: "자료 찾기" });
+    await until("전달", () => t.runner.sent.some(s => s.memberId === created.id));
+    t.runner.fail(created.id, "You have exhausted your quota on this model.");
+    await until("초기화 시각", () => t.store.listDecisions(t.project.id).find(d => d.usageLimit)?.usageLimit?.resetsAt === new Date(reset).toISOString());
+    expect(spawns).toHaveLength(1);
+    // 카드는 틱마다 선택지를 다시 셈한다. 한 번 돌린다.
+    await t.orch.apiRecovery.tick();
+    const card = t.store.listDecisions(t.project.id).find(d => d.usageLimit)!;
+    // 같은 묶음(Gemini 4 Neon·Orchestrator (Neon))·묶음을 모르는 모델(Orchestrator (Argon))은 내지 않는다.
+    expect(card.options.map(o => o.k)).toEqual(["model:gemini-4-argon", "model:claude-opus-5-5", "model:gpt-oss-120b", "resume"]);
+    expect(card.options.find(o => o.k === "model:claude-opus-5-5")!.label).toBe("Claude Opus 5.5로 바꿔 이어가기");
+    await t.orch.answerDecision(card.id, { choice: "model:claude-opus-5-5", memberIds: card.usageLimit!.memberIds });
+    await until("보류 풀림", () => !t.orch.apiRecovery.usageLimited(created.id));
+    const after = t.store.requireMember(created.id);
+    expect(after.modelOverride).toBe("claude-opus-5-5");
+    expect(after.sessionId).toBe(conversation);
+    expect(t.runner.startsOf(created.id).at(-1)!.member).toMatchObject({ model: "claude-opus-5-5", sessionId: conversation });
+    expect(t.runner.startsOf(created.id).at(-1)!.opts.resume).toBe(true);
   });
 
   test("사용 한도 카드의 CLI 이름: Gemini 는 'Gemini' 다(예전에는 Claude 가 아니면 모두 'Codex'). CLI 마다 카드가 따로다", async () => {
@@ -1171,7 +1248,6 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
     const gemini = await t.add("자료 조사", "research", { cli: "gemini" });
     const codex = await t.add("서버 개발", "api", { cli: "codex" });
     const claude = await t.add("화면 개발", "ui", { cli: "claude" });
-    // 지금은 Gemini 턴 오류를 한도로 가르지 않아 이 카드가 만들어지지 않는다(위 시험). 카드를 만드는 쪽이 생겼을 때의 이름만 본다.
     t.orch.apiRecovery.usageFailure(t.store.requireMember(gemini.id), "RESOURCE_EXHAUSTED: quota exceeded");
     t.orch.apiRecovery.usageFailure(t.store.requireMember(codex.id), "You've hit your usage limit");
     t.orch.apiRecovery.usageFailure(t.store.requireMember(claude.id), "You've hit your weekly limit");
@@ -1182,7 +1258,7 @@ describe("Gemini 팀장의 설정 변경·압축·한도", () => {
     expect(titleOf("codex")).toBe("Codex 사용 한도 도달 · 팀원 1명 멈춤");
     expect(titleOf("claude")).toBe("Claude 사용 한도 도달 · 팀원 1명 멈춤");
     expect(cards.find(d => d.usageLimit!.cli === "gemini")!.usageLimit!.memberIds).toEqual([gemini.id]);
-    // 계정 전체의 한도로 보아 모델 선택지를 내지 않는다(이어가기만).
+    // /usage 를 읽지 못하면(여기는 읽기가 없다) 묶음을 몰라 모델 선택지를 내지 않는다(이어가기만).
     expect(cards.find(d => d.usageLimit!.cli === "gemini")!.options.map(o => o.k)).toEqual(["resume"]);
     // 사용 한도로 멈춘 Claude 팀장을 Gemini 로 바꾸면 활동 줄의 CLI 이름도 Gemini 다.
     await t.orch.patchMemberConfig(claude.id, { cli: "gemini" });

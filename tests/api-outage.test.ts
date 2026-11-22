@@ -16,7 +16,7 @@ function fixture() {
   const db = openDb(":memory:"); close.push(() => db.close());
   const store = new Store(db, new Bus());
   const project = store.createProject({ name: "net-server", cwd: "/private/tmp/fake-api-work" });
-  const makeMember = (handle: string, cli: "claude" | "codex" = "claude") => store.createMember({ projectId: project.id, handle, name: handle, cli, kind: "worker", backend: "core", paneId: `t-${handle}`, sessionId: `s-${handle}` });
+  const makeMember = (handle: string, cli: "claude" | "codex" | "gemini" = "claude") => store.createMember({ projectId: project.id, handle, name: handle, cli, kind: "worker", backend: "core", paneId: `t-${handle}`, sessionId: `s-${handle}` });
   const member = makeMember("worker");
   let now = Date.parse("2026-11-10T06:00:00Z");
   let response = true;
@@ -636,5 +636,64 @@ describe("사용 한도 카드: 계정 수를 가정하지 않는 글과 모델 
     f.service.noteFailure(f.member.id, "모델을 바꾸지 못했습니다(시험)");
     expect(f.card().options).toEqual([SONNET, USAGE_RESUME_OPTION]);
     expect(f.card().detail).toContain("worker — 모델을 바꾸지 못했습니다(시험)");
+  });
+});
+
+describe("Gemini 한도: 화면 밖에서 안 초기화 시각과 모델 묶음 선택지(ApiRecovery 쪽)", () => {
+  test("usageFailure 의 시각 힌트는 글 속 시각보다 먼저 쓰고, noteUsageReset 은 뒤늦게 안 시각으로 일정을 처음부터 다시 센다", async () => {
+    const f = fixture();
+    const gemini = f.makeMember("gem", "gemini");
+    const hinted = new Date(f.now + 2 * 3_600_000).toISOString();
+    f.service.usageFailure(gemini, "You have exhausted your quota on this model. try again in 9h", null, "k1", { resetsAt: hinted });
+    expect(f.card("gemini").usageLimit).toMatchObject({ cli: "gemini", resetsAt: hinted, memberIds: [gemini.id] });
+    // 시각을 모르는 한도(힌트 없음, 글에도 없음)는 근거 글을 카드에 싣는다. 뒤늦게 시각을 알면 바꾸고 근거 글을 뺀다.
+    const g = fixture();
+    const other = g.makeMember("gem2", "gemini");
+    g.service.usageFailure(other, "RESOURCE_EXHAUSTED");
+    expect(g.card("gemini").usageLimit?.resetsAt ?? null).toBeNull();
+    expect(g.card("gemini").detail).toContain("RESOURCE_EXHAUSTED");
+    const later = new Date(g.now + 3_600_000).toISOString();
+    expect(g.service.noteUsageReset(other.id, later)).toBe(true);
+    expect(g.card("gemini").usageLimit?.resetsAt).toBe(later);
+    expect(g.card("gemini").detail).not.toContain("RESOURCE_EXHAUSTED");
+    // 같은 시각·지난 시각·모르는 팀장은 바꾸지 않는다.
+    expect(g.service.noteUsageReset(other.id, later)).toBe(false);
+    expect(g.service.noteUsageReset(other.id, new Date(g.now - 1000).toISOString())).toBe(false);
+    expect(g.service.noteUsageReset("m_nobody", later)).toBe(false);
+    // 자동 이어가기는 그 시각 + 1분 뒤에: 그 전에는 화면을 보지 않는다(Gemini 는 메뉴가 없어 키도 보내지 않는다).
+    let inspected = 0;
+    g.inspect = async () => { inspected++; return { menu: null, state: "error" }; };
+    await g.service.tick();
+    expect(inspected).toBe(0);
+    g.now = Date.parse(later) + 61_000;
+    await g.service.tick();
+    expect(inspected).toBe(1);
+    expect(g.dismissed).toEqual([]);
+    const resume = g.store.listPending(other.id).find(d => d.kind === "system");
+    expect(resume?.text).toBe(USAGE_RESUME_TEXT);
+  });
+
+  test("modelScoped 를 넣으면 그것으로 모델 선택지를 낼지 정한다(Gemini 의 묶음 한도). 넣지 않으면 예전처럼 글로 가른다", () => {
+    const f = fixture();
+    const gemini = f.makeMember("gem", "gemini");
+    const ARGON = { k: "model:gemini-4-argon", label: "Gemini 4 Argon로 바꿔 이어가기" };
+    f.options.choices = () => [ARGON];
+    f.options.modelScoped = (cli, limited) => cli === "gemini" && limited.memberId === gemini.id;
+    f.service.usageFailure(gemini, "You have exhausted your quota on this model.");
+    expect(f.card("gemini").options).toEqual([ARGON, USAGE_RESUME_OPTION]);
+    const g = fixture();
+    const other = g.makeMember("gem2", "gemini");
+    g.options.choices = () => [ARGON];
+    g.service.usageFailure(other, "You have exhausted your quota on this model.");
+    expect(g.card("gemini").options).toEqual([USAGE_RESUME_OPTION]);
+  });
+
+  test("장애 탐침: Gemini 팀장이 있으면 agy 가 닿는 주소를 더한다(정해 둔 주소가 없을 때)", async () => {
+    const f = fixture();
+    const gemini = f.makeMember("gem", "gemini");
+    const service = new ApiRecovery({ ...f.options, urls: undefined });
+    service.networkFailure(gemini, true);
+    await service.tick();
+    expect(f.probes).toEqual(["https://api.anthropic.com", "https://daily-cloudcode-pa.googleapis.com"]);
   });
 });

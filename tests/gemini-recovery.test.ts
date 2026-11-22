@@ -11,6 +11,7 @@ import { classifyGeminiTurnError, cleanGeminiError, GEMINI_PROBE_URL, geminiRepo
 import { GeminiQuotaReader, geminiBucketFamily, geminiExhaustedResetAt, geminiGroupAvailable, geminiGroupExhausted, geminiModelFamily, geminiModelKey, geminiStatusExhausted, geminiStatusResetAt, geminiStatusUsage, geminiUsageGroup, parseAgyUsage, type AgyUsageRun } from "../server/gemini-quota.ts";
 import { GEMINI_CHECKPOINT_HEAD, geminiHasModelResponse, geminiPromptTokens, geminiTranscriptPath, geminiTranscriptRoot, isGeminiCheckpoint } from "../server/runner/gemini-transcript.ts";
 import { observeCompactBoundary, type CompactBoundaryBaseline } from "../server/runner/core-context.ts";
+import { geminiStatusFromPayload } from "../server/runner/gemini-status.ts";
 import { classifyTurnError } from "../server/api-outage.ts";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "agy-headless", "1.5.14");
@@ -113,7 +114,9 @@ describe("/usage 읽기", () => {
     expect(geminiExhaustedResetAt(buckets)).toBe("2026-11-28T09:10:29.000Z");
     expect(geminiExhaustedResetAt(buckets.slice(2))).toBeNull();
     const record = { quota: { "gemini-5h": { remainingFraction: 0, resetAt: "2026-11-22T12:48:36.000Z", disabled: false }, "3p-weekly": { remainingFraction: 1, resetAt: "2026-11-29T00:00:00.000Z", disabled: false } } };
-    expect(geminiStatusResetAt(record)).toBe("2026-11-22T12:48:36.000Z");
+    expect(geminiStatusResetAt(record, ["Gemini 3.8 Flash"])).toBe("2026-11-22T12:48:36.000Z");
+    // 모델 이름을 모르면 어느 갈래 칸인지 몰라 시각을 정하지 않는다(검토 지적: 다른 갈래의 시각을 빌리지 않는다).
+    expect(geminiStatusResetAt(record)).toBeNull();
     expect(geminiStatusExhausted(record)).toBe(true);
     expect(geminiStatusExhausted({ quota: { "gemini-5h": { remainingFraction: 0.4, resetAt: null, disabled: false } } })).toBe(false);
     expect(geminiStatusExhausted({ quota: {} })).toBeNull();
@@ -141,12 +144,51 @@ describe("/usage 읽기", () => {
     expect(geminiStatusExhausted(record, ["claude-opus-5-5"])).toBe(true);
     expect(geminiStatusResetAt(record, ["Claude Opus 5.5"])).toBe(at(15));
     expect(geminiStatusExhausted(record, ["Gemini 4 Argon (High)"])).toBe(false);
-    // 갈래를 모르면 예전처럼 모든 묶음(늦게 풀리는 쪽).
+    // 바닥났는지는 갈래를 모르면 예전처럼 모든 묶음을 본다(초기화 시각은 모름: 아래 시험).
     expect(geminiStatusExhausted(record)).toBe(true);
     expect(geminiStatusExhausted(record, ["mystery"])).toBe(true);
     // Argon 묶음이 없는 요금제(Ultra)는 Gemini 묶음을 본다.
     const ultra = { quota: { "gemini-5h": { remainingFraction: 0, resetAt: at(12), disabled: false }, "3p-5h": { remainingFraction: 1, resetAt: at(15), disabled: false } } };
     expect(geminiStatusResetAt(ultra, ["gemini-4-argon"])).toBe(at(12));
+  });
+  test("다 쓴 칸이 남은 비율 없이 오면(agy 의 omitempty) '바닥나지 않음'이라고 하지 않는다: 그 갈래에 남은 비율을 모르는 칸이 있으면 모름(null). 빠진 칸을 0 으로 읽지도 않는다", () => {
+    // 검토 재현: gemini-5h 에 remaining_fraction 이 없고 gemini-weekly 는 0.5. 상태줄 래퍼와 같은 규칙(geminiStatusFromPayload)으로 옮긴 기록이다.
+    const record = geminiStatusFromPayload("m1", { agent_state: "idle", quota: {
+      "gemini-5h": { reset_time: "2026-11-22T12:48:36Z" }, "gemini-weekly": { remaining_fraction: 0.5, reset_time: "2026-11-28T09:10:29Z" },
+      "3p-5h": { remaining_fraction: 0.8, reset_time: "2026-11-22T15:00:00Z" },
+    } }, new Date("2026-11-22T10:00:00Z"));
+    expect(record.quota["gemini-5h"]!.remainingFraction).toBeNull();
+    // 그래서 429 글을 장애로 바꾸는 규칙(=== false 일 때만)이 돌지 않는다.
+    expect(geminiStatusExhausted(record, ["gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"])).toBeNull();
+    expect(geminiTransientLimit("request failed: 429 Too Many Requests: RESOURCE_EXHAUSTED")).toBe(true);
+    // 다른 갈래(3p-*)는 칸을 모두 알아 예전처럼 답한다. 모르는 칸은 그 갈래의 것만 본다.
+    expect(geminiStatusExhausted(record, ["Claude Opus 5.5"])).toBe(false);
+    // 아는 칸 가운데 다 쓴 칸이 있으면 모르는 칸이 섞여 있어도 바닥이다.
+    const both = { quota: { "gemini-5h": { remainingFraction: null, resetAt: "2026-11-22T12:48:36.000Z", disabled: false }, "gemini-weekly": { remainingFraction: 0, resetAt: "2026-11-28T09:10:29.000Z", disabled: false } } };
+    expect(geminiStatusExhausted(both, ["Gemini 3.8 Flash"])).toBe(true);
+    // 빠진 칸을 다 쓴 칸으로 읽지 않는다(실측이 없다): 초기화 시각은 아는 다 쓴 칸에서만 나온다.
+    expect(geminiStatusResetAt(record, ["Gemini 3.8 Flash"])).toBeNull();
+    expect(geminiStatusResetAt(both, ["Gemini 3.8 Flash"])).toBe("2026-11-28T09:10:29.000Z");
+  });
+  test("모델 갈래를 모르는 팀장(Orchestrator (Argon), 이름 없음)은 상태줄로 초기화 시각을 정하지 않는다(모름: 1시간부터 다시 이어 본다). 다른 갈래 칸의 늦은 시각을 빌리지 않는다", () => {
+    const at = (h: number) => new Date(Date.UTC(2026, 10, 22, h)).toISOString();
+    // 검토 재현: gemini-5h 는 2시간 뒤, 3p-weekly 는 6일 뒤에 풀리는 다 쓴 칸.
+    const record = { quota: {
+      "gemini-5h": { remainingFraction: 0, resetAt: at(12), disabled: false }, "gemini-weekly": { remainingFraction: 0.6, resetAt: at(20), disabled: false },
+      "3p-5h": { remainingFraction: 0.5, resetAt: at(15), disabled: false }, "3p-weekly": { remainingFraction: 0, resetAt: new Date(Date.UTC(2026, 10, 28, 10)).toISOString(), disabled: false },
+    } };
+    expect(geminiStatusResetAt(record, ["gemini-pro-orchestrator-g1-pro", "Orchestrator (Argon)"])).toBeNull();
+    expect(geminiStatusResetAt(record, [])).toBeNull();
+    expect(geminiStatusResetAt(record)).toBeNull();
+    // 갈래를 알면 그 갈래의 다 쓴 칸이다.
+    expect(geminiStatusResetAt(record, ["Gemini 3.8 Flash"])).toBe(at(12));
+    expect(geminiStatusResetAt(record, ["Claude Opus 5.5"])).toBe(new Date(Date.UTC(2026, 10, 28, 10)).toISOString());
+    // 기록에 그 갈래의 묶음이 없어도 다른 갈래의 시각을 빌리지 않는다(Argon 은 Ultra 요금제처럼 Gemini 묶음을 본다).
+    const geminiOnly = { quota: { "gemini-5h": { remainingFraction: 0, resetAt: at(12), disabled: false } } };
+    expect(geminiStatusResetAt(geminiOnly, ["Claude Opus 5.5"])).toBeNull();
+    expect(geminiStatusResetAt(geminiOnly, ["Gemini 4 Argon"])).toBe(at(12));
+    // 바닥났는지 묻는 쪽(장애로 바꿀지)은 예전처럼 갈래를 모르면 모든 묶음을 본다.
+    expect(geminiStatusExhausted(record, ["Orchestrator (Argon)"])).toBe(true);
   });
   test("상태줄 기록으로 만든 /usage 꼴: 갈래마다 한 묶음, 묶음의 모델은 Gemini 모델 목록에서 그 갈래의 것", () => {
     const record = { at: "2026-11-22T10:00:00.000Z", quota: {

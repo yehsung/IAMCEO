@@ -2838,7 +2838,7 @@ export class Orchestrator implements OrchestratorApi {
    * Gemini 팀장의 사용 한도. 보류부터 건다(전달이 곧바로 멈춘다). 초기화 시각은 차례로
    * ① /usage(운영에서만, 뒤에서 읽는다): 그 팀장 모델의 묶음에서 다 쓴 칸의 가장 늦은 시각 → noteUsageReset 으로 넣는다.
    * ② /usage 가 없거나 못 읽거나 묶음을 못 찾으면: 상태줄 기록에서 그 팀장 모델 갈래의 묶음(gemini-*·3p-*·gemini-argon-*)의 다 쓴 칸 가운데 가장 늦은 시각
-   *    (갈래를 모르면 모든 묶음에서, 늦게 풀리는 쪽).
+   *    (갈래를 모르면 정하지 않는다: 다른 갈래 칸의 늦은 시각을 빌리면 며칠 동안 이어 보지 않는다).
    * ③ 글 속 시각(parseUsageReset) → ④ 모름: 한 시간 뒤부터 간격을 벌려 다시 이어 본다(이르게 이어 가도 agy 는 할당량 오류를 곧바로 돌려준다).
    * 크레딧 설정(useG1Credits·AI Credit Overages)은 건드리지 않는다: 켜 두었으면 agy 가 한도에서 멈추지 않고 크레딧으로 이어 간다(유료 선택은 대표 몫).
    */
@@ -6042,6 +6042,7 @@ export class Orchestrator implements OrchestratorApi {
     let kind = this.turnErrorKind(member, errorText);
     // Gemini: 429·rate limit·RESOURCE_EXHAUSTED 만 말하는 글인데 상태줄 기록의 한도 묶음(그 팀장 모델의 갈래, 모르면 전부)이 하나도 바닥나지 않았으면
     // 잠깐의 용량 제한이다(agy 가 이미 4분까지 기다렸다): 한도 보류가 아니라 장애로 다룬다(탐침으로 돌아오면 이어 간다).
+    // 남은 비율이 빠진 칸이 있으면 바닥났는지 모른다(geminiStatusExhausted 가 null): 한도로 둔다.
     const status = member.cli === "gemini" ? readGeminiStatus(this.config.home, member.id) : null;
     if (member.cli === "gemini" && kind === "usage_limit" && geminiTransientLimit(errorText) && geminiStatusExhausted(status, this.geminiModelNames(member)) === false) kind = "network";
     if (kind === "network") { this.apiRecovery.networkFailure(member, true, errorKey); return; }

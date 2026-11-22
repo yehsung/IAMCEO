@@ -205,6 +205,14 @@ export function geminiRecorderHookSet(input: GeminiHooksInput): GeminiHookSet {
   return Object.fromEntries(GEMINI_HOOK_EVENTS.map(name => [name, [handler]])) as GeminiHookSet;
 }
 
+/** 이 hooks.json(주입 폴더에 쓴 것)에 사건 기록 장치의 PreInvocation 처리기가 실렸나. 못 읽으면 false. */
+export function geminiHooksRecordTurns(hooksFile: string): boolean {
+  try {
+    const value = JSON.parse(readFileSync(hooksFile, "utf8")) as Record<string, Record<string, { command?: unknown }[]> | undefined>;
+    return (value[GEMINI_HOOKS_NAME]?.PreInvocation ?? []).some(handler => typeof handler?.command === "string" && handler.command.includes(GEMINI_HOOK_RECORDER_MARKER));
+  } catch { return false; }
+}
+
 /** 사건 기록 장치만 실은 hooks.json 값: `{ "iamceo": { "SessionStart": [...], "PreInvocation": [...], "Stop": [...] } }`. */
 export function geminiHooksConfig(input: GeminiHooksInput): Record<string, unknown> {
   return geminiHooksFile(geminiRecorderHookSet(input))!;

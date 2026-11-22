@@ -181,12 +181,22 @@ describe("providerLaunch(gemini): 명령줄과 환경", () => {
     // settings.json 에 없는 키(hooks·MCP)는 넣지 않는다.
     expect(Object.keys(settings).sort()).toEqual(["notifications", "permissions", "queuedMessages", "showFeedbackSurvey", "showTips", "statusLine", "trustedWorkspaces"]);
   });
-  test("권한: 묻지 않기 → --dangerously-skip-permissions, auto → --mode auto, 전부 묻기 → 플래그 없이 agentMode \"\"", () => {
+  test("권한: 묻지 않기 → --dangerously-skip-permissions, auto → 플래그 없이 agentMode \"auto\"(대신하는 모드면 accept-edits + 샌드박스), 전부 묻기 → 플래그 없이 agentMode \"\"", () => {
     const home = temp(), opts = runFiles(home), bins = { geminiBin: "/fake/agy", contextHome: home };
     const auto = providerLaunch(member({ permissionMode: "auto" }), opts, bins);
-    expect(auto.argv.slice(-2)).toEqual(["--mode", "auto"]);
+    // `--mode auto` 는 로그인 전에 판정해 auto 를 쓸 수 있는 계정에도 경고를 찍는다(1.5.14 실측). 설정 칸은 경고 없이 같은 결과다.
+    expect(auto.argv).not.toContain("--mode");
     expect(auto.argv).not.toContain("--dangerously-skip-permissions");
-    expect("agentMode" in JSON.parse(flag(auto.argv, "--settings")!)).toBe(false);
+    expect(auto.argv.at(-2)).toBe("--settings");
+    const autoSettings = JSON.parse(flag(auto.argv, "--settings")!);
+    expect(autoSettings.agentMode).toBe("auto");
+    expect("enableTerminalSandbox" in autoSettings || "toolPermission" in autoSettings).toBe(false);
+    const fallback = providerLaunch(member({ permissionMode: "auto", geminiAutoFallback: true }), opts, bins);
+    expect(fallback.argv).not.toContain("--mode");
+    expect(JSON.parse(flag(fallback.argv, "--settings")!)).toMatchObject({ agentMode: "accept-edits", enableTerminalSandbox: true, toolPermission: "proceed-in-sandbox" });
+    // 대신하는 모드 칸은 권한 auto 에서만 뜻이 있다.
+    expect(JSON.parse(flag(providerLaunch(member({ permissionMode: "default", geminiAutoFallback: true }), opts, bins).argv, "--settings")!).agentMode).toBe("");
+    expect("agentMode" in JSON.parse(flag(providerLaunch(member({ permissionMode: "bypassPermissions", geminiAutoFallback: true }), opts, bins).argv, "--settings")!)).toBe(false);
     const ask = providerLaunch(member({ permissionMode: "default" }), opts, bins);
     expect(ask.argv).not.toContain("--mode");
     expect(ask.argv).not.toContain("--dangerously-skip-permissions");
@@ -465,6 +475,7 @@ describe("geminiSettings", () => {
     expect("statusLine" in settings).toBe(false);
     expect("agentMode" in settings).toBe(false);
     expect(geminiSettings({ cwd: real, injectDir: real, permissionMode: "default", statusLine: { type: "command", command: "x" } })).toMatchObject({ trustedWorkspaces: [real], agentMode: "", statusLine: { type: "command", command: "x" } });
-    expect("agentMode" in geminiSettings({ cwd: real, injectDir: real, permissionMode: "auto", statusLine: null })).toBe(false);
+    expect(geminiSettings({ cwd: real, injectDir: real, permissionMode: "auto", statusLine: null }).agentMode).toBe("auto");
+    expect("agentMode" in geminiSettings({ cwd: real, injectDir: real, permissionMode: "bypassPermissions", statusLine: null })).toBe(false);
   });
 });

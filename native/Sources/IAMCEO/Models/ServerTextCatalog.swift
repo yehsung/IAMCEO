@@ -69,6 +69,7 @@ enum ServerTextCatalog {
         case "activity.decision_closed_by_answer": return String(localized: "server.text.activity.decision_closed_by_answer", defaultValue: "결재 #{id}를 대표 답 #{answer}에 따라 닫았습니다: {issue}")
         case "activity.decision_closed_by_answer_group": return String(localized: "server.text.activity.decision_closed_by_answer_group", defaultValue: "결재 #{id}를 대표 답 #{answer}에 따라 닫았습니다 (같은 그룹)")
         case "activity.restart_reopened": return String(localized: "server.text.activity.restart_reopened", defaultValue: "Mac이나 실행 엔진이 다시 시작되어 꺼졌던 세션을 이어서 열었습니다")
+        case "activity.gemini_auto_fallback": return String(localized: "server.text.activity.gemini_auto_fallback", defaultValue: "Antigravity CLI가 이번 실행에서 auto 모드로 뜨지 않았습니다. 쉬는 때에 같은 대화를 auto 대신의 모드(파일 고치기·샌드박스 안 명령만 자동 승인)로 다시 엽니다")
         case "activity.gemini_resume_lost": return String(localized: "server.text.activity.gemini_resume_lost", defaultValue: "이전 대화를 이어 열지 못해 새 대화로 열렸습니다. 앞 대화의 맥락은 없습니다")
         case "activity.gemini_conversation_changed": return String(localized: "server.text.activity.gemini_conversation_changed", defaultValue: "대화가 새로 열렸습니다. 앞 대화의 맥락은 이어지지 않습니다")
         case "activity.missing_report_final": return String(localized: "server.text.activity.missing_report_final", defaultValue: "결과 보고 누락: 보완 요청 뒤에도 결과가 남지 않았습니다")

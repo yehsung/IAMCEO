@@ -118,15 +118,14 @@ function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins,
   }
   const args: string[] = [];
   if (opts.resume && member.sessionId) args.push("--conversation", member.sessionId);
-  args.push("--add-dir", injectDir, "--settings", JSON.stringify(geminiSettings({ cwd: member.cwd, injectDir, permissionMode: member.permissionMode, statusLine })));
+  args.push("--add-dir", injectDir, "--settings", JSON.stringify(geminiSettings({ cwd: member.cwd, injectDir, permissionMode: member.permissionMode, autoFallback: member.geminiAutoFallback === true, statusLine })));
   // 모델을 정하지 않았으면 effort 도 넘기지 않는다(위 설명): agy 의 기본 모델·기본 effort 로 뜬다.
   if (member.model) {
     args.push("--model", member.model);
     if (member.effort) args.push("--effort", member.effort);
   }
-  // default(전부 묻기)는 플래그가 없다: 위 설정의 agentMode "" 가 그 뜻이다.
+  // default(전부 묻기)·auto 는 플래그가 없다: 위 설정의 agentMode("" · "auto", 대신하는 모드면 "accept-edits")가 그 뜻이다.
   if (member.permissionMode === "bypassPermissions") args.push("--dangerously-skip-permissions");
-  else if (member.permissionMode === "auto") args.push("--mode", "auto");
   return { argv: [bin, ...args], env: { AGY_CLI_OSC7501: "on", IAMCEO_MEMBER_ID: member.id }, sessionId: opts.resume ? member.sessionId : null, labels: { [GEMINI_LAUNCH_LABEL]: launchId } };
 }
 

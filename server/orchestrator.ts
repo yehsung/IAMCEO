@@ -314,6 +314,11 @@ interface Runtime {
   holdUntil: number;
   /** 새 설정으로 다시 열기를 포기한 설정. 설정이 또 바뀌면 다시 시도한다. */
   configGaveUp: string | null;
+  /**
+   * Gemini(Antigravity CLI): 권한 auto 로 띄운 실행이 auto 로 뜨지 않았다(상태줄의 cycle_mode 가 default). 다음 띄우기부터 auto 를 대신하는 모드
+   * (accept-edits + 터미널 샌드박스, gemini-inject.ts)로 띄운다. 메모리에만 있다: 서버를 다시 켜면 auto 를 다시 해 본다.
+   */
+  geminiAutoFallback?: boolean;
   /** 서버가 이 직원의 CLI 를 새로 띄운 시각. 곧바로 끝나는 세션을 세는 데만 쓴다. */
   launchedAt: number | null;
   /** 띄우자마자 끝난 횟수(연속)와 마지막 시각. 턴이 한 번이라도 끝나거나 대표가 직접 깨우면 0 으로 돌아간다. */
@@ -4719,7 +4724,14 @@ export class Orchestrator implements OrchestratorApi {
     const staff = staffConfig(member.cli, settings);
     // 0.2.8: 앱에서 다른 계정으로 로그인한 뒤면 그 세대. 한 번도 없었으면 칸을 두지 않는다(예전 세션의 적용 기록과 글자까지 같다).
     const account = this.accountEpoch(member.cli);
-    return { model, effort, staffModel: staff.model, staffEffort: staff.effort, ...(account ? { account } : {}) };
+    // Gemini: auto 가 들지 않은 팀장은 대신하는 모드로 다시 연다(칸이 다르면 쉴 때 같은 대화를 이어 연다). 칸이 없으면 예전 적용 기록과 글자까지 같다.
+    const geminiMode = this.geminiAutoFallback(member) ? { geminiMode: "auto-fallback" as const } : {};
+    return { model, effort, staffModel: staff.model, staffEffort: staff.effort, ...(account ? { account } : {}), ...geminiMode };
+  }
+
+  /** 이 Gemini 팀장을 권한 auto 대신의 모드로 띄울 것인가(권한 방식이 auto 이고 이 서버에서 그 팀장의 auto 가 들지 않은 적이 있다). */
+  private geminiAutoFallback(member: Pick<Member, "id" | "cli">): boolean {
+    return member.cli === "gemini" && this.store.getSettings().permissionMode === "auto" && this.runtime(member.id).geminiAutoFallback === true;
   }
 
   // ---- 0.2.8: AI 계정 로그인 뒤 새 계정 적용 ----
@@ -4853,7 +4865,9 @@ export class Orchestrator implements OrchestratorApi {
     const have = this.store.getAppliedConfig(member.id);
     return want.model !== (have?.model ?? null) || want.effort !== (have?.effort ?? null) || want.staffModel !== (have?.staffModel ?? null) || want.staffEffort !== (have?.staffEffort ?? null)
       // 0.2.8: 앱에서 다른 계정으로 로그인했다. 이 세션은 이전 계정으로 떠 있다.
-      || (want.account ?? 0) !== (have?.account ?? 0);
+      || (want.account ?? 0) !== (have?.account ?? 0)
+      // 0.2.10: Gemini 의 auto 가 들지 않아 대신하는 모드로 바꾼다(또는 서버를 다시 켜 auto 를 다시 해 본다).
+      || (want.geminiMode ?? null) !== (have?.geminiMode ?? null);
   }
 
   /** 쉬는 세션을 새 설정으로 다시 연다(같은 대화를 이어 띄운다). 이번 전달을 그대로 이어가도 되면 true. */
@@ -5600,7 +5614,29 @@ export class Orchestrator implements OrchestratorApi {
       case "pane":
         this.store.patchMember(member.id, { paneId: e.paneId });
         return;
+      case "gemini_mode":
+        if (e.initial) this.onGeminiMode(member, e.cycleMode);
+        return;
     }
+  }
+
+  /**
+   * Gemini(Antigravity CLI) 터미널이 실제로 든 모드를 알렸다(CoreRunner, 상태줄의 cycle_mode). 권한 auto 로 띄웠는데 default 면 auto 가 들지 않은 것이다:
+   * 1.5.14 실측으로 로그인 직후 실험 플래그를 받지 못한 실행(20여 번 중 3번)이 그렇게 떨어지고, auto 를 쓸 수 없는 계정·환경(기업 계정, 샌드박스 없음)도 같다.
+   * 그대로 두면 그 팀장은 '매번 묻기'로 돈다(명령·파일 고치기마다 승인). 그래서 다음 띄우기부터 auto 를 대신하는 모드(accept-edits + 터미널 샌드박스)로
+   * 띄운다: desiredConfig 의 칸이 바뀌어 쉬는 때에 같은 대화를 이어 연다(말을 걸기 전이면 새로 띄운다). 활동에 한 줄 남긴다.
+   * 터미널에서 처음 자리 잡은 모드만 본다(그 뒤의 바뀜은 사람이 Shift+Tab 으로 바꾼 것이다). 대신하는 모드로 띄운 실행은 손대지 않는다.
+   */
+  private onGeminiMode(member: Member, cycleMode: string): void {
+    if (member.cli !== "gemini" || member.origin !== "runner" || cycleMode !== "default") return;
+    if (this.store.getSettings().permissionMode !== "auto") return;
+    const rt = this.runtime(member.id);
+    if (rt.geminiAutoFallback) return;
+    // 이 터미널이 auto 를 바라고 띄운 것이어야 한다(적용 기록에 대신하는 모드 칸이 없다).
+    if (this.store.getAppliedConfig(member.id)?.geminiMode) return;
+    rt.geminiAutoFallback = true;
+    this.store.appendActivity(member.id, "system", textRef("activity.gemini_auto_fallback"));
+    void this.pump(member.id);
   }
 
   /** 지금의 막힘에서 이미 알린 까닭들. 메모리에만 있다. */
@@ -6048,6 +6084,7 @@ export class Orchestrator implements OrchestratorApi {
       ...this.memberRun(member, settings),
       subagentModel: staffConfig(member.cli, settings).model,
       permissionMode: settings.permissionMode,
+      ...(this.geminiAutoFallback(member) ? { geminiAutoFallback: true } : {}),
       kind: member.kind,
       origin: member.origin,
       sessionGeneration: this.store.getMember(member.id) ? this.store.memberRevisions(member.id).sessionGeneration : undefined,

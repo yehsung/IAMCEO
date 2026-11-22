@@ -198,6 +198,12 @@ export interface GeminiSettingsInput {
   cwd: string;
   injectDir: string;
   permissionMode: "bypassPermissions" | "auto" | "default";
+  /**
+   * 권한 auto 를 대신하는 모드로 띄운다(permissionMode 가 auto 일 때만 뜻이 있다). 이 실행에서 agy 가 auto 로 뜨지 않았을 때(상태줄의 cycle_mode 가
+   * 없음 = default) 서버가 다음 띄우기에 켠다(Orchestrator 의 gemini_mode 처리). 실측(1.5.14 헤드리스): accept-edits + 터미널 샌드박스 + proceed-in-sandbox 는
+   * 작업 폴더 안 파일 쓰기와 샌드박스 안 명령을 묻지 않고, 작업 폴더 밖 쓰기·샌드박스 밖 명령만 묻는다(auto 의 안전 평가기만 없다).
+   */
+  autoFallback?: boolean;
   /** 상태줄 래퍼(gemini-statusline.ts). 없으면 agy 의 기본 상태줄이 보인다. */
   statusLine: { type: "command"; command: string } | null;
 }
@@ -219,6 +225,10 @@ function trustedPaths(paths: string[]): string[] {
  * - permissions.allow: IAMCEO MCP 도구는 묻지 않고 부른다.
  * - 팁·설문·알림을 끈다. 일하는 중에 들어온 글은 줄 세운다(queuedMessages).
  * - 권한이 '전부 묻기'(default)면 agentMode 를 비운다: 플래그가 없을 때의 기본(auto, 1.5.7+)으로 뜨지 않게 한다.
+ * - 권한이 auto 면 agentMode "auto" 다(`--mode auto` 는 쓰지 않는다). 1.5.14 실측: `--mode auto` 는 로그인 전에 판정해 auto 를 쓸 수 있는 계정에도
+ *   `warning: --mode auto is not available for this account` 를 찍는다(그래도 로그인 뒤 auto 로 바뀐다). agentMode "auto" 는 경고 없이 같은 결과다.
+ *   auto 를 쓸 수 없는 계정·환경이면 agy 가 default 로 띄운다(문서). 그것은 상태줄의 cycle_mode 로 알아낸다(gemini-status.ts).
+ * - autoFallback 이면 auto 대신 accept-edits + 터미널 샌드박스 + proceed-in-sandbox(위 autoFallback 설명).
  */
 export function geminiSettings(input: GeminiSettingsInput): Record<string, unknown> {
   return {
@@ -230,5 +240,6 @@ export function geminiSettings(input: GeminiSettingsInput): Record<string, unkno
     queuedMessages: "queue",
     ...(input.statusLine ? { statusLine: input.statusLine } : {}),
     ...(input.permissionMode === "default" ? { agentMode: "" } : {}),
+    ...(input.permissionMode === "auto" ? (input.autoFallback ? { agentMode: "accept-edits", enableTerminalSandbox: true, toolPermission: "proceed-in-sandbox" } : { agentMode: "auto" }) : {}),
   };
 }

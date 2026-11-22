@@ -16,7 +16,7 @@ import { childEnv } from "./env.ts";
 import { claudeQuietScreen, inputText, screenContextPct } from "./claude-screen.ts";
 import { GEMINI_SELECTED_OPTION, GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE, geminiDraft, geminiSetupBlocked, geminiTurnToStop } from "./gemini-screen.ts";
 import { geminiStatusPath, readGeminiStatus, type GeminiStatusRecord } from "./gemini-status.ts";
-import { geminiHookEventsDir, geminiHookLastWrite, readGeminiDeliveryEvidence, readGeminiHookConversation, type GeminiHookConversationWatch } from "./gemini-hooks.ts";
+import { geminiHookEventsDir, geminiHookLastWrite, geminiHooksRecordTurns, readGeminiDeliveryEvidence, readGeminiHookConversation, type GeminiHookConversationWatch } from "./gemini-hooks.ts";
 import { geminiInjectDir } from "./gemini-inject.ts";
 import { validWindow } from "./context.ts";
 import { CLAUDE_BACKGROUND_REASON, CLAUDE_LOGIN_ERRORS, CLAUDE_LOGIN_REASON, claudeHookTurn, readClaudeTurn, type ClaudeHookTurnState, type ClaudeTurnCursor, type ClaudeTurnError } from "./claude-turn.ts";
@@ -79,6 +79,8 @@ export interface CoreRunnerDeps {
    * the production assembly (createOrchestrator) turns it on. Recognized dialogs are never held back.
    */
   startQuietMs?: number;
+  /** 시험에서만 줄인다. 기본 GEMINI_MODE_SETTLE_MS. */
+  geminiModeSettleMs?: number;
   /** How long one inspection keeps reading a legacy (baseline-less) provider log before returning scan_pending. */
   evidenceScanMs?: number;
   readContext?: typeof capturedContext;
@@ -140,6 +142,8 @@ interface Track {
   nextPollAt: number; pollDelay: number;
   observedAt: string; failures: number; failure: string | null;
 }
+/** Antigravity CLI: 상태줄의 default 모드를 믿기까지 띄운 뒤 기다리는 시간(observeGeminiMode). */
+export const GEMINI_MODE_SETTLE_MS = 10_000;
 const REQUIRED_METHODS = ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill"];
 /** herdr-core actually sends permission, question and auth; the other words are legacy. */
 const BLOCKED_KINDS: Record<string, "permission" | "selection" | "setup"> = { permission: "permission", selection: "selection", setup: "setup", question: "selection", auth: "setup" };
@@ -344,6 +348,8 @@ export class CoreRunner implements FullRunner {
   private readonly subagentWatch = new WeakMap<Track, SubagentWatch>();
   /** Antigravity CLI 의 대화 id 를 훅 기록에서 찾는 기억(track 마다). 새 track(다시 띄운 CLI)은 처음부터 다시 본다. */
   private readonly geminiSessionWatch = new WeakMap<Track, GeminiSessionWatch>();
+  /** Antigravity CLI: 터미널마다 마지막으로 알린 모드(gemini_mode 사건). 새 터미널이면 없다. */
+  private readonly geminiModes = new WeakMap<Track, { cycleMode: string; sandbox: boolean | null }>();
   /** 0.2.7 배포 전 확인(P3): 멈춘 압축(id)의 되살아난 명령을 지웠는가·안내했는가(track 마다, 압축마다 한 번). */
   private readonly compactDrafts = new WeakMap<Track, { id: string; cleared: boolean; noted: boolean }>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -910,6 +916,31 @@ export class CoreRunner implements FullRunner {
     track.sessionId = id;
     this.event(track, { type: "session", memberId: track.member.id, sessionId: id });
   }
+  /**
+   * Antigravity CLI 터미널이 실제로 든 모드(이 터미널의 상태줄 기록의 cycleMode·sandbox)가 자리 잡으면 gemini_mode 사건을 낸다. 값이 바뀔 때만 낸다.
+   * default(칸 없음)는 띄운 뒤 GEMINI_MODE_SETTLE_MS 가 지나 쓰인 기록일 때만 믿는다: agy 는 로그인·실험 플래그를 받은 뒤에야 auto 로 바뀐다
+   * (1.5.14 헤드리스 로그: 시작 몇 초 뒤 `SetCycleMode called: auto`). 그 전의 기록은 아직 default 일 수 있다.
+   * UNVERIFIED-INTERACTIVE: 대화형 화면의 상태줄 입력(cycle_mode·sandbox·agent_state 값, 모드가 바뀔 때 상태줄을 다시 그리는지)은 아직 보지 못했다(문서 기준).
+   */
+  private observeGeminiMode(track: Track): void {
+    if (providerFor(track.member) !== "gemini") return;
+    const record = this.geminiStatus(track);
+    if (!record || record.cycleMode === null) return;
+    if (record.cycleMode === "default") {
+      const since = Date.parse(track.bindingSince);
+      if (!Number.isFinite(since) || Date.parse(record.at) - since < (this.deps.geminiModeSettleMs ?? GEMINI_MODE_SETTLE_MS)) return;
+      if (["initializing", "authenticating", "starting"].includes(record.agentState ?? "")) return;
+    }
+    const last = this.geminiModes.get(track);
+    if (last && last.cycleMode === record.cycleMode && last.sandbox === record.sandbox) return;
+    this.geminiModes.set(track, { cycleMode: record.cycleMode, sandbox: record.sandbox });
+    this.event(track, { type: "gemini_mode", memberId: track.member.id, cycleMode: record.cycleMode, sandbox: record.sandbox, initial: !last });
+  }
+  /** 이 팀장의 지금 터미널이 든 모드(observeGeminiMode 가 자리 잡았다고 본 값). 모르면 null. 결재함 승인 카드의 판정이 쓴다. */
+  geminiMode(memberId: string): { cycleMode: string; sandbox: boolean | null } | null {
+    const track = this.tracks.get(memberId);
+    return track ? this.geminiModes.get(track) ?? null : null;
+  }
   private geminiWatch(track: Track): GeminiSessionWatch {
     let watch = this.geminiSessionWatch.get(track);
     // 붙을 때 이미 아는 id(이어 연 세션, 명부의 id)는 지금 시각의 근거로 친다: 그 전의 훅 줄로는 바꾸지 않는다.
@@ -984,7 +1015,8 @@ export class CoreRunner implements FullRunner {
         return hookLines !== null && hookLines > Date.parse(record.at);
       }
       if (!this.geminiHookEvents || hookLines !== null) return true;
-      return !existsSync(join(geminiInjectDir(opts.systemPromptFile, member.id), ".agents", "hooks.json"));
+      // hooks.json 에는 도구 훅(PreToolUse)만 있을 수도 있다(기록 훅을 만들지 못했다). 기록 사건(PreInvocation)이 실렸을 때만 '줄이 없다'가 근거다.
+      return !geminiHooksRecordTurns(join(geminiInjectDir(opts.systemPromptFile, member.id), ".agents", "hooks.json"));
     } catch { return true; }
   }
   private refresh(track: Track): Promise<CoreTerminal> {
@@ -995,7 +1027,7 @@ export class CoreRunner implements FullRunner {
         const terminal = await this.call<CoreTerminal>("terminal.get", { terminal: track.terminal.address });
         this.validateTrack(track);
         if (!this.owns(terminal, track.member) || !isProviderArgv(terminal.argv, providerFor(track.member), this.configuredBin(providerFor(track.member))) || terminal.cwd !== track.member.cwd) throw new CoreError("conflict", "Core terminal ownership changed");
-        if (!this.manualLease(track.member.id)) { this.discoverBinding(track); this.discoverGeminiSession(track); }
+        if (!this.manualLease(track.member.id)) { this.discoverBinding(track); this.discoverGeminiSession(track); this.observeGeminiMode(track); }
         await this.observe(track, terminal);
         track.failures = 0; track.failure = null;
         // Lifted: tell the orchestrator to push the deliveries it had been holding back.

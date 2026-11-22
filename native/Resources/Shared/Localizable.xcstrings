@@ -23295,6 +23295,23 @@
         }
       }
     },
+    "server.text.activity.gemini_auto_fallback" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Antigravity CLI didn't start in auto mode this time. When idle, the same conversation reopens in a mode that stands in for auto (only file edits and sandboxed commands are approved automatically)"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Antigravity CLI가 이번 실행에서 auto 모드로 뜨지 않았습니다. 쉬는 때에 같은 대화를 auto 대신의 모드(파일 고치기·샌드박스 안 명령만 자동 승인)로 다시 엽니다"
+          }
+        }
+      }
+    },
     "server.text.activity.gemini_resume_lost" : {
       "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
       "localizations" : {

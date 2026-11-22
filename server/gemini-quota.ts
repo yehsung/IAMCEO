@@ -13,6 +13,7 @@
 // 서버는 Gemini 팀장이 한도로 멈췄을 때만 /usage 를 띄운다(60초 안에 다시 묻지 않는다). 시험 모드에서는 만들지 않는다(createOrchestrator).
 import { mkdirSync } from "node:fs";
 import { resolveCliExecutable } from "./config.ts";
+import { withoutGeminiRemote } from "./runner/env.ts";
 import type { GeminiStatusRecord } from "./runner/gemini-status.ts";
 
 export interface AgyUsageBucket { id: string; window: string | null; remainingFraction: number | null; resetAt: string | null }
@@ -194,10 +195,11 @@ export type AgyUsageSpawn = (bin: string, cwd: string, timeoutMs: number) => Pro
 async function spawnAgyUsage(bin: string, cwd: string, timeoutMs: number): Promise<AgyUsageRun> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    // 환경은 서버의 것을 그대로 쓴다(models.ts 의 `agy models` 와 같다. env -i 로 비우지 않는다). 입력은 닫아 둔다: 물음이 뜨면 답하지 않고 끊긴다.
-    // --print-timeout 은 agy 스스로의 상한이고, 아래 deadline 이 서버 쪽 상한이다.
+    // 환경은 서버의 것을 그대로 쓰되(env -i 로 비우지 않는다) SSH_CLIENT·SSH_TTY·SSH_CONNECTION 만 뺀다: 그 값이 있으면 agy 가 키체인이 아닌 토큰 파일을 읽어
+    // 서버를 SSH 세션에서 띄웠을 때 폰 로그인·팀장(키체인)과 다른 계정의 한도를 읽거나 인증에 실패한다(runner/env.ts withoutGeminiRemote).
+    // 입력은 닫아 둔다: 물음이 뜨면 답하지 않고 끊긴다. --print-timeout 은 agy 스스로의 상한이고, 아래 deadline 이 서버 쪽 상한이다.
     const seconds = Math.max(5, Math.floor(timeoutMs / 1000) - 5);
-    const child = Bun.spawn([bin, "-p", "/usage", "--output-format", "json", "--print-timeout", `${seconds}s`], { cwd, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const child = Bun.spawn([bin, "-p", "/usage", "--output-format", "json", "--print-timeout", `${seconds}s`], { cwd, env: withoutGeminiRemote(process.env), stdin: "ignore", stdout: "pipe", stderr: "ignore" });
     const deadline = new Promise<AgyUsageRun>(resolve => {
       timer = setTimeout(() => { try { child.kill(); } catch { /* 이미 끝났다 */ } resolve({ exitCode: null, stdout: "" }); }, Math.max(1, timeoutMs));
     });

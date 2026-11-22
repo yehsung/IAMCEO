@@ -241,6 +241,22 @@ describe("/usage 읽기", () => {
     reader.stop();
     expect(await reader.read(true)).toBeNull();
   });
+  test("GeminiQuotaReader 의 `agy -p /usage` 는 SSH_CLIENT·SSH_TTY·SSH_CONNECTION 을 빼고 띄운다(서버를 SSH 에서 띄웠어도 폰 로그인·팀장과 같은 키체인 계정을 읽는다). SSH_AUTH_SOCK 등 나머지는 그대로다", async () => {
+    const home = temp(), bin = join(home, "agy"), envFile = join(home, "env.txt"), reply = join(home, "usage.json"), script = join(home, "read-usage.ts");
+    writeFileSync(reply, fixture("usage.json"));
+    writeFileSync(bin, `#!/bin/sh\nenv > '${envFile}'\ncat '${reply}'\n`, { mode: 0o700 });
+    // 서버를 SSH 세션에서 띄운 것과 같게: SSH_* 가 든 환경으로 띄운 bun 프로세스 안에서 읽는다(실행 중에 process.env 를 바꾸면 Bun 의 기본 자식 환경에 들지 않는다).
+    writeFileSync(script, `import { GeminiQuotaReader } from ${JSON.stringify(join(import.meta.dir, "..", "server", "gemini-quota.ts"))};\n`
+      + `const usage = await new GeminiQuotaReader({ bin: process.argv[2]!, cwd: process.argv[3]! }).read(true);\nconsole.log(usage ? usage.groups.length : "null");\n`);
+    const child = Bun.spawn([process.execPath, script, bin, join(home, "run", "gemini-usage")], { stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, SSH_CLIENT: "10.0.0.2 50000 22", SSH_TTY: "/dev/ttys009", SSH_CONNECTION: "10.0.0.2 50000 10.0.0.1 22", SSH_AUTH_SOCK: join(home, "agent.sock") } });
+    const [out, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+    expect([code, out.trim()]).toEqual([0, "3"]);
+    const env = readFileSync(envFile, "utf8");
+    expect(env).not.toMatch(/^SSH_(?:CLIENT|TTY|CONNECTION)=/m);
+    expect(env).toContain(`SSH_AUTH_SOCK=${join(home, "agent.sock")}`);
+    expect(env).toContain(`HOME=${process.env.HOME}`);
+  });
 });
 
 describe("대화 기록(transcript.jsonl)", () => {

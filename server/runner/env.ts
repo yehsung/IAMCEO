@@ -25,3 +25,19 @@ export function childEnv(base: Record<string, string | undefined> = process.env,
 export function subagentEnv(model: string | null): Record<string, string> {
   return model ? { CLAUDE_CODE_SUBAGENT_MODEL: model, CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" } : {};
 }
+
+/**
+ * Antigravity CLI(agy)가 원격(SSH) 세션으로 보는 환경 변수. 이 값이 있으면 agy 는 로그인 토큰을 키체인이 아닌 <geminiHome>/antigravity-oauth-token 파일에서
+ * 읽고 쓴다(역분석: 실행 파일 글자 'Using file-based token storage because %s detected'). 서버를 SSH 세션에서 띄웠어도 agy 를 띄우는 곳마다 빼야
+ * 폰 로그인(cli-login.ts)·팀장 터미널(core.ts)과 같은 키체인 계정을 읽는다. SSH_AUTH_SOCK(git 의 ssh 열쇠)은 여기 들지 않는다.
+ */
+export const GEMINI_REMOTE_ENV = ["SSH_CLIENT", "SSH_TTY", "SSH_CONNECTION"] as const;
+
+/** base(기본은 서버 환경) 그대로에서 GEMINI_REMOTE_ENV 만 뺀 환경. 값이 없는 칸은 싣지 않는다. 나머지는 고치지 않는다(env -i 로 비우지 않는다). */
+export function withoutGeminiRemote(base: Record<string, string | undefined> = process.env): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (value !== undefined && !(GEMINI_REMOTE_ENV as readonly string[]).includes(key)) env[key] = value;
+  }
+  return env;
+}

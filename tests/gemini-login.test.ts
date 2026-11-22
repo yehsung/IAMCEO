@@ -17,7 +17,7 @@ import { latestGeminiPlan, startServer, type RunningServer } from "../server/htt
 import { geminiStatusFromPayload, geminiStatusPath } from "../server/runner/gemini-status.ts";
 import { Orchestrator } from "../server/orchestrator.ts";
 import { Store } from "../server/store.ts";
-import type { CliAccountsResponse, CliLogin, DecisionOption, Member } from "../shared/types.ts";
+import { API_LEVEL, APP_HEADERS, type CliAccountsResponse, type CliLogin, type DecisionOption, type Member } from "../shared/types.ts";
 import { coreSetup, type CoreEnv } from "./fixtures/core-harness.ts";
 import { rejection } from "./fixtures/settle.ts";
 
@@ -36,7 +36,9 @@ const LOGIN_PROMPT = (url: string) => `Open this link in a browser to log in wit
 /**
  * 가짜 agy. `models` 는 로그인 여부에 따라 모델 목록이나 인증 오류를, `acp --login` 은 브라우저를 `open`(PATH 에서 찾는 이름)으로 열고
  * 안내 글을 찍은 뒤 표준 입력 한 줄을 기다린다. 맞는 코드면 `Logged in as <메일>.` 을 찍고 0, 아니면 코드 교환 실패로 1.
- * FAKE_DIR 의 표시 파일로 모양을 바꾼다: mode-setup(첫 설정 물음), mode-unavailable(Google 로그인을 못 하는 설정), mode-nourl(출력에 주소 없음).
+ * FAKE_DIR 의 표시 파일로 모양을 바꾼다: mode-setup(첫 설정 물음), mode-unavailable(Google 로그인을 못 하는 설정), mode-nourl(출력에 주소 없음),
+ * mode-setup-late(주소·코드 물음 뒤에 첫 설정 물음), mode-setup-after-code(코드를 받은 뒤 첫 설정 물음), mode-grandchild(성공하며 띄운 하위 프로세스가 출력 관을 쥔 채 남는다).
+ * `models` 는 models-hang(30초)·models-slow(3초)면 그만큼 늦게 답한다.
  */
 const FAKE_AGY = `#!/bin/bash
 D="$FAKE_DIR"
@@ -44,6 +46,7 @@ URL='${AUTH_URL}'
 if [ "$1" = "models" ]; then
   pwd > "$D/models-cwd"; env > "$D/models-env"; echo x >> "$D/models-calls"
   if [ -f "$D/models-hang" ]; then sleep 30; fi
+  if [ -f "$D/models-slow" ]; then sleep 3; fi
   if [ -f "$D/signed-out" ]; then echo "Fetching available models..." >&2; echo "Error: authentication failed: no saved credentials"; exit 1; fi
   echo "Fetching available models..." >&2
   printf 'gemini-3.8-flash-low\\tGemini 3.8 Flash (Low)\\ngemini-3.8-flash-high\\tGemini 3.8 Flash (High)\\n'
@@ -117,6 +120,15 @@ async function until<T>(what: string, get: () => T | null | undefined | false, m
     if (v) return v;
     if (Date.now() > end) throw new Error(`기다림 시간 초과: ${what}`);
     await Bun.sleep(20);
+  }
+}
+async function untilAsync<T>(what: string, get: () => Promise<T | null>, ms = 10_000): Promise<T> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await get();
+    if (v) return v;
+    if (Date.now() > end) throw new Error(`기다림 시간 초과: ${what}`);
+    await Bun.sleep(100);
   }
 }
 const pidAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -453,6 +465,44 @@ describe("GET /api/cli-accounts · /api/cli-login (Gemini)", () => {
     // 메일 원문은 서버의 DB·데이터 폴더 어디에도 없다(지문만).
     h.orch.store.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     expect(filesContaining(h.config.home, EMAIL)).toEqual([]);
+  }, 30_000);
+
+  test("옛 칸(Claude·Codex)은 `agy models` 를 기다리지 않는다: Gemini 를 모르는 앱(0.2.9)은 곧바로 받고, 새 앱은 처음 한 번만 기다린 뒤 마지막 값을 곧바로 싣는다", async () => {
+    const t = fixture({ geminiRowWaitMs: 200 });
+    const h = await boot(t.logins);
+    // agy models 가 3초 걸린다(네트워크 대기 등).
+    writeFileSync(join(t.dir, "models-slow"), "");
+    const app = (version: string) => ({ [APP_HEADERS.version]: version, [APP_HEADERS.platform]: "ios", [APP_HEADERS.apiLevel]: String(API_LEVEL) });
+    const timed = async (path: string, version: string) => {
+      const at = Date.now();
+      const body = await (await h.request(path, { headers: app(version) })).json() as CliAccountsResponse;
+      return { body, ms: Date.now() - at };
+    };
+    // 출시 앱(0.2.9)은 Gemini 줄을 쓰지 않는다: Claude·Codex 줄을 곧바로 받는다(옛 칸 모양 그대로).
+    const old = await timed("/api/cli-accounts?refresh=1", "0.2.9");
+    expect(old.ms).toBeLessThan(1_500);
+    expect(old.body.accounts.map(a => a.cli)).toEqual(["claude", "codex"]);
+    expect(old.body.logins).toEqual([]);
+    // 새 앱: 아직 한 번도 읽지 못했으면 Gemini 줄을 읽을 때까지 기다린다(앞 요청이 건 읽기를 함께 쓴다: agy 를 둘 띄우지 않는다).
+    const first = await timed("/api/cli-accounts", "0.2.10");
+    expect(first.body.accounts).toEqual(old.body.accounts);
+    expect(first.body.allAccounts?.map(a => a.cli)).toEqual(["claude", "codex", "gemini"]);
+    expect(first.body.allAccounts?.[2]).toMatchObject({ cli: "gemini", installed: true, loggedIn: true });
+    expect(readFileSync(join(t.dir, "models-calls"), "utf8").trim().split("\n")).toHaveLength(1);
+    // 그 뒤로는 다시 읽기(refresh=1, 3초)를 짧게만 기다리고 마지막 값을 곧바로 싣는다. 다시 읽은 값은 뒤에서 들어와 다음 응답에 실린다.
+    writeFileSync(join(t.dir, "signed-out"), "");
+    const again = await timed("/api/cli-accounts?refresh=1", "0.2.10");
+    expect(again.ms).toBeLessThan(1_500);
+    expect(again.body.allAccounts?.[2]).toMatchObject({ cli: "gemini", loggedIn: true });
+    // 출시 앱도 기다리지 않는다(마지막 값을 새 칸에 실어도 그 앱은 읽지 않는다).
+    const oldAgain = await timed("/api/cli-accounts", "0.2.9");
+    expect(oldAgain.ms).toBeLessThan(1_500);
+    expect(oldAgain.body.accounts.map(a => a.cli)).toEqual(["claude", "codex"]);
+    const signedOut = await untilAsync("다시 읽은 값", async () => {
+      const body = (await timed("/api/cli-accounts", "0.2.10")).body;
+      return body.allAccounts?.[2]?.loggedIn === false ? body : null;
+    }, 8_000);
+    expect(signedOut.allAccounts?.[2]).toMatchObject({ cli: "gemini", loggedIn: false });
   }, 30_000);
 });
 

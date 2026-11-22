@@ -18,6 +18,21 @@ export function readAppClient(headers: Headers): AppClientInfo | null {
   return { version, build: BUILD_TEXT.test(build) ? build : null, platform, apiLevel: Number(level) };
 }
 
+/**
+ * 앱 버전이 at(숫자 x.y.z) 이상인가. 앞의 x.y.z 만 숫자로 견주고 뒤에 붙은 글(-beta 등)은 보지 않는다.
+ * 머리글이 없거나(옛 앱·시험·도구) 버전이 숫자 x.y.z 로 시작하지 않으면(앱 번들이 아닌 개발 실행의 "dev" 등) null(모른다).
+ */
+export function appVersionAtLeast(client: AppClientInfo | null, at: string): boolean | null {
+  const parts = (version: string): number[] | null => {
+    const m = /^(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?!\d)/.exec(version);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const have = client ? parts(client.version) : null, want = parts(at);
+  if (!have || !want) return null;
+  for (let i = 0; i < 3; i++) if (have[i] !== want[i]) return have[i]! > want[i]!;
+  return true;
+}
+
 export interface CompatLevels { apiLevel: number; minAppApiLevel: number }
 const LEVELS: CompatLevels = { apiLevel: API_LEVEL, minAppApiLevel: MIN_APP_API_LEVEL };
 

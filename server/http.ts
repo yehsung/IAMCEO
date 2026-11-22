@@ -37,7 +37,7 @@ import { doctorReport, serverDoctorFacts, type DoctorLang, type DoctorProbes } f
 import { createDiagnostics, type DiagnoseInput } from "./diagnose.ts";
 import { readVitals } from "./vitals.ts";
 import type { CliAccountsResponse, CliLogin, DiagnoseResult } from "../shared/types.ts";
-import { compatFields, readAppClient, SeenApps } from "./app-version.ts";
+import { appVersionAtLeast, compatFields, readAppClient, SeenApps } from "./app-version.ts";
 import { serverIdentity } from "./server-identity.ts";
 import { CliVersionMonitor, type CliVersionInfo, type CliVersionSource } from "./cli-version.ts";
 import { exportProjectZip, removeDeletedProjectFiles } from "./lifecycle/project-data.ts";
@@ -248,6 +248,9 @@ function bearer(req: Request): string | null {
  * 출시된 앱(0.2.2)이 이 칸을 풀어 읽으므로 같은 모양으로 계속 싣는다.
  */
 const HERDR_UNUSED: HerdrInfo = Object.freeze({ installed: false, running: false, version: null, protocol: null, compatible: false, warning: null });
+
+/** Gemini(Antigravity CLI) 줄·로그인을 아는 첫 앱 버전. 이보다 낮다고 머리글로 밝힌 앱에는 계정 목록이 Gemini 줄을 기다리지 않는다. */
+const GEMINI_APP_VERSION = "0.2.10";
 
 /** 옛 herdr 실행기 전용이던 주소와 그 자리에 답할 안내. */
 const GONE_ROUTES: [method: string, path: string, message: string][] = [
@@ -899,11 +902,15 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     // ---- 0.2.8: AI 계정 로그인. 새 경로라 옛 앱은 부르지 않고, 옛 서버는 404 를 준다(앱은 그 묶음을 숨긴다) ----
     // 0.2.10: Gemini(Antigravity CLI)의 줄·로그인은 새 칸 allAccounts·allLogins 에만 싣는다(agy 가 깔려 있거나 Gemini 로그인이 남아 있을 때만).
     // 옛 칸(accounts·logins)은 claude·codex 그대로다: 출시 앱(0.2.8·0.2.9)은 모르는 CLI 의 줄을 'Claude Code' 로 그린다.
-    route("GET", "/api/cli-accounts", async (_req, url) => {
+    // 옛 칸은 Gemini 줄 읽기(`agy models`, 느리면 15초)를 기다리지 않는다(CliLogins.geminiRow). 버전 머리글로 Gemini 를 모르는 출시 앱(0.2.10 아래)이면
+    // 기다리지 않고 마지막으로 읽은 값만 싣는다(그 앱은 새 칸을 읽지 않는다. 읽은 적이 없으면 새 칸 없이 0.2.9 와 같은 모양). 그 밖(새 앱·버전을 모르는 요청)은
+    // 처음 한 번만 끝까지 기다리고, 그 뒤로는 다시 읽기를 2초까지만 기다린 뒤 마지막 값을 싣는다.
+    route("GET", "/api/cli-accounts", async (req, url) => {
       strictQuery(url, ["refresh"]);
       const logins = requireLogins();
       const force = url.searchParams.get("refresh") === "1";
-      const [accounts, gemini] = await Promise.all([logins.accounts(force), logins.geminiAccount(force)]);
+      const geminiMode = appVersionAtLeast(readAppClient(req.headers), GEMINI_APP_VERSION) === false ? "cached" : "wait";
+      const [accounts, gemini] = await Promise.all([logins.accounts(force), logins.geminiRow(force, geminiMode)]);
       const all = logins.list();
       const body: CliAccountsResponse = { accounts, logins: all.filter(login => isLegacyLoginCli(login.cli)), ...(gemini ? { allAccounts: [...accounts, gemini], allLogins: all } : {}) };
       return Response.json(body, { headers: { "Cache-Control": "no-store" } });

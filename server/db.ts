@@ -1038,14 +1038,16 @@ export function ensureFileVersionSchema(db: Database): string[] {
   const failed: string[] = [];
   // 0.2.10 개발 중 한 갈래가 같은 이름의 '부분 색인'(WHERE replaces IS NOT NULL OR replaced_by IS NOT NULL)을 만들었다.
   // 그 색인으로는 store.ts 의 INDEXED BY 한 건 조회가 풀리지 않으므로('no query solution'), 남아 있으면 지우고 덮는 색인으로 다시 만든다.
+  const partialRevisionIndex = () => db.query<{ name: string; partial: number }, []>("PRAGMA index_list(files)").all().some(i => i.name === "files_revisions" && i.partial === 1);
   try {
-    const partial = db.query<{ name: string; partial: number }, []>("PRAGMA index_list(files)").all().some(i => i.name === "files_revisions" && i.partial === 1);
-    if (partial) db.exec("DROP INDEX files_revisions");
-  } catch { /* 아래 CREATE 가 실패를 적는다. Store 는 덮는 색인일 때만 INDEXED BY 를 쓴다. */ }
+    if (partialRevisionIndex()) db.exec("DROP INDEX files_revisions");
+  } catch { /* 잠금 등으로 지우지 못하면 아래에서 부분 색인이 남은 것을 보고 실패로 적는다. Store 는 덮는 색인일 때만 INDEXED BY 를 쓴다. */ }
   for (const sql of FILE_VERSION_SCHEMA) {
     try { db.exec(sql); }
     catch { failed.push(/(?:INDEX|TABLE) IF NOT EXISTS (\S+)/.exec(sql)?.[1] ?? sql); }
   }
+  // 부분 색인이 그대로면 CREATE INDEX IF NOT EXISTS 가 아무것도 하지 않고 성공한다. 느린 길(표에서 읽기)이 조용히 남지 않게 실패로 적는다.
+  try { if (partialRevisionIndex() && !failed.includes("files_revisions")) failed.push("files_revisions"); } catch { /* 읽지 못하면 넘어간다 */ }
   if (failed.length) console.warn(`[db] 자료 판 색인·기록 표를 만들지 못했습니다(다음 시작 때 다시 합니다): ${failed.join(", ")}`);
   return failed;
 }

@@ -21729,6 +21729,149 @@
         }
       }
     },
+    "첫 설정이 남았습니다" : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "First-run setup left"
+          }
+        }
+      }
+    },
+    "이 Mac의 Antigravity 앱·IDE 계정도 함께 바뀝니다" : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This also changes the Antigravity app and IDE account on this Mac"
+          }
+        }
+      }
+    },
+    "Antigravity CLI는 이 Mac의 Antigravity 앱, IDE 확장과 로그인 하나를 함께 씁니다. 다른 Google 계정으로 로그인하면 그 계정도 모두 바뀝니다." : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Antigravity CLI shares one sign-in with the Antigravity app and IDE extensions on this Mac. Signing in with another Google account switches all of them."
+          }
+        }
+      }
+    },
+    "Antigravity CLI의 첫 설정이 남아 있습니다" : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Antigravity CLI's first-run setup isn't finished"
+          }
+        }
+      }
+    },
+    "로그인과 따로, 이 Mac의 터미널에서 agy를 한 번 실행해 첫 설정(약관·데이터 수집 동의)을 마치세요. IAMCEO는 그 화면을 대신 누르지 않습니다." : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apart from signing in, run agy once in Terminal on this Mac and finish the first-run setup (terms and data use). IAMCEO never answers that screen for you."
+          }
+        }
+      }
+    },
+    "%@ 팀장 %lld명은 하던 일을 마치는 대로(쉬고 있으면 곧바로) 같은 대화를 다시 열어 이 계정을 씁니다." : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld %1$@ staff will reopen the same conversation with this account when they finish their current work (right away if idle)."
+          }
+        }
+      }
+    },
+    "로그인·첫 설정 화면에서 멈춘 팀장 %lld명은 그대로 둡니다. 터미널을 열어 그 화면을 끝내면 새 계정으로 다시 엽니다." : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld staff stopped at the sign-in or setup screen are left as they are. Open the terminal and finish that screen, and they reopen with the new account."
+          }
+        }
+      }
+    },
+    "로그인한 Google 계정을 이 Mac의 %@ 팀장 모두와 Antigravity 앱, IDE가 함께 씁니다." : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Every %@ staff member on this Mac and the Antigravity app and IDE use the Google account you sign in with."
+          }
+        }
+      }
+    },
+    "이 Mac의 Antigravity CLI에 Google 계정으로 로그인합니다. 로그인 페이지는 지금 쓰는 이 기기에서 열립니다." : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in to the Antigravity CLI on this Mac with a Google account. The sign-in page opens on this device."
+          }
+        }
+      }
+    },
+    "브라우저에서 바꿀 Google 계정으로 로그인" : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in with the Google account you want in the browser"
+          }
+        }
+      }
+    },
+    "계정을 고르고 허용을 누르세요. 다른 계정이 이미 로그인되어 있으면 그 페이지에서 바꾸세요." : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pick the account and allow access. If another account is already signed in, switch accounts on that page."
+          }
+        }
+      }
+    },
+    "로그인을 마치면 Antigravity 페이지에 인증 코드가 나옵니다. 그 코드나 도착한 페이지의 주소 전체를 복사해 붙여넣으세요." : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When you finish signing in, the Antigravity page shows an authorization code. Copy that code, or the whole address of the page you land on, and paste it here."
+          }
+        }
+      }
+    },
+    "로그인 시작" : {
+      "comment" : "0.2.10 Gemini 폰 로그인(설정 → AI 모델 → AI 계정의 Antigravity CLI 줄, 로그인 시트)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Start sign-in"
+          }
+        }
+      }
+    },
     "로그인되어 있지 않습니다" : {
       "comment" : "0.2.8 AI 계정 로그인(설정 → AI 모델 → AI 계정, 로그인 시트, 사용 한도 카드)",
       "localizations" : {

@@ -311,7 +311,11 @@ describe("GET /api/cli-accounts · /api/cli-login", () => {
     expect(accounts.accounts[1]).toMatchObject({ cli: "codex", loggedIn: true, email: "old@example.com", plan: "plus" });
     expect((await h.request("/api/cli-accounts?x=1")).status).toBe(400);
 
-    for (const bad of [{ cli: "gemini" }, {}, { cli: "claude", extra: 1 }]) expect((await h.request("/api/cli-login", { method: "POST", body: JSON.stringify(bad) })).status).toBe(400);
+    for (const bad of [{ cli: "agy" }, {}, { cli: "claude", extra: 1 }]) expect((await h.request("/api/cli-login", { method: "POST", body: JSON.stringify(bad) })).status).toBe(400);
+    // 0.2.10: gemini 는 받는 값이다. 이 서비스에는 Antigravity CLI 가 없다: 409(띄우지 않는다).
+    const noAgy = await h.request("/api/cli-login", { method: "POST", body: JSON.stringify({ cli: "gemini" }) });
+    expect(noAgy.status).toBe(409);
+    expect(await noAgy.json()).toMatchObject({ code: "cli_login_cli_missing" });
     const res = await h.request("/api/cli-login", { method: "POST", body: JSON.stringify({ cli: "claude" }) });
     expect(res.status).toBe(200);
     const login = await res.json() as CliLogin;

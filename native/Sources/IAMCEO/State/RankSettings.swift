@@ -71,11 +71,10 @@ enum RankSettingsCLI: String, CaseIterable {
         }
     }
     /// 앱에서 이 CLI 의 계정으로 로그인할 수 있는가(AI 계정 화면, 사용 한도 카드의 '다른 계정으로 로그인').
-    /// Antigravity CLI 는 브라우저 로그인뿐이라 서버가 다루지 않는다.
+    /// 0.2.10 부터 Antigravity CLI 도 된다(서버가 `agy acp --login` 을 띄운다). 그 서버가 아니면 로그인 시트가 서버의 답(409 등)을 그대로 보인다.
     var signsInFromApp: Bool {
         switch self {
-        case .claude, .codex: true
-        case .gemini: false
+        case .claude, .codex, .gemini: true
         }
     }
     /// 세션 id 로 그 대화를 다시 여는 터미널 명령의 앞부분(뒤에 세션 id 가 붙는다).

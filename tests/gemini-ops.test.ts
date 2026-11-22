@@ -124,29 +124,32 @@ describe("HTTP: 총괄·팀장의 CLI 로 gemini 를 받는다", () => {
   });
 });
 
-describe("HTTP: 로그인·계정은 Claude·Codex 만 다룬다", () => {
-  test("계정 목록에 gemini 줄이 없고, gemini 로그인 요청은 400 이다. 타입 밖에서 불러도 Codex 로그인을 띄우지 않는다", async () => {
+describe("HTTP: Antigravity CLI 가 없으면 로그인·계정은 예전처럼 Claude·Codex 만 보인다", () => {
+  test("계정 목록에 gemini 줄·새 칸이 없고, gemini 로그인 요청은 409(띄우지 않는다)다. 모르는 CLI 는 400 이고 타입 밖에서 불러도 다른 CLI 로그인을 띄우지 않는다", async () => {
     const dir = temp("iamceo-gemini-login-");
     const claude = fake(dir, "claude"), codex = fake(dir, "codex");
     const read: string[] = [];
     const logins = new CliLogins({ claudeBin: claude.path, codexBin: codex.path, runDir: join(dir, "run"), env: { PATH: "/usr/bin:/bin", HOME: dir }, log: () => undefined,
       readAccount: async cli => { read.push(cli); return { account: { cli, installed: true, loggedIn: false, email: null, organization: null, plan: null, method: null, checkedAt: "2026-11-21T00:00:00.000Z" }, identity: null }; } });
     cleanups.push(() => logins.close());
-    expect([...CLI_LOGIN_CLIS]).toEqual(["claude", "codex"]);
-    expect(["claude", "codex", "gemini", "agy", undefined].map(isCliLoginCli)).toEqual([true, true, false, false, false]);
+    expect([...CLI_LOGIN_CLIS]).toEqual(["claude", "codex", "gemini"]);
+    expect(["claude", "codex", "gemini", "agy", undefined].map(isCliLoginCli)).toEqual([true, true, true, false, false]);
 
     const { config } = freshConfig("fake");
     const t = await serve(config, openStore(config), {} as OrchestratorApi, { cliLogins: logins });
     const accounts = await (await t.request("/api/cli-accounts?refresh=1")).json() as CliAccountsResponse;
-    // Antigravity CLI 가 깔려 있어도 계정 줄은 둘이다(이미 나간 앱은 모르는 CLI 의 줄을 Claude Code 로 그린다).
+    // 이 서비스에는 Antigravity CLI 가 없다: 응답이 예전 그대로다(출시 앱은 모르는 CLI 의 줄을 Claude Code 로 그린다).
+    expect(Object.keys(accounts).sort()).toEqual(["accounts", "logins"]);
     expect(accounts.accounts.map(account => account.cli)).toEqual(["claude", "codex"]);
     expect(read.sort()).toEqual(["claude", "codex"]);
-    for (const cli of ["gemini", "agy", "antigravity"]) {
+    const gemini = await t.request("/api/cli-login", "POST", { cli: "gemini" });
+    expect([gemini.status, ((await gemini.json()) as { code?: string }).code]).toEqual([409, "cli_login_cli_missing"]);
+    for (const cli of ["agy", "antigravity"]) {
       const response = await t.request("/api/cli-login", "POST", { cli });
       expect([cli, response.status]).toEqual([cli, 400]);
     }
-    // 타입을 거치지 않고 불렸을 때: Codex 길(codex login --device-auth)로 흘려보내지 않고 거절한다.
-    const error = await rejection(logins.start("gemini" as never));
+    // 타입을 거치지 않고 불렸을 때: 다른 CLI 의 길(codex login --device-auth 등)로 흘려보내지 않고 거절한다.
+    const error = await rejection(logins.start("agy" as never));
     expect(error).toBeInstanceOf(CliLoginError);
     expect((error as CliLoginError).status).toBe(400);
     expect(logins.list()).toEqual([]);

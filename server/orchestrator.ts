@@ -269,7 +269,7 @@ interface ConfigOutcome { usage: boolean; continued: boolean; opened: "resumed" 
  * 쉬는 때에 같은 대화를 새 계정으로 다시 연다(설정 적용과 같은 길). identity: 마지막으로 본 계정의 지문(server/cli-login.ts).
  */
 interface CliAccountEpoch { epoch: number; identity: string | null }
-/** 로그인을 다루는 CLI(claude·codex)에만 세대가 있다. Gemini(Antigravity CLI)는 세대가 없다(accountEpoch 가 늘 0). */
+/** 로그인을 다루는 CLI 마다 세대가 있다. 0.2.10 부터 Gemini(Antigravity CLI)도: 0.2.9 이하가 저장한 값에는 gemini 가 없어 0 이다(세대 0 이면 적용 기록에 칸이 없다). */
 type CliAccountEpochs = Record<CliAccountCli, CliAccountEpoch>;
 /** 한도·로그인 오류로 멈춘 팀장을 새 계정으로 다시 여는 까닭. */
 type AccountReopen = "usage" | "login";
@@ -4874,14 +4874,13 @@ export class Orchestrator implements OrchestratorApi {
         const e = v as Partial<CliAccountEpoch> | undefined;
         return { epoch: Number.isInteger(e?.epoch) && (e!.epoch as number) > 0 ? e!.epoch as number : 0, identity: typeof e?.identity === "string" ? e.identity : null };
       };
-      this.accountEpochs = { claude: one(saved?.claude), codex: one(saved?.codex) };
+      this.accountEpochs = { claude: one(saved?.claude), codex: one(saved?.codex), gemini: one(saved?.gemini) };
     }
     return this.accountEpochs;
   }
-  /** 그 CLI 의 계정 세대. Gemini(Antigravity CLI)는 세대가 없어 늘 0 이다: Claude·Codex 로 다시 로그인해도 Gemini 팀장의 설정이 달라지지 않는다(다시 열지 않는다). */
+  /** 그 CLI 의 계정 세대. CLI 마다 따로다: Claude·Codex 로 다시 로그인해도 Gemini 팀장의 설정은 달라지지 않는다(다시 열지 않는다). 그 반대도 같다. */
   private accountEpoch(cli: Member["cli"]): number {
-    if (cli === "gemini") return 0;
-    return this.epochs()[cli === "codex" ? "codex" : "claude"].epoch;
+    return this.epochs()[cli === "codex" ? "codex" : cli === "gemini" ? "gemini" : "claude"].epoch;
   }
   /** 이 세션이 지금 계정이 아닌 세대로 떠 있다(설정의 나머지는 같다). */
   private accountOnlyPending(member: Member): boolean {
@@ -4894,27 +4893,35 @@ export class Orchestrator implements OrchestratorApi {
    * 앱에서 CLI 로그인이 끝났다(server/cli-login.ts). after·before: 로그인 뒤·전 계정의 지문(모르면 null).
    * - 다른 계정이면 그 CLI 의 계정 세대를 올린다: 떠 있는 팀장은 쉬는 때에(일하는 중이면 그 턴이 끝난 뒤) 같은 대화를 새 계정으로 다시 연다(설정 적용과 같은 길).
    * - 사용 한도로 멈춘 팀장(다른 계정일 때)과 로그인 오류로 멈춘 팀장(같은 계정이어도)은 지금 다시 열고 멈춘 일을 이어 가게 한다.
+   * - 0.2.10 Gemini(Antigravity CLI): 앞 계정을 모르면(처음 로그인했거나 agy 가 메일을 알려 주지 않았다) 같은 계정인지 알 수 없어도 세대를 올린다(changed 는 null).
+   *   떠 있는 agy 는 다른 프로세스가 키체인에 쓴 새 로그인을 읽지 않는다고 본다(역분석 추론, UNVERIFIED-INTERACTIVE): 같은 대화(`--conversation`)로 다시 여는 값이 싸다.
+   *   로그인·첫 설정 화면에서 멈춘 Gemini 팀장(gemini_setup)은 건드리지 않는다(그 화면은 사람만 끝낸다. 대표가 그 터미널에서 끝내는 중일 수 있다):
+   *   끝나 쉬는 중이 되면 펌프가 새 세대로 다시 연다. 그 수를 setupBlocked 로 알린다.
    * 다시 여는 일은 기다리지 않는다(accountReopening). 답은 그 수만 센다.
    */
-  async cliLoggedIn(cli: CliAccountCli, after: string | null, before: string | null): Promise<{ changed: boolean | null; reopenedNow: number; atNextTurn: number }> {
+  async cliLoggedIn(cli: CliAccountCli, after: string | null, before: string | null): Promise<{ changed: boolean | null; reopenedNow: number; atNextTurn: number; setupBlocked?: number }> {
     const state = this.epochs()[cli];
     // 기준은 마지막으로 적용한 계정(팀장들이 그 세대로 맞춰진 계정)이 먼저다. 로그인 직전 계정만 보면, 앞 로그인의 적용이 빠졌을 때(B 로 바꿨는데
     // 세대를 못 올렸다) B 로 다시 로그인해도 B↔B 로 같다고 보아 팀장들이 영영 옛 계정 A 에 남는다(리뷰 지적). 처음이면 로그인 직전 계정.
     const baseline = state.identity ?? before;
     const changed = after && baseline ? after !== baseline : null;
-    if (changed) state.epoch += 1;
+    const bump = changed === true || (cli === "gemini" && changed === null);
+    if (bump) state.epoch += 1;
     if (after) state.identity = after;
-    try { this.store.saveApiRecovery("cli_accounts", this.epochs()); } catch (e) { console.warn("계정 세대를 저장하지 못했습니다:", (e as Error).message); }
+    // Gemini 로그인이 한 번도 없었으면(세대 0, 지문 없음) 저장하는 값이 0.2.8·0.2.9 와 글자까지 같다(gemini 칸을 쓰지 않는다).
+    const { gemini, ...legacy } = this.epochs();
+    try { this.store.saveApiRecovery("cli_accounts", gemini.epoch === 0 && gemini.identity === null ? legacy : this.epochs()); } catch (e) { console.warn("계정 세대를 저장하지 못했습니다:", (e as Error).message); }
     const live = this.store.listAllMembers().filter(m => m.cli === cli && m.origin === "runner" && this.backendOf(m) === "core" && !this.store.requireProject(m.projectId).archived);
+    const setupBlocked = new Set(live.filter(m => cli === "gemini" && m.status !== "asleep" && m.blockedCode === "gemini_setup").map(m => m.id));
     const now: Array<{ member: Member; why: AccountReopen }> = [];
     for (const m of live) {
       // 잠든 팀장은 깨우지 않는다(재우기는 대표·총괄의 뜻이다). 한도 카드에 남아 깨울 때 새 계정으로 뜬다.
-      if (m.status === "asleep") continue;
+      if (m.status === "asleep" || setupBlocked.has(m.id)) continue;
       if (m.blockedCode === "login_required") now.push({ member: m, why: "login" });
-      else if (changed && this.apiRecovery.usageLimited(m.id) && m.sessionId) now.push({ member: m, why: "usage" });
+      else if (bump && this.apiRecovery.usageLimited(m.id) && m.sessionId) now.push({ member: m, why: "usage" });
     }
     const soon = new Set(now.map(n => n.member.id));
-    const atNextTurn = live.filter(m => !soon.has(m.id) && this.configPending(m)).length;
+    const atNextTurn = live.filter(m => !soon.has(m.id) && !setupBlocked.has(m.id) && this.configPending(m)).length;
     // 펌프가 막 돌거나 입력칸에 글이 있거나 엔진이 잠깐 끊겨 못 열면 간격을 두고 다시 해 본다(그 사이 풀렸으면 reopenForAccount 가 그냥 지나간다).
     const reopen = async (member: Member, why: AccountReopen) => {
       for (let attempt = 0; attempt < ACCOUNT_REOPEN_TRIES && !this.closed; attempt++) {
@@ -4933,7 +4940,7 @@ export class Orchestrator implements OrchestratorApi {
       for (const m of live) if (!soon.has(m.id) && this.configPending(this.store.getMember(m.id) ?? m)) void this.pump(m.id);
     };
     this.accountReopening = this.accountReopening.then(run, run);
-    return { changed, reopenedNow: now.length, atNextTurn };
+    return { changed, reopenedNow: now.length, atNextTurn, ...(cli === "gemini" ? { setupBlocked: setupBlocked.size } : {}) };
   }
 
   /** 한도·로그인 오류로 멈춘 팀장을 같은 대화로 다시 연다(새로 로그인한 계정을 읽는다). 멈춘 일이 있었으면 이어가기 글을 넣는다. */

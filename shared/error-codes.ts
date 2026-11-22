@@ -536,6 +536,9 @@ export const ERROR_CODES = {
   cli_login_expired: { ko: "로그인 시간이 지났습니다. 처음부터 다시 시작하세요", en: "The sign-in timed out. Start again" },
   cli_login_device_disabled: { ko: "이 계정(또는 조직)은 기기 코드 로그인이 꺼져 있습니다. ChatGPT 설정에서 Codex 기기 코드 로그인을 켜거나, Mac 터미널에서 codex login 으로 로그인하세요", en: "Device code sign-in is off for this account (or workspace). Turn on device code sign-in for Codex in ChatGPT settings, or run codex login in a terminal on the Mac" },
   cli_account_unreadable: { ko: "계정 정보를 읽지 못했습니다", en: "Couldn't read the account" },
+  // 0.2.10: Gemini(Antigravity CLI, `agy acp --login`). 첫 설정(약관·데이터 수집 동의)과 Google 계정이 아닌 로그인 방식은 서버가 다루지 않는다.
+  cli_login_gemini_setup: { ko: "Antigravity CLI가 첫 설정(약관·데이터 수집 동의)을 물었습니다. IAMCEO는 그 화면을 대신 누르지 않습니다. 이 Mac의 터미널에서 agy를 한 번 실행해 첫 설정을 마친 뒤 다시 로그인하세요", en: "The Antigravity CLI asked for its first-run setup (terms and data use). IAMCEO never answers that for you. Run agy once in Terminal on the Mac, finish the setup, then sign in again" },
+  cli_login_gemini_unavailable: { ko: "이 Mac의 Antigravity CLI는 앱에서 로그인할 수 없는 방식(Google Cloud 프로젝트·API 키·ADC 등)으로 설정되어 있습니다. 이 Mac의 터미널에서 agy를 실행해 로그인하세요", en: "The Antigravity CLI on this Mac is set up for a sign-in the app can't do (a Google Cloud project, an API key, ADC and so on). Run agy in Terminal on the Mac and sign in there" },
   // ---- 끝 ----
   // ---- 0.2.10: 자료 판 잇기(자동 잇기·file 의 original·unchain, iamceo files tidy) ----
   file_chain_conflict: { ko: "replaces 와 new_item 은 함께 줄 수 없습니다", en: "Give either replaces or new_item, not both" },

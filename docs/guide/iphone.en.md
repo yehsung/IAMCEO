@@ -57,12 +57,13 @@ A notification carries a fixed sentence and identifiers only, never conversation
 
 When a usage limit hits or a sign-in expires, switch accounts from your iPhone without a Mac terminal. The Mac server must be 0.2.8 or later too.
 
-1. In **Settings → AI models → AI accounts**, tap **Sign in with another account** for Claude Code or Codex. Usage limit cards have the same button.
+1. In **Settings → AI models → AI accounts**, tap **Switch account** (or **Sign in** when signed out) for Claude Code, Codex or the Antigravity CLI (Gemini, from 0.2.10; its row appears when `agy` is installed on the Mac). Usage limit cards have the same button.
 2. **Open sign-in page** opens Safari. Sign in with the account you want (if another account is already signed in, switch accounts on that page).
 3. - **Claude Code:** after you sign in, the page shows a long code. Tap its copy button, come back to IAMCEO and tap the paste button, and you're done.
    - **Codex:** enter the one-time code the app shows (it's copied when you tap the button) on the page, and the app sees the sign-in finish by itself. The code works for 15 minutes. If the page says device code sign-in is off, turn on device code sign-in for Codex in ChatGPT settings, or run `codex login` in a terminal on the Mac.
+   - **Antigravity CLI (Gemini):** before it starts, the sheet says **This also changes the Antigravity app and IDE account on this Mac** (the CLI, the app and the IDE extensions share one sign-in). Tap **Start sign-in**, pick your Google account on the sign-in page and allow access; the Antigravity page then shows an authorization code. Copy and paste it and you're done (pasting the whole address of the page you land on works too). The first-run setup (terms and data use) can't be done from the app: if the account row says **First-run setup left**, run `agy` once in Terminal on the Mac to finish it. If the CLI is set up with a Google Cloud project or an API key, sign in with `agy` in Terminal on the Mac.
 
-After you sign in, every staff member using that CLI on that Mac uses the new account. Staff stopped at the limit reopen the same conversation with the new account right away and continue, and other staff reopen with the new account as soon as they finish their current work (right away if idle). Staff stopped by a sign-in error continue right away even if you sign in again with the same account. If you close the sign-in sheet, **Continue sign-in** brings you back within 15 minutes.
+After you sign in, every staff member using that CLI on that Mac uses the new account. Staff stopped at the limit reopen the same conversation with the new account right away and continue, and other staff reopen with the new account as soon as they finish their current work (right away if idle). Staff stopped by a sign-in error continue right away even if you sign in again with the same account. Gemini staff stopped at the sign-in or setup screen are left alone: open the terminal and finish that screen, and they reopen with the new account. If you close the sign-in sheet, **Continue sign-in** brings you back within 15 minutes.
 
 ## When it does not connect
 

@@ -4,6 +4,10 @@ import SwiftUI
 // 서버가 Mac 에서 CLI 의 로그인 명령을 띄우고(server/cli-login.ts), 이 화면은 로그인 페이지를 이 기기에서 열고 코드를 돌려준다.
 // - Claude Code: 페이지에서 로그인하면 코드가 나온다. 복사해 붙여넣으면 서버가 CLI 에 넣는다. 서버가 도는 Mac 에서는 코드 없이 끝난다.
 // - Codex: 페이지에 이 화면의 일회용 코드를 넣으면 CLI 가 스스로 끝낸다.
+// - Gemini(0.2.10, Antigravity CLI): Claude 처럼 페이지에서 Google 계정으로 로그인하고 나온 코드(또는 도착한 페이지 주소)를 붙여넣는다.
+//   로그인 하나를 이 Mac 의 Antigravity 앱·IDE 와 함께 쓰므로, 시작하기 전에 그 계정도 바뀐다고 알리고 대표가 '로그인 시작'을 눌러야 띄운다.
+//   첫 설정(약관·데이터 수집 동의)은 서버가 누르지 않는다: 남아 있으면 Mac 터미널에서 agy 를 한 번 실행하라고 안내한다.
+//   서버는 agy 가 깔려 있을 때만 새 칸(allAccounts·allLogins)에 Gemini 를 싣는다. 옛 서버면 Gemini 줄이 없다.
 // 옛 서버(404·501)면 묶음과 단추를 그리지 않는다.
 
 // MARK: - Models
@@ -18,12 +22,16 @@ struct CLIAccount: Decodable, Sendable, Equatable, Identifiable {
     let method: String?
     let checkedAt: String
     let problem: String?
+    /// 0.2.10 Gemini 만: agy 의 첫 설정(약관·데이터 수집 동의)이 이 Mac 에서 아직 끝나지 않았다. 모르면(옛 서버·다른 CLI) nil.
+    var setupPending: Bool? = nil
     var id: String { cli }
 }
 
 struct CLILoginApplied: Decodable, Sendable, Equatable {
     let reopenedNow: Int
     let atNextTurn: Int
+    /// 0.2.10 Gemini 만: 로그인·첫 설정 화면에서 멈춰 그대로 둔 팀장 수. 그 화면을 끝내면 새 계정으로 다시 연다.
+    var setupBlocked: Int? = nil
 }
 
 struct CLILoginFailure: Decodable, Sendable, Equatable {
@@ -34,7 +42,7 @@ struct CLILoginFailure: Decodable, Sendable, Equatable {
 struct CLILogin: Decodable, Sendable, Equatable, Identifiable {
     let id: String
     let cli: String
-    /// paste_code(Claude) · device_code(Codex).
+    /// paste_code(Claude·Gemini) · device_code(Codex).
     let flow: String
     let phase: String
     let startedAt: String
@@ -52,8 +60,15 @@ struct CLILogin: Decodable, Sendable, Equatable, Identifiable {
 }
 
 struct CLIAccountsResponse: Decodable, Sendable {
+    /// 출시 앱이 아는 Claude Code·Codex 줄.
     let accounts: [CLIAccount]
     let logins: [CLILogin]
+    /// 0.2.10: Gemini(Antigravity CLI)까지 모든 줄. 서버가 agy 가 깔려 있을 때만 싣는다(옛 서버는 없다).
+    var allAccounts: [CLIAccount]? = nil
+    var allLogins: [CLILogin]? = nil
+    /// 화면에 그릴 줄: 새 칸이 있으면 그것, 없으면 옛 칸.
+    var shownAccounts: [CLIAccount] { allAccounts ?? accounts }
+    var shownLogins: [CLILogin] { allLogins ?? logins }
 }
 
 extension APIClient {
@@ -80,7 +95,7 @@ extension APIClient {
 
 enum CLIAccountText {
     /// 계정 줄·로그인 시트에 적는 CLI 이름. 이 앱이 모르는 값은 '알 수 없는 CLI'다(Claude Code 로 적지 않는다).
-    /// 서버는 지금 Claude Code·Codex 줄만 보낸다(Gemini 는 로그인을 다루지 않는다). 이름은 표로 둔다.
+    /// 서버는 Claude Code·Codex 줄과, agy 가 깔려 있으면 Gemini(Antigravity CLI) 줄을 보낸다. 이름은 표로 둔다.
     static func name(_ cli: String) -> String {
         switch RankSettingsCLI(cli: cli) {
         case .claude: "Claude Code"
@@ -103,21 +118,42 @@ enum CLIAccountText {
         case "enterprise": return "Enterprise"
         case "edu": return "Edu"
         case "free": return "Free"
+        case "ultra": return "Ultra"
         default: return raw
         }
     }
 
     /// 계정 줄 아래 작은 글: 메일 · 조직 · 요금제, 또는 왜 모르는지.
+    /// Gemini 줄에는 메일이 없다(서버가 싣지 않는다. 로그인을 마친 그 응답에만 있다): '로그인되어 있습니다 · 요금제'. 첫 설정이 남았으면 그것도 붙인다.
     static func hint(_ account: CLIAccount) -> String {
         if !account.installed { return String(localized: "이 Mac에 설치되어 있지 않습니다") }
+        let state: String
         switch account.loggedIn {
         case .some(true):
-            let parts = [account.email, account.organization, plan(account.plan)].compactMap { $0 }.filter { !$0.isEmpty }
+            var parts = [account.email, account.organization, plan(account.plan)].compactMap { $0 }.filter { !$0.isEmpty }
+            if account.cli == RankSettingsCLI.gemini.rawValue, account.email?.isEmpty ?? true { parts.insert(String(localized: "로그인되어 있습니다"), at: 0) }
             // '·' 는 앞 낱말에 붙여 줄 첫머리에 오지 않게 한다(좁은 iPhone 에서 꺾일 때).
-            return parts.isEmpty ? String(localized: "로그인되어 있습니다") : parts.joined(separator: "\u{00A0}· ")
-        case .some(false): return String(localized: "로그인되어 있지 않습니다")
-        case .none: return String(localized: "계정을 확인하지 못했습니다")
+            state = parts.isEmpty ? String(localized: "로그인되어 있습니다") : parts.joined(separator: "\u{00A0}· ")
+        case .some(false): state = String(localized: "로그인되어 있지 않습니다")
+        case .none: state = String(localized: "계정을 확인하지 못했습니다")
         }
+        return account.setupPending == true ? state + "\u{00A0}· " + String(localized: "첫 설정이 남았습니다") : state
+    }
+
+    /// 줄의 작은 글을 주의 색으로 쓸 때: 로그인되어 있지 않거나, 확인하지 못했거나, (Gemini) 첫 설정이 남았다.
+    static func needsAttention(_ account: CLIAccount) -> Bool {
+        account.loggedIn == false || (account.installed && account.loggedIn == nil) || account.setupPending == true
+    }
+
+    /// Gemini 로그인 시트의 머리 경고: 로그인 하나를 이 Mac 의 Antigravity 앱·IDE 와 함께 쓴다(공식 문서).
+    static var geminiSharedAccountTitle: String { String(localized: "이 Mac의 Antigravity 앱·IDE 계정도 함께 바뀝니다") }
+    static var geminiSharedAccountDetail: String {
+        String(localized: "Antigravity CLI는 이 Mac의 Antigravity 앱, IDE 확장과 로그인 하나를 함께 씁니다. 다른 Google 계정으로 로그인하면 그 계정도 모두 바뀝니다.")
+    }
+    /// Gemini 의 첫 설정 안내. 서버도 앱도 그 화면을 대신 누르지 않는다.
+    static var geminiSetupTitle: String { String(localized: "Antigravity CLI의 첫 설정이 남아 있습니다") }
+    static var geminiSetupDetail: String {
+        String(localized: "로그인과 따로, 이 Mac의 터미널에서 agy를 한 번 실행해 첫 설정(약관·데이터 수집 동의)을 마치세요. IAMCEO는 그 화면을 대신 누르지 않습니다.")
     }
 
     static func failure(_ failure: CLILoginFailure) -> String {
@@ -136,6 +172,13 @@ enum CLIAccountText {
         } else {
             if login.accountChanged == false { lines.append(String(localized: "로그인 전과 같은 계정입니다.")) }
             if now > 0 { lines.append(String(localized: "로그인 오류로 멈춘 팀장 \(now)명을 같은 대화로 다시 열어 하던 일을 이어 가게 합니다.")) }
+            // Gemini: 앞 계정을 몰라도(서버가 메일을 저장하지 않는다) 떠 있는 팀장은 같은 대화를 다시 열어 이 로그인을 쓰게 한다.
+            if login.accountChanged == nil, login.cli == RankSettingsCLI.gemini.rawValue, later > 0 {
+                lines.append(String(localized: "\(name) 팀장 \(later)명은 하던 일을 마치는 대로(쉬고 있으면 곧바로) 같은 대화를 다시 열어 이 계정을 씁니다."))
+            }
+        }
+        if let blocked = login.applied?.setupBlocked, blocked > 0 {
+            lines.append(String(localized: "로그인·첫 설정 화면에서 멈춘 팀장 \(blocked)명은 그대로 둡니다. 터미널을 열어 그 화면을 끝내면 새 계정으로 다시 엽니다."))
         }
         return lines.isEmpty ? nil : lines.joined(separator: " ")
     }
@@ -182,7 +225,7 @@ enum CLIAccountText {
         do {
             let result = try await api.cliAccounts(refresh: refresh)
             guard mine == token else { return }
-            accounts = result.accounts; logins = result.logins; unsupported = false; known = true; error = nil
+            accounts = result.shownAccounts; logins = result.shownLogins; unsupported = false; known = true; error = nil
         } catch let failure as APIError where [404, 405, 501].contains(failure.status) {
             guard mine == token else { return }
             accounts = []; logins = []; unsupported = true; known = true; error = nil
@@ -246,7 +289,7 @@ struct CLIAccountsGroup: View {
         // 줄 오른쪽 단추라 짧게(영어 iPhone 에서 'Sign in with another account' 가 잘렸다). 사용 한도 카드의 단추는 넓어 '다른 계정으로 로그인'.
         let title = pending ? String(localized: "로그인 이어 하기") : account.loggedIn == true ? String(localized: "계정 바꾸기") : String(localized: "로그인")
         return SettingsRow(CLIAccountText.name(account.cli), hint: CLIAccountText.hint(account),
-                           hintTone: account.loggedIn == false || (account.installed && account.loggedIn == nil) ? CE.attention : CE.ink2, stacksOnPhone: false) {
+                           hintTone: CLIAccountText.needsAttention(account) ? CE.attention : CE.ink2, stacksOnPhone: false) {
             Button(title) { target = CLILoginTarget(cli: account.cli) }
                 .ceSecondaryButton().controlSize(.small)
                 .disabled(!account.installed || store.connectionStatus != .connected)
@@ -269,9 +312,15 @@ struct CLILoginSheet: View {
     @State private var error: String?
     @State private var opened = false
     @State private var copied = false
+    /// Gemini: 계정이 함께 바뀐다는 경고를 보고 '로그인 시작'을 눌렀다(그 전에는 Mac 에서 로그인을 띄우지 않는다).
+    @State private var confirmed = false
     @FocusState private var codeFocused: Bool
 
     private var name: String { CLIAccountText.name(cli) }
+    private var isGemini: Bool { cli == RankSettingsCLI.gemini.rawValue }
+    /// Gemini 로그인을 띄우기 전, 경고와 '로그인 시작'을 보이는 단계. 진행 중인 로그인을 이어 할 때는 건너뛴다.
+    private var awaitingConfirm: Bool { isGemini && !confirmed && login == nil }
+    private var setupPending: Bool { isGemini && (login?.account?.setupPending ?? store.cliAccounts.account(cli)?.setupPending) == true }
 
     var body: some View {
         CESheet(String(localized: "\(name) 로그인"), icon: "person.crop.circle.badge.checkmark", width: 520, onClose: { dismiss() }) {
@@ -283,7 +332,12 @@ struct CLILoginSheet: View {
             footer
         }
         .interactiveDismissDisabled(working)
-        .task { await begin(restart: false) }
+        .task {
+            // Gemini 는 경고를 본 뒤 '로그인 시작'으로 띄운다. 이미 진행 중인 로그인이면 그대로 이어 한다.
+            if isGemini, store.cliAccounts.activeLogin(cli) == nil { return }
+            confirmed = true
+            await begin(restart: false)
+        }
         .task(id: login?.id) { await poll() }
         .onChange(of: scenePhase) { _, phase in
             // 로그인 페이지에서 돌아왔다: 기다리지 않고 바로 다시 본다.
@@ -294,7 +348,9 @@ struct CLILoginSheet: View {
     // MARK: Content
 
     @ViewBuilder private var content: some View {
-        if let login {
+        if awaitingConfirm {
+            geminiIntro
+        } else if let login {
             switch login.phase {
             case "waiting":
                 if login.pastesCode { pasteSteps(login) } else { deviceSteps(login) }
@@ -347,11 +403,40 @@ struct CLILoginSheet: View {
     private var onThisMac: Bool { isMac && store.serverIsThisMac }
 
     /// 무엇이 바뀌는지 한 줄(단계가 할 일을 말한다).
-    private var consequence: some View {
-        lead(String(localized: "로그인한 계정을 이 Mac의 \(name) 팀장 모두가 씁니다."))
+    @ViewBuilder private var consequence: some View {
+        if isGemini {
+            lead(String(localized: "로그인한 Google 계정을 이 Mac의 \(name) 팀장 모두와 Antigravity 앱, IDE가 함께 씁니다."))
+        } else {
+            lead(String(localized: "로그인한 계정을 이 Mac의 \(name) 팀장 모두가 씁니다."))
+        }
+    }
+
+    /// Gemini: 로그인을 띄우기 전에 보이는 경고(계정이 함께 바뀐다)와, 남아 있으면 첫 설정 안내.
+    @ViewBuilder private var geminiIntro: some View {
+        lead(String(localized: "이 Mac의 Antigravity CLI에 Google 계정으로 로그인합니다. 로그인 페이지는 지금 쓰는 이 기기에서 열립니다."))
+        InlineNotice(tone: .attention, icon: "exclamationmark.triangle", title: CLIAccountText.geminiSharedAccountTitle, detail: CLIAccountText.geminiSharedAccountDetail)
+        if setupPending { setupNotice }
+    }
+
+    private var setupNotice: some View {
+        InlineNotice(tone: .neutral, icon: "terminal", title: CLIAccountText.geminiSetupTitle, detail: CLIAccountText.geminiSetupDetail)
     }
 
     @ViewBuilder private func pasteSteps(_ login: CLILogin) -> some View {
+        if isGemini { geminiSteps(login) } else { claudeSteps(login) }
+    }
+
+    /// Gemini: Google 계정으로 로그인하면 Antigravity 페이지에 인증 코드가 나온다(이 흐름은 서버가 도는 Mac 에서도 붙여넣는다).
+    /// UNVERIFIED-INTERACTIVE: 페이지 모양(코드 표시·복사 단추)은 실제 로그인으로 아직 보지 못했다. 주소 전체를 붙여넣어도 된다고 함께 적는다.
+    @ViewBuilder private func geminiSteps(_ login: CLILogin) -> some View {
+        consequence
+        step(1, String(localized: "브라우저에서 바꿀 Google 계정으로 로그인"), String(localized: "계정을 고르고 허용을 누르세요. 다른 계정이 이미 로그인되어 있으면 그 페이지에서 바꾸세요."))
+        openButton(login)
+        step(2, String(localized: "페이지에 나온 코드 붙여넣기"), String(localized: "로그인을 마치면 Antigravity 페이지에 인증 코드가 나옵니다. 그 코드나 도착한 페이지의 주소 전체를 복사해 붙여넣으세요."))
+        codeField
+    }
+
+    @ViewBuilder private func claudeSteps(_ login: CLILogin) -> some View {
         let local = onThisMac && login.localUrl != nil
         consequence
         step(1, String(localized: "브라우저에서 바꿀 계정으로 로그인"),
@@ -361,6 +446,11 @@ struct CLILoginSheet: View {
         step(2, local ? String(localized: "코드가 나오면 붙여넣기") : String(localized: "페이지에 나온 코드 붙여넣기"),
              local ? String(localized: "페이지에 코드가 나왔을 때만 복사해 붙여넣으세요.")
                    : String(localized: "로그인을 마치면 페이지에 긴 코드가 나옵니다. 복사 단추로 복사해 붙여넣으세요."))
+        codeField
+    }
+
+    /// 코드 입력 칸(Claude·Gemini 같은 부품). iPhone 은 붙여넣기 단추가 붙여넣고 바로 보낸다.
+    private var codeField: some View {
         HStack(spacing: 8) {
             TextField(String(localized: "코드"), text: $code)
                 .font(SetupFont.codeInput)
@@ -439,6 +529,7 @@ struct CLILoginSheet: View {
             InlineNotice(tone: .success, icon: "checkmark.circle", title: String(localized: "\(name)에 로그인했습니다"),
                          detail: login.account.map(CLIAccountText.hint))
             if let applied = CLIAccountText.applied(login) { lead(applied) }
+            if setupPending { setupNotice }
         }
     }
 
@@ -449,6 +540,15 @@ struct CLILoginSheet: View {
     }
 
     @ViewBuilder private var footer: some View {
+        if awaitingConfirm {
+            Button { confirmed = true; Task { await begin(restart: false) } } label: {
+                HStack(spacing: 6) {
+                    if working { ProgressView().controlSize(.small).tint(.white) }
+                    Text(String(localized: "로그인 시작"))
+                }
+            }
+            .ceProminentButton().keyboardShortcut(.defaultAction).disabled(working || store.api == nil)
+        }
         // 닫아도 로그인은 Mac 에서 15분까지 기다린다(다시 열면 이어 한다). 그만두려면 이 단추로. 확인 중(verifying)에는 CLI 가 이미 끝났을 수 있어 보이지 않는다.
         if let login, ["starting", "waiting"].contains(login.phase) {
             Button(String(localized: "그만두기")) { Task { await cancel() } }
@@ -474,7 +574,7 @@ struct CLILoginSheet: View {
             }
             .ceProminentButton().keyboardShortcut(.defaultAction)
             .disabled(working || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        } else if login == nil, error != nil {
+        } else if login == nil, error != nil, !awaitingConfirm {
             Button(String(localized: "다시 시도")) { Task { await begin(restart: false) } }
                 .ceProminentButton().disabled(working)
         }

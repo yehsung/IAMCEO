@@ -85,6 +85,25 @@ function putHookLine(f: Fixture, entry: Record<string, unknown>, memberId = "m_g
 }
 const sessionsOf = (events: RunnerEvent[], memberId = "m_gem1") => ofType(events, "session").filter(e => e.memberId === memberId).map(e => e.sessionId);
 
+describe("실행 환경", () => {
+  test("서버가 SSH 세션에서 떴어도 Gemini 터미널에는 SSH_CLIENT·SSH_TTY·SSH_CONNECTION 을 넘기지 않는다(SSH_AUTH_SOCK 은 둔다)", async () => {
+    const saved = { SSH_CLIENT: process.env.SSH_CLIENT, SSH_TTY: process.env.SSH_TTY, SSH_CONNECTION: process.env.SSH_CONNECTION, SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK };
+    Object.assign(process.env, { SSH_CLIENT: "10.0.0.2 50000 22", SSH_TTY: "/dev/ttys009", SSH_CONNECTION: "10.0.0.2 50000 10.0.0.1 22", SSH_AUTH_SOCK: "/private/tmp/agent.sock" });
+    try {
+      const f = await setup();
+      await f.runner.start(f.member, f.opts);
+      const env = f.core.runs()[0]!.env;
+      expect(env.SSH_CLIENT).toBeUndefined();
+      expect(env.SSH_TTY).toBeUndefined();
+      expect(env.SSH_CONNECTION).toBeUndefined();
+      expect(env.SSH_AUTH_SOCK).toBe("/private/tmp/agent.sock");
+      expect(env.AGY_CLI_HIDE_ACCOUNT_INFO).toBe("1");
+    } finally {
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  });
+});
+
 describe("한 바퀴: 띄우기 → 입력 → 턴 끝 → session 사건 → 이어 열기", () => {
   test("새 세션은 id 없이 뜨고, 첫 턴 뒤 상태줄 기록으로 id 를 알아내 session 사건을 낸다. 그 id 로 이어 연다", async () => {
     const f = await setup();
@@ -100,7 +119,7 @@ describe("한 바퀴: 띄우기 → 입력 → 턴 끝 → session 사건 → �
     expect(run.argv).toContain("--dangerously-skip-permissions");
     expect(run.conversationFlag).toBeNull();
     expect(run.addDir).toBe(join(f.home, "run", "agy", "m_gem1"));
-    expect(run.env).toMatchObject({ AGY_CLI_OSC7501: "on", IAMCEO_MEMBER_ID: "m_gem1" });
+    expect(run.env).toMatchObject({ AGY_CLI_OSC7501: "on", AGY_CLI_HIDE_ACCOUNT_INFO: "1", IAMCEO_MEMBER_ID: "m_gem1" });
     // Codex 의 세션 묶기 표지·Claude 의 세션 라벨은 없다.
     expect(run.labels["iamceo.binding"]).toBeUndefined();
     expect(run.labels["iamceo.session"]).toBeUndefined();

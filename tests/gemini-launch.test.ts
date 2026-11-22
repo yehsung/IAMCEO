@@ -153,7 +153,7 @@ describe("providerLaunch(gemini): 명령줄과 환경", () => {
     expect(launch.argv.slice(1, 3)).toEqual(["--add-dir", inject]);
     expect(launch.argv[3]).toBe("--settings");
     expect(launch.argv.slice(5)).toEqual(["--dangerously-skip-permissions"]);
-    expect(launch.env).toEqual({ AGY_CLI_OSC7501: "on", IAMCEO_MEMBER_ID: "m_lead1" });
+    expect(launch.env).toEqual({ AGY_CLI_OSC7501: "on", AGY_CLI_HIDE_ACCOUNT_INFO: "1", IAMCEO_MEMBER_ID: "m_lead1" });
     expect(launch.sessionId).toBeNull();
     // 열쇠는 명령줄·환경에 없다(주입 폴더 밖의 MCP 환경 파일에만 있다).
     expect(launch.argv.join(" ")).not.toContain("secret-m_lead1");
@@ -213,7 +213,7 @@ describe("providerLaunch(gemini): 명령줄과 환경", () => {
     expect(launch.argv.join(" ")).not.toContain("gemini-3.8-flash");
     expect(launch.argv.join(" ")).not.toContain("claude-statusline");
     expect(launch.argv.join(" ")).not.toContain("skipDangerousModePermissionPrompt");
-    expect(Object.keys(launch.env).sort()).toEqual(["AGY_CLI_OSC7501", "IAMCEO_MEMBER_ID"]);
+    expect(Object.keys(launch.env).sort()).toEqual(["AGY_CLI_HIDE_ACCOUNT_INFO", "AGY_CLI_OSC7501", "IAMCEO_MEMBER_ID"]);
     // 순서: [--conversation] --add-dir --settings [--model] [--effort] [권한]
     expect(launch.argv.filter(arg => arg.startsWith("--"))).toEqual(["--add-dir", "--settings", "--model", "--effort", "--dangerously-skip-permissions"]);
   });

@@ -87,7 +87,7 @@ export function providerBin(provider: CoreProvider, bins: ProviderBins): string 
  * - 띄울 때마다 임의 값을 만들어 상태줄 명령의 인자와 터미널 라벨(GEMINI_LAUNCH_LABEL)에 함께 싣는다.
  * - 서브에이전트 모델 자리(subagentModel)에는 단계(flash_lite·flash·pro)가 온다: 도구 훅이 invoke_subagent 의 Model 을 바꿔 쓴다(gemini-tool-hook.ts).
  *   agy 에는 그 밖에 서브에이전트 모델을 넘길 길(옵션·환경 변수)이 없다. Claude 용 설정 파일(opts.settingsFile)은 쓰지 않는다.
- * - 상태 보고(OSC 7501)는 AGY_CLI_OSC7501=on 으로 늘 켠다. MCP 서버의 열쇠는 프로세스 환경·명령줄이 아니라 주입 폴더 옆의 환경 파일(0600)에 둔다(gemini-inject.ts).
+ * - 상태 보고(OSC 7501)는 AGY_CLI_OSC7501=on 으로 늘 켠다. 머리줄의 계정 메일·요금제는 AGY_CLI_HIDE_ACCOUNT_INFO=1 로 숨긴다(폰에 비치는 팀장 화면에 메일이 나오지 않게). MCP 서버의 열쇠는 프로세스 환경·명령줄이 아니라 주입 폴더 옆의 환경 파일(0600)에 둔다(gemini-inject.ts).
  */
 function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins, bin: string): ProviderLaunch {
   // agy 도 대화 id 를 스스로 정한다. 모르는 채로 '이어 열기'를 하면 조용히 새 대화가 된다.
@@ -131,7 +131,7 @@ function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins,
   }
   // default(전부 묻기)·auto 는 플래그가 없다: 위 설정의 agentMode("" · "auto", 대신하는 모드면 "accept-edits")가 그 뜻이다.
   if (member.permissionMode === "bypassPermissions") args.push("--dangerously-skip-permissions");
-  return { argv: [bin, ...args], env: { AGY_CLI_OSC7501: "on", IAMCEO_MEMBER_ID: member.id }, sessionId: opts.resume ? member.sessionId : null, labels: { [GEMINI_LAUNCH_LABEL]: launchId } };
+  return { argv: [bin, ...args], env: { AGY_CLI_OSC7501: "on", AGY_CLI_HIDE_ACCOUNT_INFO: "1", IAMCEO_MEMBER_ID: member.id }, sessionId: opts.resume ? member.sessionId : null, labels: { [GEMINI_LAUNCH_LABEL]: launchId } };
 }
 
 export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins = {}): ProviderLaunch {

@@ -20,7 +20,12 @@ struct LocalFilePresentation: ViewModifier {
     @State private var selection: LocalFileSelection?
     func body(content: Content) -> some View {
         content.environment(\.openURL, OpenURLAction { url in
-            if let id = FileLinks.fileID(url, projectID: store.selectedProjectID, files: store.files) { router.openFile(id); return .handled }
+            // 0.2.10 창 묶음: 목록에 없는 옛 판도 받아 둔 판(versionFiles)에서 찾고, 그래도 없으면 같은 프로젝트의 링크일 때
+            // 자료 화면으로 연다(화면이 판 묶음을 받아 이 프로젝트의 판인지 본다). 예전 묶음은 모든 판이 목록에 있어 예전과 같다.
+            if let id = FileLinks.fileID(url, projectID: store.selectedProjectID, files: store.versionFiles)
+                ?? (store.stateWindow != nil ? FileLinks.hashLinkFileID(url, projectID: store.selectedProjectID) : nil) {
+                router.openFile(id); return .handled
+            }
             guard let path = LocalFileLinks.path(url) else { return .systemAction }
             guard let projectID = store.selectedProjectID else { return .handled }
             selection = LocalFileSelection(path: path, projectID: projectID)

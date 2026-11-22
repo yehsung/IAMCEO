@@ -263,6 +263,7 @@ extension AppStore {
         if reviewedMembers != members { reviewedMembers = members }
         let todos = (snapshot.state?.todos ?? []).reduce(into: [:]) { $0[$1.id] = $1 }
         if reviewedTodos != todos { reviewedTodos = todos }
+        refreshOlderDoneTodos(reviewed: todos, revisions: snapshot.revisions?.todos, projectID: snapshot.state?.project.id)
         if settingsEdit == nil, let revision = snapshot.revisions?.settings {
             settingsEdit = SettingsEdit(base: snapshot.bootstrap.settings, draft: snapshot.bootstrap.settings, revision: revision)
         }

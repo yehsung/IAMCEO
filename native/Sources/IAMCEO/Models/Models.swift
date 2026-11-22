@@ -760,12 +760,15 @@ extension ProjectStateWindow {
 struct DonePage<Item: Codable & Sendable & Equatable>: Codable, Sendable, Equatable {
     var items: [Item] = []
     var nextCursor: String? = nil
+    /// 끝난 할 일 쪽만: 실린 할 일마다 서버가 같은 행에서 함께 읽은 쓰기 판 번호(SyncRevisions.todos 와 같은 값). 업무 쪽은 없다.
+    var revisions: [String: Int]? = nil
 }
 extension DonePage {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: ModelKey.self)
         items = try c.requiredLossyArray(Item.self, forKey: ModelKey("items"))
         nextCursor = try c.decodeIfPresent(String.self, forKey: ModelKey("nextCursor"))
+        revisions = c.lenient([String: Int].self, forKey: ModelKey("revisions"))
     }
 }
 extension ProjectState {

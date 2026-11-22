@@ -607,7 +607,7 @@ struct HomeView: View {
                     Task { await store.loadOlderDoneTodos() }
                 }
                 .disabled(loading)
-                if let error = store.olderDone.error, !loading {
+                if let error = store.olderDone.todosError, !loading {
                     Text(error).font(CEFont.secondary).foregroundStyle(CE.danger).lineLimit(2)
                 }
             }

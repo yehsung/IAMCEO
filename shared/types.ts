@@ -775,6 +775,11 @@ export interface ProjectStateWindow {
 
 /** 0.2.10: 끝난 할 일·업무를 최근 끝낸 순서로 이어 받는 쪽(`GET /api/projects/:id/todos/done`·`/work/done`). */
 export interface DonePage<T> { items: T[]; nextCursor: string | null }
+/**
+ * 끝난 할 일 쪽(`GET /api/projects/:id/todos/done`). revisions 는 실린 할 일마다 같은 행에서 함께 읽은 쓰기 판 번호다
+ * (`SyncRevisions.todos` 와 같은 값). 앱은 이 값이 지금 판 번호와 같을 때만 창 밖 할 일의 체크를 풀게 한다.
+ */
+export interface DoneTodosPage extends DonePage<Todo> { revisions: Record<string, import("./operations.ts").Revision> }
 
 /** 보관함 GET 전용 DTO. 늦은 manual 기록이 가능하므로 불변 DB snapshot은 아니다. */
 export interface ArchiveProjectState extends ProjectState { project: Project & { archived: true } }

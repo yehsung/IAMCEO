@@ -58,7 +58,7 @@ import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, Do
 import type { RunnerTerminalIdentity } from "./runner/types.ts";
 import type { Bus } from "./bus.ts";
 import { ensureDeliveryVerdicts, newId, nowIso } from "./db.ts";
-import { baseTitle, pickPrevious, planTidy, tidyFamilies, tidyReport, VERSION_WINDOW_MS, type ChainBasis, type ChainFile, type TidyPlan, type TidyReport } from "./file-versions.ts";
+import { baseTitle, pickPrevious, planTidy, tidyFamilies, tidyReport, unchainedKey, VERSION_WINDOW_MS, type ChainBasis, type ChainFile, type TidyBlocks, type TidyPlan, type TidyReport } from "./file-versions.ts";
 import { parseTailnetHttpsRecord, TAILNET_HTTPS_KEY } from "./tailnet-https.ts";
 import { isDeliveryWaitReason, MEMBER_GATE_WAITS, verdictPatience, verdictWait, WATCHED_WAITS, type PumpVerdict, type StoredPumpVerdict } from "./pump-verdict.ts";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./runner/context.ts";
@@ -243,6 +243,8 @@ export interface NewFile {
   /**
    * 0.2.10: replaces 가 없을 때 서버가 같은 팀장·같은 종류의 같은 제목(판 표시·날짜를 걷고 비교) 최신 판을 찾아 잇는다(server/file-versions.ts pickPrevious).
    * file 도구만 켠다(대표가 올린 자료·가져오기는 잇지 않는다). 자동으로 이은 판은 열린 결재의 근거 자료를 옮기지 않는다(대표가 보던 근거를 몰래 바꾸지 않는다).
+   * false 는 팀장이 new_item:true 로 '새 자료'라고 밝힌 것이다(file 도구가 autoChain: !new_item 으로 넘긴다): file_chain_journal 에 new_item 행을 남겨
+   * iamceo files tidy 도 이 자료를 앞 판에 잇지 않는다. 생략(undefined)은 잇지 않을 뿐 아무것도 적지 않는다.
    */
   autoChain?: boolean;
 }
@@ -255,6 +257,15 @@ export interface FileChainResult {
   /** 이을 만한 앞 판이 여럿이라 잇지 않았다(도구 답이 replaces 로 고르라고 알린다). */
   ambiguous?: FileDoc[];
 }
+
+/**
+ * 0.2.10 file_chain_journal 의 source. auto: 자동 잇기, tidy: iamceo files tidy 적용(batch_id 가 묶음 번호), unchain: 팀장이 끊은 쌍
+ * (서버가 이은 것이든 명시한 replaces 든), new_item: 팀장이 new_item:true 로 올린 자료. auto·unchain·new_item 의 batch_id 는 그 자료 id 다.
+ */
+type FileJournalSource = "auto" | "tidy" | "unchain" | "new_item";
+/** new_item 행의 replaces. 열이 NOT NULL 이라(표 정의는 그대로 둔다) '어느 앞 판에도 잇지 않음'을 이 표지로 적는다. 자료 id(f_…)와 겹치지 않는다. */
+const FILE_JOURNAL_ANY_PREVIOUS = "*";
+const FILE_TIDY_CYCLE_TEXT = "판 사슬이 고리가 되는 잇기가 있어 적용하지 않았습니다. 바꾼 것은 없습니다";
 
 /** 0.2.10 iamceo files tidy 의 적용 기록 한 묶음. */
 export interface FileTidyBatch {
@@ -3626,6 +3637,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
           if (replaced) chained = { previous: replaced, basis: verdict.basis };
         } else if (verdict.why === "ambiguous") ambiguous = (verdict.candidates ?? []).map((c) => this.getFile(c.id)).filter((f): f is FileDoc => !!f);
       }
+      // 팀장이 끊은 쌍·'새 자료'(file_chain_journal 의 unchain·new_item 행)는 정리(planTidy)만 본다: 자동 잇기의 next 는 지금 막 만드는 자료라 그런 기록이 있을 수 없다.
       const id = newId("f_");
       const order = this.row("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM files WHERE project_id = ?", input.projectId)!.n as number;
       // 0.2.10: 새 판의 replaces 는 처음 넣을 때 함께 쓴다(큰 html 행을 한 번 더 고쳐 쓰지 않는다).
@@ -3662,6 +3674,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
           }
         }
       }
+      // 0.2.10: new_item:true 로 '새 자료'라고 밝힌 것을 남긴다(iamceo files tidy 가 이 자료를 앞 판에 다시 잇지 않는다).
+      if (!input.replaces && input.autoChain === false) this.journalFileChain(id, "new_item", input.projectId, [{ next: id, previous: FILE_JOURNAL_ANY_PREVIOUS, basis: "new_item" }], createdAt);
       refreshFileSearchIndex(this.db, { fileId: id, limit: 1 });
       const file = this.getFile(id)!;
       this.emit({ type: "file", file });
@@ -3690,8 +3704,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       .map((r) => ({ id: r.id as string, projectId: r.project_id as string, memberId: r.member_id as string, kind: (r.kind as string | null) ?? null, title: r.title as string, createdAt: r.created_at as string, replaces: null, replacedBy: null, order: r.sort_order as number }));
   }
 
-  /** 서버가 고른 판 잇기를 적는다. 기록 표가 없으면(만들지 못한 DB) 적지 않는다: 잇기는 그대로 하고, 정리 적용만 표를 요구한다. */
-  private journalFileChain(batchId: string, source: "auto" | "tidy", projectId: string, links: { next: string; previous: string; basis: string }[], at: string): void {
+  /**
+   * 서버가 고른 판 잇기(auto·tidy)와 팀장이 바로잡은 것(unchain: 끊은 쌍, new_item: '새 자료'라고 밝힌 자료)을 적는다.
+   * 기록 표가 없으면(만들지 못한 DB) 적지 않는다: 잇기는 그대로 하고, 정리 적용만 표를 요구한다.
+   */
+  private journalFileChain(batchId: string, source: FileJournalSource, projectId: string, links: { next: string; previous: string; basis: string }[], at: string): void {
     if (!this.fileRevisions.journal) return;
     for (const link of links) {
       this.run("INSERT INTO file_chain_journal (batch_id, source, project_id, file_id, replaces, basis, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", batchId, source, projectId, link.next, link.previous, link.basis, at);
@@ -3709,9 +3726,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       if (!file.replaces) throw new ApiError(409, `앞 판에 이어진 자료가 아닙니다: ${id}`, "file_not_chained");
       const previousId = file.replaces;
       const previous = this.getFile(previousId);
+      const at = nowIso();
       this.run("UPDATE files SET replaces = NULL WHERE id = ?", id);
       if (previous?.replacedBy === id) this.run("UPDATE files SET replaced_by = NULL WHERE id = ?", previousId);
-      if (this.fileRevisions.journal) this.run("UPDATE file_chain_journal SET undone_at = ? WHERE file_id = ? AND replaces = ? AND undone_at IS NULL", nowIso(), id, previousId);
+      if (this.fileRevisions.journal) this.run("UPDATE file_chain_journal SET undone_at = ? WHERE file_id = ? AND replaces = ? AND source IN ('auto', 'tidy') AND undone_at IS NULL", at, id, previousId);
+      // 끊은 쌍을 남긴다(서버가 이은 것이든 명시한 replaces 든). iamceo files tidy 가 이 쌍을 다시 잇지 않는다.
+      this.journalFileChain(id, "unchain", file.projectId, [{ next: id, previous: previousId, basis: "unchain" }], at);
       const after = this.getFile(id)!;
       const before = previous ? this.getFile(previousId) : null;
       this.emit({ type: "file", file: after });
@@ -3752,8 +3772,31 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     });
   }
 
+  /** 0.2.10: 팀장이 바로잡은 것(file_chain_journal 의 unchain·new_item 행). 정리 계획이 다시 잇지 않는다. */
+  private fileChainBlocks(projectId?: string): TidyBlocks {
+    const unchained = new Set<string>(), newItems = new Set<string>();
+    if (this.fileRevisions.journal) {
+      const rows = this.rows(`SELECT source, file_id, replaces FROM file_chain_journal WHERE source IN ('unchain', 'new_item')${projectId ? " AND project_id = ?" : ""}`, ...(projectId ? [projectId] : []));
+      for (const row of rows) {
+        if (row.source === "new_item") newItems.add(row.file_id as string);
+        else unchained.add(unchainedKey(row.file_id as string, row.replaces as string));
+      }
+    }
+    return { unchained, newItems };
+  }
+
   planFileTidy(projectId?: string): TidyPlan {
-    return planTidy(this.fileChainFiles(projectId));
+    return planTidy(this.fileChainFiles(projectId), this.fileChainBlocks(projectId));
+  }
+
+  /** previous 의 앞 판 사슬(replaces)에 next 가 있는가: 있으면 next.replaces = previous 가 판 사슬을 고리로 만든다. 본문·html 을 읽지 않는다. */
+  private fileReplacesChainHas(projectId: string, previous: string, next: string): boolean {
+    const seen = new Set<string>();
+    for (let at: string | null | undefined = previous; at && !seen.has(at); at = this.fileLinkOf(projectId, at)?.replaces as string | null | undefined) {
+      if (at === next) return true;
+      seen.add(at);
+    }
+    return false;
   }
 
   /**
@@ -3769,6 +3812,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       const batchId = newId("tb_");
       const at = nowIso();
       for (const link of plan.links) {
+        // 계획(planTidy)이 뒤 판 사슬을 빼지만, 고리는 두 판을 모두 목록에서 지우므로 쓰기 전에 한 번 더 본다(앞서 쓴 링크도 이 거래 안에서 보인다).
+        if (this.fileReplacesChainHas(link.projectId, link.previous.id, link.next.id)) throw new ApiError(409, FILE_TIDY_CYCLE_TEXT, "file_tidy_cycle");
         const set = this.db.query("UPDATE files SET replaces = ? WHERE id = ? AND project_id = ? AND replaces IS NULL").run(link.previous.id, link.next.id, link.projectId).changes;
         const back = this.db.query("UPDATE files SET replaced_by = ? WHERE id = ? AND project_id = ? AND replaced_by IS NULL").run(link.next.id, link.previous.id, link.projectId).changes;
         if (set !== 1 || back !== 1) throw new ApiError(409, "확인한 뒤로 자료가 바뀌었습니다. 다시 확인한 뒤 적용하세요", "file_tidy_plan_changed");
@@ -3807,7 +3852,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   fileTidyReport(projectId?: string, showTitles = false): TidyReport & { batches: FileTidyBatch[] } {
     const files = this.fileChainFiles(projectId);
     const names = new Map(this.listProjects({ includeArchived: true }).map((p) => [p.id, p.name]));
-    return { ...tidyReport(planTidy(files), files, names, showTitles), batches: this.listFileTidyBatches() };
+    return { ...tidyReport(planTidy(files, this.fileChainBlocks(projectId)), files, names, showTitles), batches: this.listFileTidyBatches() };
   }
 
   /** 0.2.10 iamceo files tidy --apply 의 응답 모양. */

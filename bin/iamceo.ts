@@ -808,9 +808,12 @@ const TIDY_SKIPS: Record<string, [string, string]> = {
   "too-short": ["제목이 짧음", "title too short"],
   "ordinal-tail": ["회차·편 번호", "episode or part number"],
   "same-number-different-tail": ["같은 판 번호에 다른 꼬리", "same number, different tail"],
+  "different-tail": ["앞부분만 같고 판 번호로 가릴 수 없음", "same leading title, no version numbers to tell them apart"],
   "version-went-down": ["판 번호가 거꾸로", "version went down"],
   "different-date": ["날짜가 다름", "different dates"],
   "no-kind": ["종류 없는 옛 자료", "old file without a kind"],
+  unchained: ["팀장이 끊은 잇기", "link the staff removed"],
+  "new-item": ["팀장이 새 자료라고 밝힘", "staff marked it as a new file"],
 };
 
 export function formatTidy(result: CliTidyResult, action: CliTidyAction): string {

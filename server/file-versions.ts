@@ -3,11 +3,16 @@
 // 원칙: 놓친 잇기는 자료함이 조금 어수선할 뿐이지만, 잘못 이은 판은 다른 자료를 '이전 판' 아래로 숨긴다. 애매하면 잇지 않는다.
 import { createHash } from "node:crypto";
 
-const DAY = 86_400_000;
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 /** 판 표시가 있는 제목을 이을 때 앞 판이 이만큼 안에 올라왔어야 한다(실측: 앞뒤 판 간격 중앙값 0.18시간, 최대 99시간). */
 export const VERSION_WINDOW_MS = 14 * DAY;
-/** 판 표시 없이 같은 제목으로 다시 올린 자료를 이을 때의 창(역할 규칙이 '새 판은 같은 제목으로'라고 가르친다). */
-export const SAME_TITLE_WINDOW_MS = 14 * DAY;
+/**
+ * 판 표시 없이 같은 제목으로 다시 올린 자료를 이을 때의 창(역할 규칙이 '새 판은 같은 제목으로'라고 가르친다).
+ * 판 표시가 없는 만큼 짧게 둔다: '일일 보고'·'테스트 결과'처럼 같은 이름으로 거듭 올리는 다른 보고를 한 판 묶음으로 접지 않게
+ * (역할 규칙은 그런 보고의 제목에 날짜·회차를 넣으라고 한다).
+ */
+export const SAME_TITLE_WINDOW_MS = 48 * HOUR;
 /** 판 표시 없이 같은 제목으로 다시 올렸을 때 잇는 종류. 사진·영상·소리는 '화면 캡처'처럼 흔한 제목이 많아 잇지 않는다. */
 const SAME_TITLE_KINDS = new Set(["artifact", "document", "table", "code", "pdf", "file"]);
 
@@ -38,7 +43,10 @@ const EDGE: RegExp[] = [
   new RegExp(`[(\\[]\\s*(?:${EDGE_WORDS})\\s*[)\\]]`, "g"),
   new RegExp(`(?<=^|[\\s,·\\-–—:;/|])(?:${EDGE_WORDS})\\s*$`, "g"),
 ];
-/** 날짜. 판 표시로 세지 않고 줄기에서만 걷는다. 'M-D' 로 맞춰 비교한다(연도는 버린다). 괄호 밖의 '1-2'는 단원 번호일 수 있어 날짜로 보지 않는다. */
+/**
+ * 날짜. 판 표시로 세지 않고 줄기에서만 걷는다. 'M-D' 로 맞춰 비교한다(연도는 버린다). 괄호 밖의 '1-2'는 단원 번호일 수 있어 날짜로 보지 않는다.
+ * 괄호 안의 '1-2'·'1.3' 도 단원 번호일 수 있어, 날짜가 달라도 고친 날로 보는 예외(datesAgree)에는 쓰지 않는다(dateIsClear).
+ */
 const DATES: RegExp[] = [
   /(?<!\d)(?:20\d{2})\s?[-./년]\s?(\d{1,2})\s?[-./월]\s?(\d{1,2})\s?일?(?!\d)/g, // 2026-11-17, 2026.11.17, 2026년 11월 17일
   /(?<!\d)(\d{1,2})\s?월\s?(\d{1,2})\s?일/g, // 11월 17일
@@ -80,6 +88,8 @@ export interface TitleParts {
   version: number[] | null;
   /** 걷은 날짜('M-D'). */
   dates: string[];
+  /** 걷은 날짜가 모두 날짜임이 분명한 꼴인가(연도가 있는 날짜·M월 D일·괄호 속 M/D). 괄호 속 '1-2'·'1.3' 은 단원 번호일 수 있다. 날짜가 없으면 true. */
+  datesClear: boolean;
   /** 꼬리에 순번(N회·N화·Part N…)이 있는가. */
   ordinal: boolean;
 }
@@ -87,14 +97,16 @@ export interface TitleParts {
 export function titleParts(title: string): TitleParts {
   let t = baseTitle(title);
   const dates: string[] = [];
-  for (const re of DATES) {
+  let datesClear = true;
+  DATES.forEach((re, index) => {
     t = t.replace(re, (whole, m: string, d: string) => {
       const month = Number(m), day = Number(d);
       if (month < 1 || month > 12 || day < 1 || day > 31) return whole;
       dates.push(`${month}-${day}`);
+      if (!dateIsClear(index, whole)) datesClear = false;
       return " ";
     });
-  }
+  });
   let marked = false;
   let version: number[] | null = null;
   for (const re of NUMBERED) {
@@ -113,7 +125,12 @@ export function titleParts(title: string): TitleParts {
   const cut = full.search(/[(:\[—–|]| - /);
   const stem = (cut < 0 ? full : full.slice(0, cut)).trim();
   const tail = cut < 0 ? "" : full.slice(cut);
-  return { key, full, stem, tail, marked, version, dates: [...new Set(dates)].sort(), ordinal: ORDINAL.test(tail) };
+  return { key, full, stem, tail, marked, version, dates: [...new Set(dates)].sort(), datesClear, ordinal: ORDINAL.test(tail) };
+}
+
+/** DATES 의 몇 번째 식으로 읽은 날짜가 날짜임이 분명한가: 연도가 있는 것·M월 D일은 늘, 괄호 속은 M/D 일 때만. */
+function dateIsClear(index: number, whole: string): boolean {
+  return index < 2 || whole.includes("/");
 }
 
 /** 글자 수(한글 음절·영문자 등). 숫자·기호·공백은 세지 않는다. */
@@ -135,7 +152,11 @@ export interface ChainFile {
   order?: number;
 }
 export type ChainBasis = "marker+full" | "marker+stem" | "same-title";
-export type ChainSkip = "no-uploader" | "no-kind" | "no-marker" | "too-short" | "ordinal-tail" | "no-match" | "ambiguous" | "version-went-down" | "same-number-different-tail" | "different-date";
+/**
+ * 잇지 않은 까닭. different-tail: 줄기(괄호·쌍점 앞)만 같고 두 제목에 판 번호가 없거나 한쪽에만 있어 새 판인지 알 수 없다('(요약) 최종'·'(전체) 최종').
+ * unchained·new-item 은 정리 계획(planTidy)에서만 나온다: 팀장이 unchain 으로 끊은 쌍, new_item:true 로 '새 자료'라고 밝혀 올린 자료.
+ */
+export type ChainSkip = "no-uploader" | "no-kind" | "no-marker" | "too-short" | "ordinal-tail" | "no-match" | "ambiguous" | "version-went-down" | "same-number-different-tail" | "different-tail" | "different-date" | "unchained" | "new-item";
 export type ChainVerdict = { chain: true; to: ChainFile; basis: ChainBasis } | { chain: false; why: ChainSkip; candidates?: ChainFile[] };
 
 const MIN_FULL_LETTERS = 3;
@@ -158,20 +179,26 @@ function newest(files: readonly ChainFile[]): ChainFile {
   });
 }
 
-/** 두 제목의 날짜가 다르면 다른 자료로 본다(주간 보고처럼). 판 번호가 분명히 올라가면 그 날짜는 고친 날로 본다. */
+/**
+ * 두 제목의 날짜가 다르면 다른 자료로 본다(주간 보고처럼).
+ * - 한쪽에만 날짜가 있으면(지난주 '주간 보고 최종' 뒤 '주간 보고 (11/22) 초안') 판 번호가 분명히 오를 때만 같은 자료로 본다.
+ * - 날짜가 다르면 판 번호가 분명히 오르고 두 날짜가 날짜임이 분명한 꼴(연도·M월 D일·M/D)일 때만 그 날짜를 고친 날로 본다
+ *   (괄호 속 '1-2'→'1-3' 은 단원 번호일 수 있다).
+ */
 function datesAgree(previous: TitleParts, next: TitleParts): boolean {
-  if (!previous.dates.length || !next.dates.length) return true;
   if (previous.dates.join(",") === next.dates.join(",")) return true;
-  return compareVersions(next.version, previous.version) === 1;
+  const up = compareVersions(next.version, previous.version) === 1;
+  if (!previous.dates.length || !next.dates.length) return up;
+  return up && previous.datesClear && next.datesClear;
 }
 
 /**
  * 새 자료 next 를 이을 앞 판을 고른다. heads 는 같은 프로젝트의 아직 최신인 판들(순서 무관).
  * 조건: 같은 팀장(member_id)·같은 종류, 앞 판이 아직 최신이고 next 보다 앞서 14일 안.
  * - 판 표시(v12·3판·새 판 4·2차 시안·초안·최종·(최신) 등)가 있으면: 판 표시·날짜·형식 낱말을 걷은 제목(full)이 같은 가장 새 판.
- *   없으면 줄기(stem, 괄호·쌍점 앞)가 같은 판이 꼭 하나일 때만(꼬리에 순번이 없을 때).
- * - 판 표시가 없으면: 사진·영상·소리가 아니고, 제목이 글자 그대로(날짜까지) 같은 가장 새 판.
- * - 판 번호가 거꾸로 가거나, 같은 번호인데 꼬리가 다르거나, 두 제목의 날짜가 다르면 잇지 않는다.
+ *   없으면 줄기(stem, 괄호·쌍점 앞)가 같은 판이 꼭 하나이고(꼬리에 순번이 없을 때) 두 제목에 모두 판 번호가 있어 새 판 번호가 클 때만.
+ * - 판 표시가 없으면: 사진·영상·소리가 아니고, 제목이 글자 그대로(날짜까지) 같은 48시간 안의 가장 새 판.
+ * - 판 번호가 거꾸로 가거나, 줄기로만 맞는데 판 번호가 없거나 같거나, 두 제목의 날짜가 다르면(datesAgree) 잇지 않는다.
  */
 export function pickPrevious(next: ChainFile, heads: readonly ChainFile[]): ChainVerdict {
   if (!next.memberId) return { chain: false, why: "no-uploader" };
@@ -215,6 +242,8 @@ export function pickPrevious(next: ChainFile, heads: readonly ChainFile[]): Chai
   if (order === -1) return { chain: false, why: "version-went-down" };
   // 같은 판 번호인데 꼬리가 다르면('v1 (오프닝)' 과 'v1 (클로징)') 판이 아니라 다른 부분일 수 있다.
   if (order === 0) return { chain: false, why: "same-number-different-tail" };
+  // 꼬리가 다른데 판 번호로 새 판임을 알 수 없으면('(요약) 최종'·'(전체) 최종', '(토스) 초안'·'(카카오페이) 초안', 앞 판에만 번호가 없는 것) 다른 자료일 수 있다.
+  if (order !== 1) return { chain: false, why: "different-tail" };
   return { chain: true, to, basis: "marker+stem" };
 }
 
@@ -234,23 +263,48 @@ export interface TidyPlan {
   skipped: Partial<Record<ChainSkip, number>>;
 }
 
-/** 일회성 정리의 계획: 오래된 것부터 차례로 들여보내며 자동 잇기와 같은 규칙으로 고른다. 이미 이어진 판은 그대로 둔다. */
-export function planTidy(files: readonly ChainFile[]): TidyPlan {
-  const sorted = [...files].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || (a.order ?? 0) - (b.order ?? 0) || a.id.localeCompare(b.id));
+/** 팀장이 바로잡은 것(store.ts 가 file_chain_journal 의 unchain·new_item 행에서 읽는다). 정리는 이것을 다시 잇지 않는다. */
+export interface TidyBlocks {
+  /** 팀장이 unchain 으로 끊은 잇기: `${새 판 id}>${앞 판 id}`(서버가 이은 것이든 명시한 replaces 든). */
+  unchained: ReadonlySet<string>;
+  /** 팀장이 new_item:true 로 '새 자료'라고 밝혀 올린 자료. 앞 판에 잇지 않는다(뒤 판의 앞 판은 될 수 있다). */
+  newItems: ReadonlySet<string>;
+}
+export const unchainedKey = (next: string, previous: string): string => `${next}>${previous}`;
+
+/**
+ * 일회성 정리의 계획: 올린 순서(sort_order, 같으면 시각)대로 들여보내며 자동 잇기와 같은 규칙으로 고른다. 이미 이어진 판은 그대로 둔다.
+ * 팀장이 끊은 쌍(blocks.unchained)과 '새 자료'라고 밝힌 자료(blocks.newItems)는 잇지 않는다(까닭 unchained·new-item 으로 센다).
+ * 이미 뒤 판이 있는 자료를 이을 때는 그 뒤 판 사슬(replacedBy)에 든 판을 앞 판 후보에서 뺀다(시각이 뒤바뀐 판 갈이를 거꾸로 이어 고리를 만들지 않게).
+ */
+export function planTidy(files: readonly ChainFile[], blocks?: TidyBlocks): TidyPlan {
+  // sort_order 는 프로젝트 안에서 올린 순서대로 늘어난다(시계가 뒤로 가도). 정리는 프로젝트마다 따로 들여보내므로 다른 프로젝트끼리의 순서는 상관없다.
+  const sorted = [...files].sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  const byId = new Map(files.map((f) => [f.id, f]));
+  const laterVersions = (file: ChainFile): Set<string> => {
+    const later = new Set<string>([file.id]);
+    for (let id = file.replacedBy; id && !later.has(id); id = byId.get(id)?.replacedBy ?? null) later.add(id);
+    return later;
+  };
   const heads = new Map<string, ChainFile[]>();
   const links: TidyLink[] = [];
   const skipped: Partial<Record<ChainSkip, number>> = {};
+  const skip = (why: ChainSkip) => { skipped[why] = (skipped[why] ?? 0) + 1; };
   for (const file of sorted) {
     const list = heads.get(file.projectId) ?? [];
     if (file.replaces) {
       const at = list.findIndex((h) => h.id === file.replaces);
       if (at >= 0) list.splice(at, 1);
     } else {
-      const verdict = pickPrevious(file, list);
-      if (verdict.chain) {
+      const later = file.replacedBy ? laterVersions(file) : null;
+      const verdict = pickPrevious(file, later ? list.filter((h) => !later.has(h.id)) : list);
+      if (!verdict.chain) skip(verdict.why);
+      else if (blocks?.newItems.has(file.id)) skip("new-item");
+      else if (blocks?.unchained.has(unchainedKey(file.id, verdict.to.id))) skip("unchained");
+      else {
         links.push({ projectId: file.projectId, previous: verdict.to, next: file, basis: verdict.basis });
         list.splice(list.indexOf(verdict.to), 1);
-      } else skipped[verdict.why] = (skipped[verdict.why] ?? 0) + 1;
+      }
     }
     if (!file.replacedBy) list.push(file);
     heads.set(file.projectId, list);

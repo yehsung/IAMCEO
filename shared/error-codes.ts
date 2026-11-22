@@ -541,6 +541,7 @@ export const ERROR_CODES = {
   file_tidy_unavailable: { ko: "판 정리 기록 표가 없어 적용하지 않았습니다. 서버를 다시 시작한 뒤 다시 하세요", en: "The version tidy-up log table is missing, so nothing was applied. Restart the server and try again" },
   file_tidy_plan_changed: { ko: "확인한 뒤로 자료가 바뀌었습니다. 다시 확인한 뒤 새 계획 번호로 적용하세요", en: "Files changed since you checked. Check again and apply with the new plan number" },
   file_tidy_batch_not_found: { ko: "판 정리 기록을 찾을 수 없습니다", en: "That version tidy-up was not found" },
+  file_tidy_cycle: { ko: "판 사슬이 고리가 되는 잇기가 있어 적용하지 않았습니다. 바꾼 것은 없습니다", en: "Not applied: a link would make the versions loop back on themselves. Nothing was changed" },
   // ---- 끝 ----
 } as const satisfies Record<string, ErrorCodeText>;
 

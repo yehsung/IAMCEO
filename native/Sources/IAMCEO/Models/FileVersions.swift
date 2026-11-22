@@ -40,3 +40,23 @@ enum FileVersions {
         return result
     }
 }
+
+/// 0.2.10: 원본 파일과 html 미리보기를 한 자료(한 판)로 올린 아티팩트(file 도구의 original). 원본은 그림·html 이 아닌 첨부다
+/// (예전 아티팩트는 html 을 첨부에 두기도 했다. 그것은 원본이 아니라 페이지 자신이다). 출시 앱은 같은 첨부를 미리보기 아래 칩으로 그렸다.
+enum FileOriginals {
+    static func of(_ file: FileDoc) -> [Attachment] {
+        guard file.kind == "artifact" else { return [] }
+        return file.attachments.filter { attachment in
+            let ext = (attachment.name as NSString).pathExtension.lowercased()
+            let mime = attachment.mime.lowercased()
+            return !attachment.isImage && !mime.hasPrefix("image/") && !["html", "htm"].contains(ext) && mime != "text/html"
+        }
+    }
+
+    /// 목록 줄의 표시: 첫 원본의 확장자(대문자, 'PPTX'). 확장자가 없으면 nil(읽기 화면의 칩으로만 보인다).
+    static func label(_ file: FileDoc) -> String? {
+        guard let first = of(file).first else { return nil }
+        let ext = (first.name as NSString).pathExtension.uppercased()
+        return ext.isEmpty || ext.count > 8 ? nil : ext
+    }
+}

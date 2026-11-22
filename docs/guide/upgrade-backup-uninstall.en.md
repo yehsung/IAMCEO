@@ -111,6 +111,16 @@ When you move to a new Mac or reinstall one, bring conversations, decisions and 
 - Records the server keeps only for itself are cleaned up after a fixed time. The copy of the text typed into an AI session is cleared 30 days after that delivery finished (a hash of what was sent is kept), and run records and receipts are deleted 90 days after they finished. Records of work that has not finished are never deleted.
 - Server logs roll over when they fill up, and only a few old files are kept. Only the five most recent diagnostic files are kept.
 
+## Tidying up piled-up file versions
+
+A revised version of a file folds under "Earlier versions", so the Files tab shows only the latest one. Files uploaded before 0.2.10 whose versions were never linked (v1…v11 of the same deck, for example) can be tidied up once. Nothing is deleted; only the versions are linked.
+
+1. Run `iamceo files tidy` in Terminal. It shows, per project, how many version groups would form, how many older versions would fold and a plan number, and changes nothing. Add `--show-titles` to see the titles in each group, or `--project <projectID>` for one project.
+2. If the plan looks right, run `iamceo files tidy --apply --plan <plan number>` as it suggests. If files changed since you checked, nothing is applied; start again from step 1. Open decisions keep pointing at the same files.
+3. To undo, run the `iamceo files tidy --undo <batch number>` it printed when applying.
+
+While the server is running the command goes through the server on this Mac (the app shows the result right away); while it is stopped it opens the data directly.
+
 ## Exporting and deleting a project
 
 An archived project can be exported or deleted, one project at a time.

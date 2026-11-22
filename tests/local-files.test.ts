@@ -274,6 +274,7 @@ test("built-in conductor and worker system prompts require published deliverable
     expect(rules).toContain("반드시 `file` 도구로 자료에 올리고");
     expect(rules).toContain("`post`의 `file_ids`");
     expect(rules).toContain("로컬 파일 경로만 말하고 끝내지 않는다");
-    expect(rules).toContain("갱신하거나 새 판");
+    // 0.2.10: 바뀐 자료는 replaces 로 새 판을 잇는다(예전 문장 '갱신하거나 새 판'은 replaces 를 가리키지 않아 판이 이어지지 않았다).
+    expect(rules).toContain("`file`의 `replaces`에 앞 판 id를 넣어 새 판을 올리고");
   }
 });

@@ -58,6 +58,7 @@ import type { DeliveryDispatch, DeliveryIntentResult, DeliveryRecoveryRecord, Do
 import type { RunnerTerminalIdentity } from "./runner/types.ts";
 import type { Bus } from "./bus.ts";
 import { ensureDeliveryVerdicts, newId, nowIso } from "./db.ts";
+import { baseTitle, pickPrevious, planTidy, tidyFamilies, tidyReport, VERSION_WINDOW_MS, type ChainBasis, type ChainFile, type TidyPlan, type TidyReport } from "./file-versions.ts";
 import { parseTailnetHttpsRecord, TAILNET_HTTPS_KEY } from "./tailnet-https.ts";
 import { isDeliveryWaitReason, MEMBER_GATE_WAITS, verdictPatience, verdictWait, WATCHED_WAITS, type PumpVerdict, type StoredPumpVerdict } from "./pump-verdict.ts";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOWS, exactSource } from "./runner/context.ts";
@@ -239,6 +240,28 @@ export interface NewFile {
   html?: string | null;
   /** 0.2.7 묶음 4: 이 판이 대신하는 앞 판(같은 프로젝트, 아직 최신 판). 같은 트랜잭션에서 앞 판에 새 판을 잇고 열린 결재의 근거 자료를 새 판으로 옮긴다. */
   replaces?: string | null;
+  /**
+   * 0.2.10: replaces 가 없을 때 서버가 같은 팀장·같은 종류의 같은 제목(판 표시·날짜를 걷고 비교) 최신 판을 찾아 잇는다(server/file-versions.ts pickPrevious).
+   * file 도구만 켠다(대표가 올린 자료·가져오기는 잇지 않는다). 자동으로 이은 판은 열린 결재의 근거 자료를 옮기지 않는다(대표가 보던 근거를 몰래 바꾸지 않는다).
+   */
+  autoChain?: boolean;
+}
+
+/** 0.2.10: 자료를 올린 결과와 서버가 자동으로 이은 앞 판. */
+export interface FileChainResult {
+  file: FileDoc;
+  /** versions: 이 판까지의 판 수(앞 판들 + 이 판). */
+  chained?: { previous: FileDoc; basis: ChainBasis; versions: number };
+  /** 이을 만한 앞 판이 여럿이라 잇지 않았다(도구 답이 replaces 로 고르라고 알린다). */
+  ambiguous?: FileDoc[];
+}
+
+/** 0.2.10 iamceo files tidy 의 적용 기록 한 묶음. */
+export interface FileTidyBatch {
+  batchId: string;
+  createdAt: string;
+  links: number;
+  undone: number;
 }
 
 /** File projection schema, appended by db.ts's versioned migrations. */
@@ -794,6 +817,12 @@ function toFile(r: Row): FileDoc {
     ...(r.replaces ? { replaces: r.replaces as string } : {}),
     ...(r.replaced_by ? { replacedBy: r.replaced_by as string } : {}),
   };
+}
+
+/** 0.2.10: 판 연결은 덮는 색인에서 따로 읽어 행에 붙인다(Store.fileLinkOf). toFile 이 예전처럼 있을 때만 싣는다. */
+function withFileLink(r: Row, link: Row | undefined): Row {
+  if (link) { r.replaces = link.replaces; r.replaced_by = link.replaced_by; }
+  return r;
 }
 
 function toAttachment(r: Row): Attachment {
@@ -3426,15 +3455,39 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   // ---- 자료 ----
-  private fileSelect?: string;
-  /** 0.2.7 묶음 4: 판 갈이 열(db.ts ensureRevisionColumns)은 openDb 가 늘 더한다. 이주만 돌린 시험 DB 처럼 그 열이 없으면 예전 열만 읽는다. */
-  private get fileColumns(): string {
-    return this.fileSelect ??= this.rows("PRAGMA table_info(files)").some((c) => c.name === "replaced_by") ? `${FILE_COLUMNS}, replaces, replaced_by` : FILE_COLUMNS;
+  private fileRevisionState?: { columns: boolean; index: boolean; journal: boolean };
+  /**
+   * 0.2.7 묶음 4: 판 갈이 열(db.ts ensureRevisionColumns)은 openDb 가 늘 더한다. 이주만 돌린 시험 DB 처럼 그 열이 없으면 판 연결 없이 읽는다.
+   * 0.2.10: 판 열은 html 뒤에 붙어 있어 표에서 읽으면 큰 html 의 넘침 페이지를 끝까지 따라간다. 덮는 색인 files_revisions 가 있으면 판 연결은 그 색인에서만 읽는다
+   * (db.ts ensureFileVersionSchema. 만들지 못했으면 예전처럼 표에서 읽는다: 느릴 뿐 결과는 같다).
+   */
+  private get fileRevisions(): { columns: boolean; index: boolean; journal: boolean } {
+    return this.fileRevisionState ??= {
+      columns: this.rows("PRAGMA table_info(files)").some((c) => c.name === "replaced_by"),
+      index: !!this.row("SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'files_revisions'"),
+      journal: !!this.row("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'file_chain_journal'"),
+    };
+  }
+  private get revisionSource(): string {
+    return this.fileRevisions.index ? "files INDEXED BY files_revisions" : "files";
+  }
+
+  /** 한 자료의 판 연결. 본문·html 을 읽지 않는다. */
+  private fileLinkOf(projectId: string, id: string): Row | undefined {
+    if (!this.fileRevisions.columns) return undefined;
+    return this.row(`SELECT replaces, replaced_by FROM ${this.revisionSource} WHERE project_id = ? AND id = ?`, projectId, id) ?? undefined;
+  }
+
+  /** 프로젝트의 판 연결이 있는 자료(id → replaces·replaced_by). 본문·html 을 읽지 않는다. */
+  private fileLinksOf(projectId: string): Map<string, Row> {
+    if (!this.fileRevisions.columns) return new Map();
+    const rows = this.rows(`SELECT id, replaces, replaced_by FROM ${this.revisionSource} WHERE project_id = ? AND (replaces IS NOT NULL OR replaced_by IS NOT NULL)`, projectId);
+    return new Map(rows.map((r) => [r.id as string, r]));
   }
 
   getFile(id: string): FileDoc | null {
-    const r = this.row(`SELECT ${this.fileColumns} FROM files WHERE id = ?`, id);
-    return r ? toFile(r) : null;
+    const r = this.row(`SELECT ${FILE_COLUMNS} FROM files WHERE id = ?`, id);
+    return r ? toFile(withFileLink(r, this.fileLinkOf(r.project_id as string, id))) : null;
   }
 
   /** 소속만 확인할 때 쓴다. 본문·첨부를 읽지 않는다. */
@@ -3449,20 +3502,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   /**
    * 프로젝트의 자료(최신 것이 먼저). 판 갈이 열(replaces·replaced_by)은 html 뒤에 붙은 열이라 이 조회에서 함께 읽지 않고,
-   * 값이 있는 행만 담은 부분 색인(db.ts REVISION_INDEXES files_revisions)을 읽는 따로 조회로 붙인다. 결과는 예전과 같다.
+   * 덮는 색인(db.ts FILE_VERSION_SCHEMA files_revisions)만 읽는 따로 조회(fileLinksOf)로 붙인다. 결과는 예전과 같다.
    * lite 면 본문도 읽지 않는다(본문 칸은 빈 글자).
    */
   listFiles(projectId: string, opts: { lite?: boolean } = {}): FileDoc[] {
-    const rows = this.rows(`SELECT ${opts.lite ? FILE_LITE_COLUMNS : FILE_COLUMNS} FROM files WHERE project_id = ? ORDER BY sort_order DESC, rowid DESC`, projectId);
-    if (this.fileColumns !== FILE_COLUMNS) {
-      const links = new Map(this.rows("SELECT id, replaces, replaced_by FROM files WHERE project_id = ? AND (replaces IS NOT NULL OR replaced_by IS NOT NULL)", projectId)
-        .map((r) => [r.id as string, r]));
-      if (links.size) for (const row of rows) {
-        const link = links.get(row.id);
-        if (link) { row.replaces = link.replaces; row.replaced_by = link.replaced_by; }
-      }
-    }
-    return rows.map(toFile);
+    const links = this.fileLinksOf(projectId);
+    return this.rows(`SELECT ${opts.lite ? FILE_LITE_COLUMNS : FILE_COLUMNS} FROM files WHERE project_id = ? ORDER BY sort_order DESC, rowid DESC`, projectId).map((r) => toFile(withFileLink(r, links.get(r.id as string))));
   }
 
   /**
@@ -3558,16 +3603,34 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   createFile(input: NewFile): FileDoc {
+    return this.createFileWithChain(input).file;
+  }
+
+  /** 자료를 올리고, replaces 나 자동 잇기(autoChain)로 앞 판에 잇는다. 한 거래다. */
+  createFileWithChain(input: NewFile): FileChainResult {
     return this.transaction(() => {
       this.requireProject(input.projectId);
       // 0.2.7 묶음 4: 판 갈이. 같은 프로젝트의, 아직 최신인 판만 대신한다.
-      const replaced = input.replaces ? this.getFile(input.replaces) : null;
+      let replaced = input.replaces ? this.getFile(input.replaces) : null;
       if (input.replaces && (!replaced || replaced.projectId !== input.projectId)) throw new ApiError(404, `자료를 찾을 수 없습니다: ${input.replaces}`, "file_not_found");
       if (replaced?.replacedBy) throw new ApiError(409, `이미 새 판(#${replaced.replacedBy})이 있는 자료입니다. 최신 판의 id 를 replaces 에 넣으세요`, "file_already_replaced");
+      const createdAt = nowIso();
+      let chained: { previous: FileDoc; basis: ChainBasis } | undefined;
+      let ambiguous: FileDoc[] | undefined;
+      if (!input.replaces && input.autoChain && input.memberId && this.fileRevisions.columns) {
+        const verdict = pickPrevious({ id: "", projectId: input.projectId, memberId: input.memberId, kind: input.kind ?? null, title: input.title, createdAt, replaces: null, replacedBy: null },
+          this.fileChainHeads(input.projectId, input.memberId, createdAt));
+        if (verdict.chain) {
+          replaced = this.getFile(verdict.to.id);
+          if (replaced) chained = { previous: replaced, basis: verdict.basis };
+        } else if (verdict.why === "ambiguous") ambiguous = (verdict.candidates ?? []).map((c) => this.getFile(c.id)).filter((f): f is FileDoc => !!f);
+      }
       const id = newId("f_");
       const order = this.row("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM files WHERE project_id = ?", input.projectId)!.n as number;
+      // 0.2.10: 새 판의 replaces 는 처음 넣을 때 함께 쓴다(큰 html 행을 한 번 더 고쳐 쓰지 않는다).
+      const linkColumn = replaced && this.fileRevisions.columns;
       this.run(
-        "INSERT INTO files (id, project_id, title, who, member_id, summary, body, path, attachments, created_at, sort_order, kind, html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        `INSERT INTO files (id, project_id, title, who, member_id, summary, body, path, attachments, created_at, sort_order, kind, html${linkColumn ? ", replaces" : ""}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${linkColumn ? ", ?" : ""})`,
         id,
         input.projectId,
         input.title,
@@ -3577,26 +3640,187 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         input.body ?? "",
         input.path ?? null,
         JSON.stringify(input.attachments ?? []),
-        nowIso(),
+        createdAt,
         order,
         input.kind ?? null,
         input.html ?? null,
+        ...(linkColumn ? [replaced!.id] : []),
       );
       if (replaced) {
-        this.run("UPDATE files SET replaces = ? WHERE id = ?", replaced.id, id);
+        if (!linkColumn) this.run("UPDATE files SET replaces = ? WHERE id = ?", replaced.id, id);
         this.run("UPDATE files SET replaced_by = ? WHERE id = ?", id, replaced.id);
-        // 열린 결재가 옛 판을 근거 자료로 가리키면 새 판으로 옮긴다(D5-7: 카드가 옛 글을 계속 가리켰다). 결재의 판(updated_at)은 올리지 않는다:
-        // 대표가 고르던 답을 '바뀐 결재'로 돌려보내지 않고, 아직 나가지 않은 결재 알림이 낡은 것으로 지워지지 않게 한다. 화면은 결재 사건으로 다시 읽는다.
-        for (const row of this.rows("SELECT id FROM decisions WHERE project_id = ? AND status = 'open' AND file_id = ?", input.projectId, replaced.id)) {
-          this.run("UPDATE decisions SET file_id = ? WHERE id = ?", id, row.id);
-          this.emit({ type: "decision", decision: this.requireDecision(row.id as string) });
+        if (chained) {
+          // 0.2.10: 서버가 고른 판은 기록에 남긴다(팀장이 file 의 unchain 으로 끊을 수 있다). 열린 결재의 근거 자료는 옮기지 않는다.
+          this.journalFileChain(id, "auto", input.projectId, [{ next: id, previous: replaced.id, basis: chained.basis }], createdAt);
+        } else {
+          // 열린 결재가 옛 판을 근거 자료로 가리키면 새 판으로 옮긴다(D5-7: 카드가 옛 글을 계속 가리켰다). 결재의 판(updated_at)은 올리지 않는다:
+          // 대표가 고르던 답을 '바뀐 결재'로 돌려보내지 않고, 아직 나가지 않은 결재 알림이 낡은 것으로 지워지지 않게 한다. 화면은 결재 사건으로 다시 읽는다.
+          for (const row of this.rows("SELECT id FROM decisions WHERE project_id = ? AND status = 'open' AND file_id = ?", input.projectId, replaced.id)) {
+            this.run("UPDATE decisions SET file_id = ? WHERE id = ?", id, row.id);
+            this.emit({ type: "decision", decision: this.requireDecision(row.id as string) });
+          }
         }
       }
       refreshFileSearchIndex(this.db, { fileId: id, limit: 1 });
       const file = this.getFile(id)!;
       this.emit({ type: "file", file });
-      return file;
+      return { file, ...(chained ? { chained: { basis: chained.basis, previous: this.getFile(chained.previous.id)!, versions: this.fileVersionCount(input.projectId, id) } } : {}), ...(ambiguous?.length ? { ambiguous } : {}) };
     });
+  }
+
+  /** 이 판까지의 판 수(앞 판을 따라 센다). 본문·html 을 읽지 않는다. */
+  private fileVersionCount(projectId: string, id: string): number {
+    let count = 1;
+    const seen = new Set([id]);
+    for (let at = this.fileLinkOf(projectId, id)?.replaces as string | null | undefined; at && !seen.has(at); at = this.fileLinkOf(projectId, at)?.replaces as string | null | undefined) {
+      seen.add(at);
+      count++;
+    }
+    return count;
+  }
+
+  /** 0.2.10 자동 잇기의 후보: 같은 팀장이 14일 안에 올린 아직 최신인 판. 본문·html 을 읽지 않는다(판 연결은 덮는 색인에서 본다). */
+  private fileChainHeads(projectId: string, memberId: string, at: string): ChainFile[] {
+    const since = new Date(Date.parse(at) - VERSION_WINDOW_MS).toISOString();
+    const latest = this.fileRevisions.index
+      ? "NOT EXISTS (SELECT 1 FROM files r INDEXED BY files_revisions WHERE r.project_id = f.project_id AND r.id = f.id AND r.replaced_by IS NOT NULL)"
+      : "f.replaced_by IS NULL";
+    return this.rows(`SELECT f.id, f.project_id, f.member_id, f.kind, f.title, f.created_at, f.sort_order FROM files f WHERE f.project_id = ? AND f.member_id = ? AND f.created_at >= ? AND ${latest}`, projectId, memberId, since)
+      .map((r) => ({ id: r.id as string, projectId: r.project_id as string, memberId: r.member_id as string, kind: (r.kind as string | null) ?? null, title: r.title as string, createdAt: r.created_at as string, replaces: null, replacedBy: null, order: r.sort_order as number }));
+  }
+
+  /** 서버가 고른 판 잇기를 적는다. 기록 표가 없으면(만들지 못한 DB) 적지 않는다: 잇기는 그대로 하고, 정리 적용만 표를 요구한다. */
+  private journalFileChain(batchId: string, source: "auto" | "tidy", projectId: string, links: { next: string; previous: string; basis: string }[], at: string): void {
+    if (!this.fileRevisions.journal) return;
+    for (const link of links) {
+      this.run("INSERT INTO file_chain_journal (batch_id, source, project_id, file_id, replaces, basis, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", batchId, source, projectId, link.next, link.previous, link.basis, at);
+    }
+  }
+
+  /**
+   * 0.2.10 file 도구 unchain: 이 판과 앞 판의 잇기를 끊는다(서버가 잘못 이었을 때). 두 자료는 그대로 남고 각자 최신 판이 된다.
+   * 열린 결재의 근거 자료는 건드리지 않는다. 권한(직원은 자기가 올린 판만)은 도구가 본다.
+   */
+  unchainFile(id: string): { file: FileDoc; previous: FileDoc | null } {
+    return this.transaction(() => {
+      const file = this.getFile(id);
+      if (!file) throw new ApiError(404, `자료를 찾을 수 없습니다: ${id}`, "file_not_found");
+      if (!file.replaces) throw new ApiError(409, `앞 판에 이어진 자료가 아닙니다: ${id}`, "file_not_chained");
+      const previousId = file.replaces;
+      const previous = this.getFile(previousId);
+      this.run("UPDATE files SET replaces = NULL WHERE id = ?", id);
+      if (previous?.replacedBy === id) this.run("UPDATE files SET replaced_by = NULL WHERE id = ?", previousId);
+      if (this.fileRevisions.journal) this.run("UPDATE file_chain_journal SET undone_at = ? WHERE file_id = ? AND replaces = ? AND undone_at IS NULL", nowIso(), id, previousId);
+      const after = this.getFile(id)!;
+      const before = previous ? this.getFile(previousId) : null;
+      this.emit({ type: "file", file: after });
+      if (before) this.emit({ type: "file", file: before });
+      return { file: after, previous: before };
+    });
+  }
+
+  /** 0.2.10 file 도구 find: 프로젝트의 최신 판(옛 판 빼고) 가운데 제목에 낱말이 모두 든 것, 새것부터. 본문·html 을 읽지 않는다. */
+  findLatestFiles(projectId: string, query: string, limit = 20): { files: (ChainFile & { who: string; versions: number })[]; more: number } {
+    const links = this.fileLinksOf(projectId);
+    const words = baseTitle(query).split(" ").filter(Boolean);
+    const rows = this.rows("SELECT id, project_id, member_id, who, kind, title, created_at FROM files WHERE project_id = ? ORDER BY created_at DESC, rowid DESC", projectId);
+    const found = rows.filter((r) => !links.get(r.id as string)?.replaced_by && words.every((w) => baseTitle(r.title as string).includes(w)));
+    const versions = (id: string) => {
+      let n = 1;
+      const seen = new Set([id]);
+      for (let at = links.get(id)?.replaces as string | null | undefined; at && !seen.has(at); at = links.get(at)?.replaces as string | null | undefined) { seen.add(at); n++; }
+      return n;
+    };
+    return {
+      files: found.slice(0, limit).map((r) => ({ id: r.id as string, projectId: r.project_id as string, memberId: (r.member_id as string | null) ?? null, who: r.who as string, kind: (r.kind as string | null) ?? null, title: r.title as string, createdAt: r.created_at as string, replaces: (links.get(r.id as string)?.replaces as string | null | undefined) ?? null, replacedBy: null, versions: versions(r.id as string) })),
+      more: Math.max(0, found.length - limit),
+    };
+  }
+
+  /** 0.2.10 iamceo files tidy: 계획에 쓰는 자료 모양(보관하지 않은 프로젝트, 본문·html 은 읽지 않는다). */
+  fileChainFiles(projectId?: string): ChainFile[] {
+    const projects = projectId ? [this.requireProject(projectId)] : this.listProjects();
+    if (projectId && projects[0]!.archived) throw new ApiError(404, "프로젝트를 찾을 수 없습니다", "project_not_found");
+    return projects.flatMap((project) => {
+      const links = this.fileLinksOf(project.id);
+      return this.rows("SELECT id, project_id, member_id, kind, title, created_at, sort_order FROM files WHERE project_id = ?", project.id).map((r) => ({
+        id: r.id as string, projectId: r.project_id as string, memberId: (r.member_id as string | null) ?? null, kind: (r.kind as string | null) ?? null,
+        title: r.title as string, createdAt: r.created_at as string, order: r.sort_order as number,
+        replaces: (links.get(r.id as string)?.replaces as string | null | undefined) ?? null, replacedBy: (links.get(r.id as string)?.replaced_by as string | null | undefined) ?? null,
+      }));
+    });
+  }
+
+  planFileTidy(projectId?: string): TidyPlan {
+    return planTidy(this.fileChainFiles(projectId));
+  }
+
+  /**
+   * 0.2.10 iamceo files tidy --apply: 지금 다시 계산한 계획이 확인한 계획(planId)과 같을 때만 한 거래로 잇고 기록(되돌리기용)을 남긴다.
+   * 소급해 잇는 판은 열린 결재의 근거 자료를 옮기지 않는다(대표가 이미 보고 있는 카드의 근거를 바꾸지 않는다).
+   */
+  applyFileTidy(planId: string, projectId?: string): { batchId: string | null; plan: TidyPlan } {
+    if (!this.fileRevisions.columns || !this.fileRevisions.journal) throw new ApiError(503, "판 정리 기록 표가 없어 적용하지 않았습니다. 서버를 다시 시작한 뒤 다시 하세요", "file_tidy_unavailable");
+    const result = this.transaction(() => {
+      const plan = this.planFileTidy(projectId);
+      if (plan.planId !== planId) throw new ApiError(409, "확인한 뒤로 자료가 바뀌었습니다. 다시 확인(iamceo files tidy)한 뒤 새 계획 번호로 적용하세요", "file_tidy_plan_changed");
+      if (!plan.links.length) return { batchId: null, plan };
+      const batchId = newId("tb_");
+      const at = nowIso();
+      for (const link of plan.links) {
+        const set = this.db.query("UPDATE files SET replaces = ? WHERE id = ? AND project_id = ? AND replaces IS NULL").run(link.previous.id, link.next.id, link.projectId).changes;
+        const back = this.db.query("UPDATE files SET replaced_by = ? WHERE id = ? AND project_id = ? AND replaced_by IS NULL").run(link.next.id, link.previous.id, link.projectId).changes;
+        if (set !== 1 || back !== 1) throw new ApiError(409, "확인한 뒤로 자료가 바뀌었습니다. 다시 확인한 뒤 적용하세요", "file_tidy_plan_changed");
+        this.journalFileChain(batchId, "tidy", link.projectId, [{ next: link.next.id, previous: link.previous.id, basis: link.basis }], at);
+      }
+      for (const link of plan.links) this.emit({ type: "file", file: this.getFile(link.next.id)! });
+      return { batchId, plan };
+    }, "immediate");
+    return result;
+  }
+
+  /** 0.2.10 iamceo files tidy --undo: 그 묶음이 이은 판 가운데 아직 그대로인 것만 푼다. */
+  undoFileTidy(batchId: string): { undone: number; skipped: number } {
+    if (!this.fileRevisions.journal) throw new ApiError(404, `판 정리 기록을 찾을 수 없습니다: ${batchId}`, "file_tidy_batch_not_found");
+    return this.transaction(() => {
+      const rows = this.rows("SELECT seq, project_id, file_id, replaces, undone_at FROM file_chain_journal WHERE batch_id = ? AND source = 'tidy' ORDER BY seq", batchId);
+      if (!rows.length) throw new ApiError(404, `판 정리 기록을 찾을 수 없습니다: ${batchId}`, "file_tidy_batch_not_found");
+      const at = nowIso();
+      let undone = 0, skipped = 0;
+      for (const row of rows) {
+        if (row.undone_at) continue;
+        const next = this.fileLinkOf(row.project_id as string, row.file_id as string);
+        const previous = this.fileLinkOf(row.project_id as string, row.replaces as string);
+        if (next?.replaces !== row.replaces || previous?.replaced_by !== row.file_id) { skipped++; continue; }
+        this.run("UPDATE files SET replaces = NULL WHERE id = ?", row.file_id);
+        this.run("UPDATE files SET replaced_by = NULL WHERE id = ?", row.replaces);
+        this.run("UPDATE file_chain_journal SET undone_at = ? WHERE seq = ?", at, row.seq);
+        undone++;
+        this.emit({ type: "file", file: this.getFile(row.file_id as string)! });
+      }
+      return { undone, skipped };
+    }, "immediate");
+  }
+
+  /** 0.2.10 iamceo files tidy(바꾸지 않음): 계획 요약과 최근 적용 묶음. 서버를 거치든(GET /api/file-tidy) 꺼진 홈에서 바로 열든 같은 모양이다. */
+  fileTidyReport(projectId?: string, showTitles = false): TidyReport & { batches: FileTidyBatch[] } {
+    const files = this.fileChainFiles(projectId);
+    const names = new Map(this.listProjects({ includeArchived: true }).map((p) => [p.id, p.name]));
+    return { ...tidyReport(planTidy(files), files, names, showTitles), batches: this.listFileTidyBatches() };
+  }
+
+  /** 0.2.10 iamceo files tidy --apply 의 응답 모양. */
+  applyFileTidyReport(planId: string, projectId?: string): { batchId: string | null; links: number; families: number } {
+    const { batchId, plan } = this.applyFileTidy(planId, projectId);
+    return { batchId, links: plan.links.length, families: tidyFamilies(plan.links).length };
+  }
+
+  /** 0.2.10: 최근 판 정리 묶음(새것부터). */
+  listFileTidyBatches(limit = 10): FileTidyBatch[] {
+    if (!this.fileRevisions.journal) return [];
+    return this.rows(`SELECT batch_id, MIN(created_at) AS created_at, COUNT(*) AS links, SUM(undone_at IS NOT NULL) AS undone FROM file_chain_journal
+      WHERE source = 'tidy' GROUP BY batch_id ORDER BY MIN(seq) DESC LIMIT ?`, limit)
+      .map((r) => ({ batchId: r.batch_id as string, createdAt: r.created_at as string, links: Number(r.links), undone: Number(r.undone) }));
   }
 
   // ---- 첨부 ----

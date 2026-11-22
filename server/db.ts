@@ -1002,23 +1002,45 @@ export function ensureRevisionColumns(db: Database): void {
       if (!columns.some(c => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
     }
   })();
-  // 판 갈이 열이 생긴 뒤에 만든다(LIVE_INDEXES 는 이 열보다 먼저 돈다). 실패해도 서버는 뜬다: 색인은 빠르게 할 뿐 결과를 바꾸지 않는다.
-  const failed: string[] = [];
-  for (const sql of REVISION_INDEXES) {
-    try { db.exec(sql); }
-    catch { failed.push(/INDEX IF NOT EXISTS (\S+)/.exec(sql)?.[1] ?? sql); }
-  }
-  if (failed.length) console.warn(`[db] 보조 색인을 만들지 못했습니다(다음 시작 때 다시 합니다): ${failed.join(", ")}`);
 }
 
 /**
- * 0.2.10: 자료의 판 갈이 열(replaces·replaced_by)만 따로 읽는 부분 색인. 두 열은 ALTER 로 html(아티팩트 원본) 뒤에 붙어,
- * 자료 목록 조회가 그 열을 같이 읽으면 판 갈이를 쓴 자료마다 html 넘침 페이지를 끝까지 지나간다(사본 측정: 목록 2.4ms → 28ms).
- * 목록은 이 색인만 읽는 조회로 판 갈이를 붙인다(Store.listFiles). LIVE_INDEXES 와 같이 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+ * 0.2.10: 자료 판 잇기의 보조 색인과 기록 표. ensureRevisionColumns 뒤에 만든다(판 열이 있어야 색인을 만든다).
+ * 색인·표와 같은 까닭으로 MIGRATIONS 에 넣지 않는다: 판 번호를 올리면 이전 판 서버가 이 DB 를 열지 못한다. 이전 판 서버는 모른 채 지나간다
+ * (색인은 SQLite 가 알아서 고치고, 기록 표는 읽지 않는다. 프로젝트를 지우면 기록 행은 외래 키로 함께 지워진다).
+ * - files_revisions: 판 연결(replaces·replaced_by)만 읽는 덮는 색인. 판 열은 html 뒤에 ALTER 로 붙어 있어 표에서 읽으면
+ *   큰 html 의 넘침 페이지를 끝까지 따라간다(실측: 판이 이어진 아티팩트가 많으면 자료 목록 2.4 ms → 28 ms). store.ts 가 INDEXED BY 로 고른다.
+ * - files_member_recent: 자동 잇기가 같은 팀장의 최근 자료만 본다.
+ * - file_chain_journal: 서버가 고른 판 잇기(자동 잇기 source='auto', iamceo files tidy source='tidy')의 기록. 정리 되돌리기·팀장의 잇기 끊기가 쓴다.
+ * 실패해도 서버는 뜬다(색인이 없으면 예전처럼 표에서 읽는다: 느릴 뿐 결과는 같다. 기록 표가 없으면 정리 적용을 거절한다). 다음 시작 때 다시 한다.
  */
-export const REVISION_INDEXES: readonly string[] = [
-  `CREATE INDEX IF NOT EXISTS files_revisions ON files(project_id, id, replaces, replaced_by) WHERE replaces IS NOT NULL OR replaced_by IS NOT NULL`,
+export const FILE_VERSION_SCHEMA: readonly string[] = [
+  `CREATE INDEX IF NOT EXISTS files_revisions ON files(project_id, id, replaces, replaced_by)`,
+  `CREATE INDEX IF NOT EXISTS files_member_recent ON files(project_id, member_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS file_chain_journal (
+     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+     batch_id TEXT NOT NULL,
+     source TEXT NOT NULL,
+     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     file_id TEXT NOT NULL,
+     replaces TEXT NOT NULL,
+     basis TEXT NOT NULL,
+     created_at TEXT NOT NULL,
+     undone_at TEXT
+   )`,
+  `CREATE INDEX IF NOT EXISTS file_chain_journal_batch ON file_chain_journal(batch_id)`,
+  `CREATE INDEX IF NOT EXISTS file_chain_journal_file ON file_chain_journal(file_id)`,
 ];
+
+export function ensureFileVersionSchema(db: Database): string[] {
+  const failed: string[] = [];
+  for (const sql of FILE_VERSION_SCHEMA) {
+    try { db.exec(sql); }
+    catch { failed.push(/(?:INDEX|TABLE) IF NOT EXISTS (\S+)/.exec(sql)?.[1] ?? sql); }
+  }
+  if (failed.length) console.warn(`[db] 자료 판 색인·기록 표를 만들지 못했습니다(다음 시작 때 다시 합니다): ${failed.join(", ")}`);
+  return failed;
+}
 
 const PRE_MIGRATION_KEEP = 3;
 const PRE_MIGRATION_KEEP_MS = 86_400_000;
@@ -1119,6 +1141,8 @@ export function openDb(path: string): Database {
     ensureProjectRules(db);
     // 0.2.7 묶음 4: 결재·자료의 판 갈이와 결재 답 첨부. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
     ensureRevisionColumns(db);
+    // 0.2.10: 자료 판 잇기의 색인과 기록 표. 판 열 뒤에 만든다. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
+    ensureFileVersionSchema(db);
     // 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다(방금 만든 사본은 늘 가장 최근 것이다).
     // 11-22: 예전에는 번호 이주가 실제로 돈 시작 때만 정리했는데, v33 뒤의 스키마 변경은 모두 ensure* 라 이주가 없어
     // v12~v32 사본 11개(263 MB)가 그대로 남았다. 이제 DB 를 열 때마다 본다(파일 목록 한 번이라 시작 시간에 영향이 없다).

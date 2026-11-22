@@ -21488,6 +21488,28 @@
         }
       }
     },
+    "원본" : {
+      "comment" : "0.2.10 자료 판 잇기: 아티팩트와 같은 판의 원본 파일(pptx·pdf 등) 묶음의 이름표",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Original"
+          }
+        }
+      }
+    },
+    "원본 %@" : {
+      "comment" : "0.2.10 자료 판 잇기: 원본 파일이 함께 든 페이지의 목록 표시(원본 PPTX)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Original %@"
+          }
+        }
+      }
+    },
     "이전 판 %lld개" : {
       "comment" : "0.2.7 묶음 4: 결재·할 일·자료 고치기와 결재 답 첨부",
       "localizations" : {

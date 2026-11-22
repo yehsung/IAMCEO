@@ -25,6 +25,8 @@ const USAGE = `쓰는 법: iamceo <명령>
                          내가 띄운 CLI 를 팀장으로 등록하고 연결 명령을 알려 준다
   import <덤프.json> [--name 이름] [--cwd 폴더]
                          기존 운영판 덤프를 프로젝트로 가져온다
+  files tidy [--project ID] [--show-titles] | --apply --plan 번호 | --undo 번호
+                         쌓인 자료 판(v1…v11)을 판 묶음으로 접는 계획을 보여 주고(바꾸지 않음), 확인한 계획을 적용하거나 되돌린다
   backup [--directory 경로] 검증된 DB·첨부·설정 백업
   restore <백업폴더> --destination 경로 [--clone]
                          비어 있거나 없는 홈에 복원하고 발신을 격리한다
@@ -67,6 +69,8 @@ const USAGE_EN = `Usage: iamceo <command>
                          register a CLI you started yourself as staff and print the commands to connect it
   import <dump.json> [--name name] [--cwd folder]
                          import an old board dump as a project
+  files tidy [--project ID] [--show-titles] | --apply --plan N | --undo N
+                         show how piled-up file versions (v1…v11) would fold into version groups (changes nothing), then apply or undo it
   backup [--directory path] checked backup of the database, attachments and settings
   restore <backup folder> --destination path [--clone]
                          restore into an empty or missing home with outgoing delivery switched off
@@ -705,6 +709,150 @@ async function join_(args: string[]): Promise<void> {
     `2. Rules file: ${rulesFile}\n   For a new session: claude --append-system-prompt-file ${shellQuote(rulesFile)}\n   In a session that is already running, reconnect with /mcp, then ask it to read and follow this file.`));
 }
 
+// ---- 0.2.10 files tidy: 쌓인 판 묶음을 한 번 정리한다 ----
+/** 서버(GET /api/file-tidy)와 꺼진 홈(Store.fileTidyReport)이 같은 모양으로 준다. */
+export interface CliTidyReport {
+  planId: string;
+  files: number;
+  links: number;
+  families: number;
+  projects: { id: string; name: string; links: number; families: number; sizes: number[]; titles?: string[][] }[];
+  basis: Record<string, number>;
+  skipped: Record<string, number>;
+  batches: { batchId: string; createdAt: string; links: number; undone: number }[];
+}
+export type CliTidyAction = { kind: "plan"; projectId?: string; titles: boolean } | { kind: "apply"; planId: string; projectId?: string } | { kind: "undo"; batchId: string };
+export type CliTidyResult = { kind: "plan"; report: CliTidyReport } | { kind: "apply"; batchId: string | null; links: number; families: number } | { kind: "undo"; undone: number; skipped: number };
+
+const TIDY_USAGE = () => say("쓰는 법: iamceo files tidy [--project 프로젝트ID] [--show-titles] [--json] | iamceo files tidy --apply --plan 계획번호 [--project 프로젝트ID] | iamceo files tidy --undo 묶음번호",
+  "Usage: iamceo files tidy [--project projectID] [--show-titles] [--json] | iamceo files tidy --apply --plan planNumber [--project projectID] | iamceo files tidy --undo batchNumber");
+
+async function filesCommand(args: string[]): Promise<void> {
+  const [sub, ...rest] = args;
+  if (sub !== "tidy") throw new CliError(TIDY_USAGE());
+  const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: {
+    project: { type: "string" }, "show-titles": { type: "boolean" }, apply: { type: "boolean" }, plan: { type: "string" }, undo: { type: "string" }, json: { type: "boolean" },
+  } });
+  if (positionals.length) throw new CliError(TIDY_USAGE());
+  if (values.undo !== undefined && (values.apply || values.plan !== undefined || values.project !== undefined || values["show-titles"])) throw new CliError(TIDY_USAGE());
+  if (values.apply && values.plan === undefined) throw new CliError(say("--apply 에는 확인한 계획 번호가 필요합니다. 먼저 iamceo files tidy 로 계획을 보고 그 번호를 --plan 에 넣으세요.",
+    "--apply needs the plan number you checked. Run iamceo files tidy first and put its number in --plan."));
+  if (values.plan !== undefined && !values.apply) throw new CliError(TIDY_USAGE());
+  if (values.apply && values["show-titles"]) throw new CliError(TIDY_USAGE());
+  const action: CliTidyAction = values.undo !== undefined ? { kind: "undo", batchId: values.undo }
+    : values.apply ? { kind: "apply", planId: values.plan!, ...(values.project ? { projectId: values.project } : {}) }
+    : { kind: "plan", titles: !!values["show-titles"], ...(values.project ? { projectId: values.project } : {}) };
+  const result = await runFileTidy(action);
+  console.log(values.json ? JSON.stringify(result, null, 2) : formatTidy(result, action));
+}
+
+/**
+ * 데이터 폴더를 아무도 쥐지 않았으면(서버가 꺼짐) 잠금을 쥐고 DB 를 바로 연다. 켜져 있는 서버가 쥐고 있으면 그 서버를 거친다
+ * (이 Mac 의 loopback 으로만. 서버가 같은 거래 안에서 잇고 앱에 자료 사건을 보낸다). 둘이 같은 DB 를 동시에 쓰지 않는다.
+ */
+export async function runFileTidy(action: CliTidyAction, request: typeof fetch = fetch): Promise<CliTidyResult> {
+  const { acquireHomeOwner } = await import("../server/home-owner.ts");
+  let owner: ReturnType<typeof acquireHomeOwner> | null = null;
+  try { owner = acquireHomeOwner(homeDir()); }
+  catch (error) { if ((error as { code?: string }).code !== "home_in_use") throw error; }
+  if (!owner) return fileTidyViaServer(loadConfig(), action, request);
+  try {
+    const config = loadConfig();
+    if (!existsSync(config.dbPath)) throw new CliError(say(`데이터가 없습니다: ${config.dbPath}`, `There is no data yet: ${config.dbPath}`));
+    const [{ Bus }, { openDb }, { Store, ApiError }] = await Promise.all([import("../server/bus.ts"), import("../server/db.ts"), import("../server/store.ts")]);
+    const db = openDb(config.dbPath);
+    try {
+      const store = new Store(db, new Bus());
+      try {
+        if (action.kind === "plan") return { kind: "plan", report: store.fileTidyReport(action.projectId, action.titles) };
+        if (action.kind === "apply") return { kind: "apply", ...store.applyFileTidyReport(action.planId, action.projectId) };
+        return { kind: "undo", ...store.undoFileTidy(action.batchId) };
+      } catch (error) {
+        if (error instanceof ApiError) throw new CliError(error.message);
+        throw error;
+      }
+    } finally { db.close(); }
+  } finally { owner.release(); }
+}
+
+export async function fileTidyViaServer(config: Config, action: CliTidyAction, request: typeof fetch = fetch): Promise<CliTidyResult> {
+  const query = action.kind === "plan" ? `?${new URLSearchParams({ ...(action.projectId ? { projectId: action.projectId } : {}), ...(action.titles ? { titles: "1" } : {}) })}` : "";
+  const url = localServerUrl(config, action.kind === "undo" ? "/api/file-tidy/undo" : `/api/file-tidy${query === "?" ? "" : query}`);
+  const body = action.kind === "apply" ? { planId: action.planId, ...(action.projectId ? { projectId: action.projectId } : {}) } : action.kind === "undo" ? { batchId: action.batchId } : null;
+  let response: Response;
+  try {
+    response = await request(url, { method: body ? "POST" : "GET", headers: { Authorization: `Bearer ${config.accessCode}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}), redirect: "error", signal: AbortSignal.timeout(60_000) });
+  } catch {
+    throw new CliError(action.kind === "plan" ? say("켜져 있는 서버에 묻지 못했습니다. 서버가 켜져 있는지 확인하고 다시 실행하세요.", "Could not reach the running server. Check that it is running and try again.")
+      : say("결과를 확인하지 못했습니다. iamceo files tidy 로 지금 상태를 다시 보세요(적용은 한 거래라 반쯤 되지는 않습니다).", "Could not confirm the result. Run iamceo files tidy to see the current state (applying is one transaction, so it never half-happens)."));
+  }
+  if (response.status === 404 && (await response.clone().json().catch(() => null) as { code?: string } | null)?.code === "route_not_found") {
+    throw new CliError(say("켜져 있는 서버가 판 정리를 모릅니다(옛 버전). 서버를 올리거나 끈 뒤 다시 실행하세요.", "The running server does not know this tidy-up (an older version). Update or stop the server and run this again."));
+  }
+  const parsed = await response.json().catch(() => null) as Record<string, unknown> | null;
+  if (!response.ok) throw new CliError(typeof parsed?.error === "string" ? parsed.error : say(`서버 오류(${response.status})`, `Server error (${response.status})`));
+  if (action.kind === "plan") return { kind: "plan", report: parsed as unknown as CliTidyReport };
+  if (action.kind === "apply") return { kind: "apply", batchId: (parsed?.batchId as string | null) ?? null, links: Number(parsed?.links ?? 0), families: Number(parsed?.families ?? 0) };
+  return { kind: "undo", undone: Number(parsed?.undone ?? 0), skipped: Number(parsed?.skipped ?? 0) };
+}
+
+const TIDY_BASIS: Record<string, [string, string]> = {
+  "marker+full": ["판 표시·같은 제목", "version mark, same title"],
+  "marker+stem": ["판 표시·같은 앞부분", "version mark, same leading title"],
+  "same-title": ["같은 제목으로 다시 올림", "re-uploaded with the same title"],
+};
+const TIDY_SKIPS: Record<string, [string, string]> = {
+  ambiguous: ["이을 판이 여럿", "several candidates"],
+  "no-match": ["맞는 앞 판 없음", "no matching earlier version"],
+  "too-short": ["제목이 짧음", "title too short"],
+  "ordinal-tail": ["회차·편 번호", "episode or part number"],
+  "same-number-different-tail": ["같은 판 번호에 다른 꼬리", "same number, different tail"],
+  "version-went-down": ["판 번호가 거꾸로", "version went down"],
+  "different-date": ["날짜가 다름", "different dates"],
+  "no-kind": ["종류 없는 옛 자료", "old file without a kind"],
+};
+
+export function formatTidy(result: CliTidyResult, action: CliTidyAction): string {
+  if (result.kind === "apply") {
+    if (!result.batchId) return say("이을 판이 없어 바꾼 것이 없습니다.", "Nothing to link, so nothing changed.");
+    return say(`판 정리를 적용했습니다: 판 묶음 ${result.families}개, 옛 판 ${result.links}개를 최신 판 아래로 접었습니다. 열린 결재의 근거 자료는 그대로입니다.\n되돌리기: iamceo files tidy --undo ${result.batchId}`,
+      `Tidy-up applied: ${result.families} version group(s), ${result.links} older version(s) folded under the latest one. Open decisions keep pointing at the same files.\nTo undo: iamceo files tidy --undo ${result.batchId}`);
+  }
+  if (result.kind === "undo") {
+    return say(`판 정리를 되돌렸습니다: 잇기 ${result.undone}개를 풀었습니다${result.skipped ? `(그사이 바뀐 ${result.skipped}개는 그대로 뒀습니다)` : ""}.`,
+      `Tidy-up undone: ${result.undone} link(s) removed${result.skipped ? ` (${result.skipped} that changed in the meantime were left as they are)` : ""}.`);
+  }
+  const report = result.report;
+  const lines: string[] = [];
+  lines.push(say(`판 정리 계획(아직 바꾼 것 없음) · 계획 번호 ${report.planId}`, `Version tidy-up plan (nothing changed yet) · plan number ${report.planId}`));
+  if (!report.links) lines.push(say(`  이을 판이 없습니다(자료 ${report.files}개).`, `  Nothing to link (${report.files} file(s)).`));
+  for (const project of report.projects) {
+    const sizes = project.sizes.slice(0, 8).join(", ") + (project.sizes.length > 8 ? ", …" : "");
+    lines.push(say(`  ${project.name}: 판 묶음 ${project.families}개 · 옛 판 ${project.links}개를 최신 판 아래로 접음(묶음마다 판 수 ${sizes})`,
+      `  ${project.name}: ${project.families} group(s) · ${project.links} older version(s) folded (versions per group ${sizes})`));
+    for (const family of project.titles ?? []) lines.push(`    - ${family.map((title) => title.replace(/\s+/g, " ").trim()).join("  →  ")}`);
+  }
+  if (report.links) {
+    lines.push(say(`  합계: 판 묶음 ${report.families}개 · 옛 판 ${report.links}개 / 자료 ${report.files}개`, `  Total: ${report.families} group(s) · ${report.links} older version(s) / ${report.files} file(s)`));
+    const basis = Object.entries(report.basis).map(([key, n]) => `${say(TIDY_BASIS[key]?.[0] ?? key, TIDY_BASIS[key]?.[1] ?? key)} ${n}`).join(" · ");
+    lines.push(say(`  근거: ${basis}`, `  Basis: ${basis}`));
+  }
+  const skipped = Object.entries(report.skipped).filter(([key, n]) => TIDY_SKIPS[key] && n).map(([key, n]) => `${say(TIDY_SKIPS[key]![0], TIDY_SKIPS[key]![1])} ${n}`).join(" · ");
+  if (skipped) lines.push(say(`  잇지 않은 까닭(새 자료로 본 것 빼고): ${skipped}`, `  Not linked because (files taken as new left out): ${skipped}`));
+  if (report.links) {
+    const project = action.kind === "plan" && action.projectId ? ` --project ${shellQuote(action.projectId)}` : "";
+    lines.push(say(`열린 결재의 근거 자료는 옮기지 않습니다. 적용: iamceo files tidy --apply --plan ${report.planId}${project}`,
+      `Open decisions keep their files. To apply: iamceo files tidy --apply --plan ${report.planId}${project}`));
+    if (action.kind === "plan" && !action.titles) lines.push(say("묶음마다 제목을 보려면 --show-titles", "Add --show-titles to see the titles in each group"));
+  }
+  for (const batch of report.batches.slice(0, 3)) {
+    lines.push(say(`지난 적용 ${batch.batchId} (${batch.createdAt}): 잇기 ${batch.links}개${batch.undone ? `, 되돌림 ${batch.undone}개` : ""} · 되돌리기 iamceo files tidy --undo ${batch.batchId}`,
+      `Earlier tidy-up ${batch.batchId} (${batch.createdAt}): ${batch.links} link(s)${batch.undone ? `, ${batch.undone} undone` : ""} · undo with iamceo files tidy --undo ${batch.batchId}`));
+  }
+  return lines.join("\n");
+}
+
 // ---- import ----
 async function importDump(args: string[]): Promise<void> {
   const { acquireHomeOwner } = await import("../server/home-owner.ts");
@@ -1231,6 +1379,8 @@ async function main(argv: string[]): Promise<void> {
       return open();
     case "import":
       return importDump(rest);
+    case "files":
+      return filesCommand(rest);
     case "service":
       return service(rest);
     case "upgrade":

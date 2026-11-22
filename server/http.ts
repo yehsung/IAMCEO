@@ -1224,6 +1224,21 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       if (todo.done === body.done) return Response.json(todo);
       return Response.json(await orch.setTodoDone(id!, body.done, body));
     }),
+    // 0.2.10 iamceo files tidy: 판 정리 계획(바꾸지 않음, 제목은 titles=1 일 때만)·적용(확인한 계획 번호가 지금 계획과 같을 때만)·되돌리기. 이 Mac 에서 온 요청만.
+    route("GET", "/api/file-tidy", (_req, url) => {
+      strictQuery(url, ["projectId", "titles"]);
+      const titles = url.searchParams.get("titles");
+      if (titles !== null && titles !== "1" && titles !== "0") throw new ApiError(400, "titles 값이 잘못되었습니다", "invalid_query");
+      return Response.json(store.fileTidyReport(url.searchParams.get("projectId") ?? undefined, titles === "1"), { headers: { "Cache-Control": "no-store" } });
+    }),
+    route("POST", "/api/file-tidy", async (req) => {
+      const body = await parseBody(req, z.strictObject({ planId: z.string().regex(/^[0-9a-f]{12}$/), projectId: z.string().min(1).optional() }));
+      return Response.json(store.applyFileTidyReport(body.planId, body.projectId));
+    }),
+    route("POST", "/api/file-tidy/undo", async (req) => {
+      const body = await parseBody(req, z.strictObject({ batchId: z.string().regex(/^tb_[A-Za-z0-9]+$/) }));
+      return Response.json(store.undoFileTidy(body.batchId));
+    }),
     route("GET", "/api/files/:id", (_req, url, [id]) => {
       strictQuery(url, []);
       const file = store.getFile(id!);
@@ -1726,6 +1741,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       if (path === "/api/diagnose") return diagnose(req, url, server);
       // B 묶음: 프로젝트 내보내기는 이 Mac 에서 온 요청만(대화 전체와 첨부 원본이 한 파일로 나간다).
       if (/^\/api\/projects\/[^/]+\/export$/.test(path) && !isLocalRequest(server.requestIP(req)?.address, req.headers)) return fail(403, "프로젝트 내보내기는 이 Mac 에서만 할 수 있습니다", "LOCAL_ONLY");
+      // 0.2.10: 판 정리(iamceo files tidy)는 이 Mac 의 명령줄이 부른다.
+      if ((path === "/api/file-tidy" || path.startsWith("/api/file-tidy/")) && !isLocalRequest(server.requestIP(req)?.address, req.headers)) return fail(403, "판 정리는 이 Mac 에서만 할 수 있습니다", "LOCAL_ONLY");
       if (path === "/api/push" || path.startsWith("/api/push/")) {
         return pushHandler ? pushHandler(req, url) : fail(501, "푸시를 지원하지 않습니다", "push_unsupported");
       }

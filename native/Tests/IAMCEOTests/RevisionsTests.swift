@@ -44,6 +44,40 @@ final class RevisionsTests: XCTestCase {
         XCTAssertNil(old.replaces); XCTAssertNil(old.replacedBy); XCTAssertNil(old.versions)
     }
 
+    // MARK: 0.2.10 자료 판 잇기(서버 자동 잇기·원본과 미리보기를 한 자료로)
+
+    func testServerChainedVersionsFoldLikeAnyOtherVersionChain() throws {
+        // 서버가 자동으로 이은 판·판 정리로 이은 판도 replaces·replacedBy·versions 로 온다(보통 판 갈이와 같은 모양).
+        let files = try decode([FileDoc].self, """
+        [{"id":"f_3","kind":"artifact","title":"분기 실적 발표 v3","replaces":"f_2","versions":3},
+         {"id":"f_2","kind":"artifact","title":"분기 실적 발표 v2","replaces":"f_1","replacedBy":"f_3"},
+         {"id":"f_1","kind":"artifact","title":"분기 실적 발표 v1","replacedBy":"f_2"}]
+        """)
+        XCTAssertEqual(FileVersions.listed(files).map(\.id), ["f_3"])
+        XCTAssertEqual(FileVersions.number(of: files[1], in: files), 2)
+        XCTAssertEqual(FileVersions.previous(of: files[0], in: files).map(\.id), ["f_2", "f_1"])
+    }
+
+    func testOriginalsAreTheNonPageNonImageAttachmentsOfAnArtifact() throws {
+        let page = try decode(FileDoc.self, """
+        {"id":"f_1","kind":"artifact","attachments":[
+          {"id":"a_1","name":"발표.pptx","mime":"application/vnd.openxmlformats-officedocument.presentationml.presentation","size":3},
+          {"id":"a_2","name":"표지.png","mime":"image/png","size":3,"isImage":true},
+          {"id":"a_3","name":"page.html","mime":"text/html","size":3}]}
+        """)
+        XCTAssertEqual(FileOriginals.of(page).map(\.id), ["a_1"])
+        XCTAssertEqual(FileOriginals.label(page), "PPTX")
+        // 아티팩트가 아닌 자료의 첨부는 원본 표시가 아니다(그 자료 자체다).
+        let doc = try decode(FileDoc.self, #"{"id":"f_2","kind":"document","attachments":[{"id":"a_1","name":"발표.pptx","mime":"x","size":3}]}"#)
+        XCTAssertEqual(FileOriginals.of(doc), [])
+        XCTAssertNil(FileOriginals.label(doc))
+        // 확장자가 없으면 칩만(목록 표시 없음). 예전 아티팩트(첨부 없음)는 그대로.
+        let bare = try decode(FileDoc.self, #"{"id":"f_3","kind":"artifact","attachments":[{"id":"a_1","name":"원본","mime":"application/octet-stream","size":3}]}"#)
+        XCTAssertEqual(FileOriginals.of(bare).map(\.id), ["a_1"])
+        XCTAssertNil(FileOriginals.label(bare))
+        XCTAssertEqual(FileOriginals.of(try decode(FileDoc.self, #"{"id":"f_4","kind":"artifact"}"#)), [])
+    }
+
     func testRequestsLeaveNewFieldsOutUnlessUsed() throws {
         let plain = try object(AnswerRequest(choice: "a", note: nil, batch: false, expectedVersion: "v"))
         XCTAssertNil(plain["fileIds"])

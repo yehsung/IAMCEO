@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile } from "../server/config.ts";
-import { openDb, REVISION_INDEXES } from "../server/db.ts";
+import { openDb, FILE_VERSION_SCHEMA } from "../server/db.ts";
 import { liteFile, startServer, windowWorkEvent, withCursor } from "../server/http.ts";
 import type { OrchestratorApi } from "../server/orchestrator-api.ts";
 import { STATE_WINDOW_DONE, Store } from "../server/store.ts";
@@ -91,13 +91,13 @@ describe("lite: 자료 본문을 DB 에서 읽지 않는다", () => {
     expect(JSON.stringify({ ...archivedLite, files: archivedLite.files.map(liteFile) })).toBe(JSON.stringify({ ...archivedFull, files: archivedFull.files.map(liteFile) }));
   });
 
-  test("판 갈이 열은 부분 색인만 읽는다(처음 여는 DB 에도 색인이 생긴다)", () => {
+  test("판 갈이 열은 덮는 색인만 읽는다(처음 여는 DB 에도 색인이 생긴다)", () => {
     const { db } = freshStore();
     const names = (db.query("SELECT name FROM sqlite_schema WHERE type='index'").all() as { name: string }[]).map(r => r.name);
-    for (const sql of REVISION_INDEXES) expect(names).toContain(/INDEX IF NOT EXISTS (\S+)/.exec(sql)![1]!);
+    for (const sql of FILE_VERSION_SCHEMA.filter(sql => sql.includes("INDEX IF NOT EXISTS"))) expect(names).toContain(/INDEX IF NOT EXISTS (\S+)/.exec(sql)![1]!);
     const source = require("node:fs").readFileSync(require("node:path").join(import.meta.dir, "..", "server", "store.ts"), "utf8") as string;
-    const sql = "SELECT id, replaces, replaced_by FROM files WHERE project_id = ? AND (replaces IS NOT NULL OR replaced_by IS NOT NULL)";
-    expect(source).toContain(sql);
+    expect(source).toContain("SELECT id, replaces, replaced_by FROM ${this.revisionSource} WHERE project_id = ? AND (replaces IS NOT NULL OR replaced_by IS NOT NULL)");
+    const sql = "SELECT id, replaces, replaced_by FROM files INDEXED BY files_revisions WHERE project_id = ? AND (replaces IS NOT NULL OR replaced_by IS NOT NULL)";
     const plan = (db.query(`EXPLAIN QUERY PLAN ${sql}`).all("p") as { detail: string }[]).map(r => r.detail).join(" | ");
     expect(plan).toContain("COVERING INDEX files_revisions");
   });

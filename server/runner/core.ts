@@ -1031,7 +1031,8 @@ export class CoreRunner implements FullRunner {
    * `/mcp` 를 넣고, `✓ iamceo` 가 보이거나 시간이 다 되면 창이 닫힐 때까지 Esc 를 하나씩 누른다(창이 보일 때만 누른다: 빈 화면의 Esc 는 뜻을 모른다).
    * 창이 끝내 열리지 않고 입력칸에 IAMCEO 가 넣은 `/mcp` 가 남았으면 그 글만 지운다. 창을 닫지 못하면 넣지 않고 다음 시도가 다시 닫아 본다(두 번이면 그만둔다).
    * 값(격리 서버 실측): core 의 terminal.send 가 턴 시작을 기다려 `/mcp` 넣기에 약 5초가 걸리고(그동안 창이 보인다), Esc 한 번에 닫힌다. 터미널마다 첫 전달이 그만큼 늦다.
-   * send 안에서만 부른다: 그동안 앱의 터미널 조작 임대는 잡히지 않는다(reserve 가 거절한다).
+   * send 안에서만 부른다: 그동안 앱의 터미널 조작 임대는 잡히지 않는다(reserve 가 거절한다). 그 사이 서버가 다시 켜져 창이 남으면 쓰기 결과를 모르는 봉투가
+   * 넣기를 막으므로, 다시 붙은 뒤의 복구 확인(inspectLocked)이 같은 규칙(closeGeminiMcpPanel)으로 창을 닫는다.
    */
   private async primeGeminiMcp(track: Track, terminal: CoreTerminal, current: string): Promise<{ ok: true; screen: string } | { ok: false; detail: string }> {
     const read = async (): Promise<string> => { this.validateTrack(track); return (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text; };
@@ -1063,11 +1064,7 @@ export class CoreRunner implements FullRunner {
         screen = await read();
       }
     }
-    for (let presses = 0; presses < 3 && geminiMcpPanel(screen).open; presses++) {
-      this.bump(track);
-      await this.call("terminal.keys", { terminal: terminal.address, keys: ["esc"] }, this.sendTimeoutMs);
-      for (let reads = 0; reads < 6; reads++) { await pause(100); screen = await read(); if (!geminiMcpPanel(screen).open) break; }
-    }
+    screen = (await this.closeGeminiMcpPanel(track, terminal, screen)).screen;
     if (geminiMcpPanel(screen).open) {
       const failures = (typeof track.geminiMcp === "number" ? track.geminiMcp : 0) + 1;
       // 두 번 닫지 못하면 그만둔다: 창이 남아 있으면 입력칸을 알아보지 못해(geminiDraft null) 넣지 않으니, 사람이 터미널에서 닫으면 이어진다.
@@ -1076,6 +1073,20 @@ export class CoreRunner implements FullRunner {
     }
     track.geminiMcp = "done";
     return { ok: true, screen };
+  }
+  /**
+   * Antigravity CLI 의 MCP 관리 창(geminiMcpPanel)이 보이는 동안만 Esc 를 하나씩 누른다(최대 셋, 누를 때마다 0.6초까지 다시 읽는다). 창이 아닌 화면에는 키를 보내지
+   * 않는다(승인·신뢰 창·슬래시 메뉴는 창으로 읽지 않는다, gemini-screen.ts). 누를 때마다 입력 세대를 올린다. 마지막으로 읽은 화면과 누른 수를 돌려준다.
+   */
+  private async closeGeminiMcpPanel(track: Track, terminal: CoreTerminal, current: string): Promise<{ screen: string; presses: number }> {
+    const read = async (): Promise<string> => { this.validateTrack(track); return (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text; };
+    let screen = current, presses = 0;
+    for (; presses < 3 && geminiMcpPanel(screen).open; presses++) {
+      this.bump(track);
+      await this.call("terminal.keys", { terminal: terminal.address, keys: ["esc"] }, this.sendTimeoutMs);
+      for (let reads = 0; reads < 6; reads++) { await new Promise<void>(resolve => setTimeout(resolve, 100)); screen = await read(); if (!geminiMcpPanel(screen).open) break; }
+    }
+    return { screen, presses };
   }
   /** 서버가 이 터미널에 넣으려는 전달 묶음의 표지를 적어 둔다(넣기 직전에 부른다: 결과를 모르게 끝나도 글은 들어갔을 수 있다). 최근 32개까지. */
   private noteGeminiSent(track: Track, bundleMarker: string | undefined): void {
@@ -1840,10 +1851,22 @@ export class CoreRunner implements FullRunner {
     const barrier = dispatch && this.deps.quiescence?.(member.id, dispatch);
     const originalWrite = barrier?.originalWrite ?? (dispatch?.transportState === "accepted" ? "settled" : dispatch?.transportState === "rejected" ? "rejected" : "unresolved");
     const externalInput = barrier?.externalInput ?? null;
-    const inputEpoch = track.epoch;
-    const screen = (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text;
+    let inputEpoch = track.epoch;
+    let screen = (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text;
     this.validateTrack(track);
     if (track.epoch !== inputEpoch) return unknown("input_epoch_changed");
+    // Antigravity CLI: 첫 전달 앞의 `/mcp`(primeGeminiMcp)가 연 MCP 관리 창이 남아 있다. 넣는 도중 서버가 다시 켜지면(배포·앱 업데이트) 봉투는 쓰기 결과를 모르는 채
+    // 남고, 그 울타리 때문에 넣기(send)가 창을 닫기 전에 멈춘다. 창이 입력칸을 가려 입력칸이 '모름'이면 대표가 다시 보내기를 골라도 거절돼 대기열이 막혔다.
+    // 그래서 복구 판정 전에 같은 규칙으로 닫고 다시 읽는다: 그 터미널에 아직 입력이 없었고(geminiMcp 가 done 이 아님), OSC 가 쉬는 중(idle)이고, 화면이 그 창일 때만
+    // Esc 를 누른다. 승인 창·신뢰 창은 OSC 막힘이고 창으로 읽지 않으므로 키를 보내지 않는다.
+    if (providerFor(member) === "gemini" && track.geminiMcp !== "done" && terminal.state === "live" && this.stateOf(track, terminal) === "idle" && this.methods.has("terminal.keys") && geminiMcpPanel(screen).open) {
+      const closed = await this.closeGeminiMcpPanel(track, terminal, screen);
+      screen = closed.screen;
+      inputEpoch += closed.presses;
+      if (track.epoch !== inputEpoch) return unknown("input_epoch_changed");
+      // 관리 창이 떴다는 것은 `/mcp` 가 들어가 MCP 를 띄웠다는 뜻이다(primeGeminiMcp 가 창을 닫은 뒤와 같다).
+      if (!geminiMcpPanel(screen).open) track.geminiMcp = "done";
+    }
     const draft = composerDraft(providerFor(member), screen);
     const composer = draft === null ? "unknown" : draft === "" ? "empty" : dispatch && exactComposer(screen, providerFor(member)) === dispatch.wireText ? "matches" : "different";
     const state = this.stateOf(track, terminal);

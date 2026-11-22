@@ -16,7 +16,7 @@ import { geminiStatusLineLaunch } from "../server/runner/gemini-statusline.ts";
 import type { DeliveryDispatch } from "../server/service-contracts.ts";
 import type { DeliveryProbe, RunnerEvent, RunnerMember, StartOpts } from "../server/runner/types.ts";
 import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
-import { composerScreen, coreSetup, geminiComposerScreen, primesMcp, rejection, startFakeCore, type FakeCore, type FakeCoreCall, type FakeCoreOptions } from "./fixtures/core-harness.ts";
+import { composerScreen, coreSetup, GEMINI_MCP_PANEL, geminiComposerScreen, primesMcp, rejection, startFakeCore, type FakeCore, type FakeCoreCall, type FakeCoreOptions } from "./fixtures/core-harness.ts";
 
 const ITEM = "#iamceo_AAAAAAAAAAAAAAAAAAAAAA";
 const ITEM2 = "#iamceo_CCCCCCCCCCCCCCCCCCCCCC";
@@ -1261,6 +1261,38 @@ describe("전달 수신 증거: 훅 기록(PreInvocation)의 표지", () => {
     // 다른 세대의 봉투는 보지 않는다.
     expect(f.runner.inspectGoneDelivery({ ...known, paneId: null, sessionGeneration: 2 }, first)).toMatchObject({ finding: "unknown", evidence: [{ source: "gemini_log", code: "identity_changed" }] });
     expect(f.runner.inspectGoneDelivery({ ...known, paneId: null }, { ...first, cli: "codex" })).toMatchObject({ finding: "unknown", evidence: [{ source: "gemini_log", code: "identity_changed" }] });
+  });
+  test("복구 확인의 MCP 관리 창 닫기는 창이 보이고 OSC 가 쉬는 중이며 그 터미널에 아직 입력이 없을 때만이다: 빈 입력칸·승인 창·신뢰 창(OSC 막힘)·이미 입력이 들어간 터미널에는 키를 보내지 않는다", async () => {
+    // 닫는 쪽(서버 재시작 뒤 남은 창을 닫고 다시 보내기까지)은 tests/gemini-delivery.test.ts 의 '관리 창이 남아도' 시험이 본다.
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    const markers = [{ deliveryId: "d1", marker: ITEM }];
+    const panel = geminiComposerScreen("", "", `${GEMINI_MCP_PANEL}IAMCEO · fake-model`);
+    // 쉬는 중이어도 관리 창이 아니면(빈 입력칸) 누르지 않는다.
+    expect((await f.runner.inspectDelivery(live, probe(f, f.runner, live, markers, f.runner.deliveryHookMark(live), null))).evidence[1]).toMatchObject({ source: "core_screen", code: "empty" });
+    // 승인 창·신뢰 창은 OSC 막힘이다: 화면이 관리 창처럼 보여도 누르지 않는다.
+    const blocked: [Parameters<FakeCore["setStatus"]>[1], string][] = [
+      [{ state: "blocked", kind: "permission", app: "antigravity", msg: "Approve Bash: ls" }, realScreen("approval-command")],
+      [{ state: "blocked", kind: "permission", app: "antigravity", msg: "Trust this folder?" }, realScreen("folder-trust")],
+      [{ state: "blocked", kind: "permission", app: "antigravity", msg: "Approve Bash: ls" }, panel],
+    ];
+    for (const [status, screen] of blocked) {
+      f.core.setStatus("m_gem1", status);
+      f.core.setScreen("m_gem1", screen);
+      expect((await f.runner.inspectDelivery(live, probe(f, f.runner, live, markers, f.runner.deliveryHookMark(live), null))).finding).toBe("wait");
+    }
+    expect(f.core.keys).toEqual([]);
+    // 첫 전달이 들어간 터미널(MCP 띄우기가 끝났다): 그 뒤에 보이는 관리 창은 사람이 연 것이라 그대로 둔다(입력칸은 모름).
+    f.core.setStatus("m_gem1", { state: "idle", app: "antigravity" });
+    f.core.setScreen("m_gem1", null);
+    const id = await turn(f, live, "첫 지시");
+    const known = { ...live, sessionId: id };
+    const pressed = f.core.keys.length;
+    f.core.setStatus("m_gem1", { state: "idle", app: "antigravity" });
+    f.core.setScreen("m_gem1", panel);
+    expect((await f.runner.inspectDelivery(known, probe(f, f.runner, known, markers, f.runner.deliveryHookMark(known), id))).evidence[1]).toMatchObject({ source: "core_screen", code: "unknown" });
+    expect(f.core.keys.length).toBe(pressed);
   });
   test("훅을 넣지 않는 환경이면 자리도 근거도 없다(모름)", async () => {
     const f = await setup();

@@ -3464,7 +3464,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   private get fileRevisions(): { columns: boolean; index: boolean; journal: boolean } {
     return this.fileRevisionState ??= {
       columns: this.rows("PRAGMA table_info(files)").some((c) => c.name === "replaced_by"),
-      index: !!this.row("SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'files_revisions'"),
+      // 덮는 색인일 때만 INDEXED BY 로 고른다(같은 이름의 부분 색인이면 한 건 조회가 'no query solution' 으로 실패한다).
+      index: this.rows("PRAGMA index_list(files)").some((i) => i.name === "files_revisions" && i.partial === 0),
       journal: !!this.row("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'file_chain_journal'"),
     };
   }

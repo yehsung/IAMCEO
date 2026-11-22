@@ -1034,6 +1034,12 @@ export const FILE_VERSION_SCHEMA: readonly string[] = [
 
 export function ensureFileVersionSchema(db: Database): string[] {
   const failed: string[] = [];
+  // 0.2.10 개발 중 한 갈래가 같은 이름의 '부분 색인'(WHERE replaces IS NOT NULL OR replaced_by IS NOT NULL)을 만들었다.
+  // 그 색인으로는 store.ts 의 INDEXED BY 한 건 조회가 풀리지 않으므로('no query solution'), 남아 있으면 지우고 덮는 색인으로 다시 만든다.
+  try {
+    const partial = db.query<{ name: string; partial: number }, []>("PRAGMA index_list(files)").all().some(i => i.name === "files_revisions" && i.partial === 1);
+    if (partial) db.exec("DROP INDEX files_revisions");
+  } catch { /* 아래 CREATE 가 실패를 적는다. Store 는 덮는 색인일 때만 INDEXED BY 를 쓴다. */ }
   for (const sql of FILE_VERSION_SCHEMA) {
     try { db.exec(sql); }
     catch { failed.push(/(?:INDEX|TABLE) IF NOT EXISTS (\S+)/.exec(sql)?.[1] ?? sql); }

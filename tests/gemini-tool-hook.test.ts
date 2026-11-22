@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GEMINI_TOOL_HOOK_LOCAL_TIMEOUT_SEC, geminiInjectDenyReason, geminiToolHookConfigFile, geminiToolHookSet } from "../server/runner/gemini-tool-hook.ts";
 import { geminiHooksFile, geminiRecorderHookSet, GEMINI_HOOKS_NAME } from "../server/runner/gemini-hooks.ts";
+import { PERMISSION_HOOK_TIMEOUT_SEC } from "../server/runner/permission-hook.ts";
+import { providerLaunch } from "../server/runner/providers.ts";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -46,7 +48,7 @@ describe("geminiToolHookSet: hooks.json 의 PreToolUse 묶음과 설정 파일",
     const file = geminiToolHookConfigFile(injectDir);
     expect(file.startsWith(`${injectDir}/`)).toBe(false);
     expect(statSync(file).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ v: 1, cwd: project, injectDir, injectDeny: geminiInjectDenyReason(project, injectDir) });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ v: 1, cwd: project, injectDir, injectDeny: geminiInjectDenyReason(project, injectDir), permission: null });
   });
   test("상대 경로는 던진다", () => {
     expect(() => geminiToolHookSet({ runDir: "run", cwd: "/p", injectDir: "/i" })).toThrow();
@@ -147,5 +149,142 @@ describe("작업 폴더 바로잡기(스크립트를 실제로 돌린다)", () =
     const child = Bun.spawn(["/bin/sh", "-c", command], { cwd: project, stdin: new Blob([preToolUse("run_command", { CommandLine: "pwd" }, workspaces)]), stdout: "pipe" });
     const stdout = await new Response(child.stdout).text();
     expect(JSON.parse(stdout)).toEqual({ decision: "allow", overwrite: { Cwd: project } });
+  });
+});
+
+// ---- 결재함 승인(가짜 서버) ----
+interface Seen { path: string; auth: string | null; body: Record<string, unknown> }
+/** /agent/permission 을 흉내 낸다. answer(body) 가 돌려준 답을 주고, 받은 요청을 적는다. */
+function fakeServer(answer: (body: Record<string, unknown>, path: string) => unknown) {
+  const seen: Seen[] = [];
+  const server = Bun.serve({
+    port: 0, hostname: "127.0.0.1",
+    async fetch(req) {
+      const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+      const path = new URL(req.url).pathname;
+      seen.push({ path, auth: req.headers.get("authorization"), body });
+      return Response.json(answer(body, path));
+    },
+  });
+  cleanups.push(() => server.stop(true));
+  return { seen, url: `http://127.0.0.1:${server.port}` };
+}
+const cleanups: (() => void)[] = [];
+afterEach(() => { for (const fn of cleanups.splice(0)) fn(); });
+function permissionLayout(url: string, token = "member-token-1") {
+  const base = layout();
+  const mcpConfigFile = join(base.run, "m_lead1.gemini", "mcp.json");
+  writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers: { iamceo: { command: "/bin/echo", args: [], env: { IAMCEO_URL: url, IAMCEO_TOKEN: token } } } }), { mode: 0o600 });
+  const set = geminiToolHookSet({ runDir: base.run, cwd: base.project, injectDir: base.injectDir, permission: { mcpConfigFile }, totalMs: 4000, pollMs: 300 });
+  return { ...base, mcpConfigFile, set, group: set.PreToolUse![0]!, command: set.PreToolUse![0]!.hooks[0]!.command };
+}
+
+describe("결재함 승인(스크립트를 실제로 돌리고, 서버는 가짜)", () => {
+  test("matcher 에 읽기·연결 도구·웹이 더해지고, 제한 시간은 Claude 승인 훅과 같다. 열쇠는 명령줄·설정 파일에 없다", () => {
+    const t = permissionLayout("http://127.0.0.1:1");
+    expect(t.group.matcher).toBe("^(run_command|write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|sed_file|notebook_edit|read_file|view_file|call_mcp_tool|read_url_content|open_browser_url|browser_subagent)$");
+    expect(t.group.hooks[0]!.timeout).toBe(PERMISSION_HOOK_TIMEOUT_SEC);
+    expect(t.command).not.toContain("member-token-1");
+    expect(readFileSync(geminiToolHookConfigFile(t.injectDir), "utf8")).not.toContain("member-token-1");
+    expect(JSON.parse(readFileSync(geminiToolHookConfigFile(t.injectDir), "utf8")).permission).toEqual({ mcpConfigFile: t.mcpConfigFile });
+  });
+  test("허용 → auto_approve(바꿔 쓴 Cwd 와 함께), 요청에는 실제로 돌 인자·종류·대화 id·호출 id 를 싣고 팀장 열쇠로 부른다", async () => {
+    const server = fakeServer(() => ({ id: "d1", state: "allow" }));
+    const t = permissionLayout(server.url);
+    const out = await runHook(t.command, preToolUse("run_command", { CommandLine: "npm test", WaitMsBeforeAsync: 5000 }, t.workspaces));
+    expect(out.code).toBe(0);
+    expect(JSON.parse(out.stdout)).toEqual({ decision: "auto_approve", overwrite: { Cwd: t.project } });
+    expect(server.seen).toHaveLength(1);
+    expect(server.seen[0]).toEqual({ path: "/agent/permission", auth: "Bearer member-token-1", body: {
+      toolName: "run_command", toolInput: { CommandLine: "npm test", WaitMsBeforeAsync: 5000, Cwd: t.project }, sessionId: CONV, cwd: t.project,
+      cli: "gemini", geminiKind: "command", toolCallId: "call_646705910486809191" } });
+  });
+  test("거절 → deny + 대표 메모(모델이 받는 까닭), 기다림(pending) 뒤의 답도 받는다", async () => {
+    let polls = 0;
+    const server = fakeServer((_body, path) => path === "/agent/permission" ? { id: "d2", state: "pending" } : ++polls < 2 ? { id: "d2", state: "pending" } : { id: "d2", state: "deny", message: "대표가 결재함에서 거절했습니다. 대표 메모: \"main 에 밀지 마세요\"" });
+    const t = permissionLayout(server.url);
+    const out = await runHook(t.command, preToolUse("run_command", { CommandLine: "git push origin main", Cwd: t.project }, t.workspaces));
+    expect(JSON.parse(out.stdout)).toEqual({ decision: "deny", reason: "대표가 결재함에서 거절했습니다. 대표 메모: \"main 에 밀지 마세요\"" });
+    expect(server.seen.map(s => s.path)).toEqual(["/agent/permission", "/agent/permission/wait", "/agent/permission/wait"]);
+    expect(server.seen[1]!.body).toEqual({ id: "d2" });
+  });
+  test("닫힘·모르는 답·서버 없음·잘못된 열쇠 설정: 승인 판정 없이 끝난다(바꿔 쓸 인자만 있으면 allow + overwrite, 없으면 아무것도 내지 않는다)", async () => {
+    const closed = fakeServer(() => ({ id: null, state: "closed" }));
+    const t = permissionLayout(closed.url);
+    expect(JSON.parse((await runHook(t.command, preToolUse("run_command", { CommandLine: "ls" }, t.workspaces))).stdout)).toEqual({ decision: "allow", overwrite: { Cwd: t.project } });
+    expect(await runHook(t.command, preToolUse("write_file", { Path: join(t.project, "a.txt"), Content: "x" }, t.workspaces))).toEqual({ stdout: "", stderr: "", code: 0 });
+    const odd = fakeServer(() => ({ state: "maybe" }));
+    expect((await runHook(permissionLayout(odd.url).command, preToolUse("write_file", { Path: "/elsewhere/a.txt", Content: "x" }, t.workspaces))).stdout).toBe("");
+    // 서버가 없다(꺼짐·재시작 중).
+    expect(await runHook(permissionLayout("http://127.0.0.1:1").command, preToolUse("write_file", { Path: join(t.project, "a.txt"), Content: "x" }, t.workspaces))).toEqual({ stdout: "", stderr: "", code: 0 });
+    // 주소·열쇠가 잘못됐다.
+    for (const [url, token] of [["ftp://x", "t"], ["http://127.0.0.1:1", ""]] as const) {
+      const bad = permissionLayout(url, token);
+      expect((await runHook(bad.command, preToolUse("write_file", { Path: join(bad.project, "a.txt"), Content: "x" }, bad.workspaces))).stdout).toBe("");
+    }
+  });
+  test("종류: 작업 공간 안/임시 폴더/밖 쓰기·읽기, 연결 도구, 웹. 작업 공간 안 읽기와 IAMCEO 연결 도구는 묻지 않는다", async () => {
+    const server = fakeServer(() => ({ id: null, state: "closed" }));
+    const t = permissionLayout(server.url);
+    const kindOf = async (name: string, args: Record<string, unknown>) => {
+      const before = server.seen.length;
+      await runHook(t.command, preToolUse(name, args, t.workspaces));
+      return server.seen.length > before ? server.seen.at(-1)!.body.geminiKind : null;
+    };
+    expect(await kindOf("write_file", { Path: join(t.project, "src", "a.ts"), Content: "x" })).toBe("edit");
+    expect(await kindOf("edit_file", { Path: "/tmp/scratch.txt", Target: "a", Replacement: "b" })).toBe("edit_temp");
+    expect(await kindOf("write_file", { Path: "/etc/hosts", Content: "x" })).toBe("edit_outside");
+    expect(await kindOf("read_file", { Path: join(t.project, "README.md") })).toBeNull();
+    expect(await kindOf("read_file", { Path: join(t.injectDir, ".agents", "rules", "iamceo-01.md") })).toBeNull();
+    expect(await kindOf("read_file", { Path: "/private/tmp/x.log" })).toBe("read_temp");
+    expect(await kindOf("view_file", { AbsolutePath: "/Users/someone/.ssh/config" })).toBe("read_outside");
+    expect(await kindOf("call_mcp_tool", { ServerName: "iamceo", ToolName: "post", Arguments: {} })).toBeNull();
+    expect(await kindOf("call_mcp_tool", { ServerName: "github", ToolName: "create_issue", Arguments: { title: "x" } })).toBe("mcp");
+    expect(await kindOf("read_url_content", { Url: "https://example.com" })).toBe("web");
+    // 주입 폴더 쓰기는 서버에 묻지 않고 막는다.
+    expect(await kindOf("write_file", { Path: join(t.injectDir, "x.txt"), Content: "x" })).toBeNull();
+  });
+  test("HTTP_PROXY 가 있어도 이 Mac 의 서버로 바로 간다(팀장 열쇠가 실린 요청이 프록시로 나가지 않는다)", async () => {
+    const server = fakeServer(() => ({ id: "d3", state: "allow" }));
+    const t = permissionLayout(server.url);
+    const child = Bun.spawn(["/bin/sh", "-c", t.command], { env: { ...process.env, HTTP_PROXY: "http://127.0.0.1:9", http_proxy: "http://127.0.0.1:9" }, stdin: new Blob([preToolUse("write_file", { Path: join(t.project, "a.txt"), Content: "x" }, t.workspaces)]), stdout: "pipe" });
+    expect(JSON.parse(await new Response(child.stdout).text())).toEqual({ decision: "auto_approve" });
+    expect(server.seen).toHaveLength(1);
+  });
+});
+
+describe("providerLaunch(gemini): 도구 훅의 승인 부분은 Claude 승인 훅과 같은 조건에서만 싣는다", () => {
+  function launchHooks(permissionMode: "default" | "auto" | "bypassPermissions", toolPermission: boolean | undefined, envOff = false) {
+    const home = temp();
+    const run = join(home, "run");
+    mkdirSync(run, { recursive: true, mode: 0o700 });
+    const opts = { systemPromptFile: join(run, "m_lead1.rules.md"), mcpConfigFile: join(run, "m_lead1.mcp.json"), resume: false };
+    writeFileSync(opts.systemPromptFile, "지침\n");
+    writeFileSync(opts.mcpConfigFile, JSON.stringify({ mcpServers: { iamceo: { command: "/bin/echo", args: [], env: { IAMCEO_TOKEN: "secret", IAMCEO_URL: "http://127.0.0.1:1" } } } }), { mode: 0o600 });
+    const before = process.env.IAMCEO_TOOL_PERMISSION;
+    if (envOff) process.env.IAMCEO_TOOL_PERMISSION = "0";
+    try {
+      const member = { id: "m_lead1", sessionGeneration: 1, projectId: "p", cli: "gemini" as const, handle: "lead", name: "결제 연동", cwd: home, sessionId: null, paneId: null, model: null, effort: null, subagentModel: null, permissionMode, kind: "worker" as const };
+      const launch = providerLaunch(member, opts, { geminiBin: "/fake/agy", contextHome: home, ...(toolPermission === undefined ? {} : { toolPermission }) });
+      const injectDir = launch.argv[launch.argv.indexOf("--add-dir") + 1]!;
+      const hooks = JSON.parse(readFileSync(join(injectDir, ".agents", "hooks.json"), "utf8"))[GEMINI_HOOKS_NAME].PreToolUse[0];
+      return { hooks, config: JSON.parse(readFileSync(geminiToolHookConfigFile(injectDir), "utf8")), mcpConfigFile: opts.mcpConfigFile };
+    } finally { if (envOff) { if (before === undefined) delete process.env.IAMCEO_TOOL_PERMISSION; else process.env.IAMCEO_TOOL_PERMISSION = before; } }
+  }
+  test("받을 서버가 있고(toolPermission) 묻지 않기가 아니면 싣는다. 열쇠는 MCP 설정 파일 자리로만", () => {
+    for (const mode of ["default", "auto"] as const) {
+      const on = launchHooks(mode, true);
+      expect(on.config.permission).toEqual({ mcpConfigFile: on.mcpConfigFile });
+      expect(on.hooks.matcher).toContain("|read_file|");
+      expect(on.hooks.hooks[0].timeout).toBe(PERMISSION_HOOK_TIMEOUT_SEC);
+      expect(JSON.stringify(on.hooks)).not.toContain("secret");
+    }
+  });
+  test("묻지 않기, 받을 서버 없음(toolPermission 아님), IAMCEO_TOOL_PERMISSION=0 이면 폴더 바로잡기만", () => {
+    for (const off of [launchHooks("bypassPermissions", true), launchHooks("default", undefined), launchHooks("default", false), launchHooks("default", true, true)]) {
+      expect(off.config.permission).toBeNull();
+      expect(off.hooks.matcher).not.toContain("read_file");
+      expect(off.hooks.hooks[0].timeout).toBe(GEMINI_TOOL_HOOK_LOCAL_TIMEOUT_SEC);
+    }
   });
 });

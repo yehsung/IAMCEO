@@ -103,9 +103,11 @@ function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins,
     try { hookSets.push(geminiRecorderHookSet({ memberId: member.id, eventsDir: geminiHookEventsDir(bins.contextHome) })); }
     catch (error) { console.warn(`[gemini] ${member.id}: 훅 기록을 만들지 못해 훅 없이 띄웁니다. 전달 수신 확인과 대화 id 의 둘째 근거(훅 기록)가 없습니다 (${why(error)})`); }
   }
-  // 도구 호출 직전 판정(작업 폴더 바로잡기). 사건 기록과 따로다: IAMCEO_HOOK_EVENTS=0 이어도 싣는다(산출물이 주입 폴더에 생기지 않게).
+  // 도구 호출 직전 판정(작업 폴더 바로잡기, 결재함 승인). 사건 기록과 따로다: IAMCEO_HOOK_EVENTS=0 이어도 싣는다(산출물이 주입 폴더에 생기지 않게).
+  // 승인은 Claude 와 같은 조건이다(toolPermissionHook): 받을 서버가 있고(bins.toolPermission), 묻지 않기 팀장이 아니고, IAMCEO_TOOL_PERMISSION=0 이 아닐 때.
   if (bins.contextHome) {
-    try { hookSets.push(geminiToolHookSet({ runDir: join(bins.contextHome, "run"), cwd: member.cwd, injectDir: plannedInjectDir })); }
+    const permission = member.permissionMode !== "bypassPermissions" && bins.toolPermission === true && process.env.IAMCEO_TOOL_PERMISSION !== "0" ? { mcpConfigFile: opts.mcpConfigFile } : null;
+    try { hookSets.push(geminiToolHookSet({ runDir: join(bins.contextHome, "run"), cwd: member.cwd, injectDir: plannedInjectDir, permission })); }
     catch (error) { console.warn(`[gemini] ${member.id}: 도구 훅을 만들지 못해 빼고 띄웁니다. 작업 폴더 바로잡기가 없습니다 (${why(error)})`); }
   }
   const injectDir = writeGeminiInjectDir({ memberId: member.id, systemPromptFile: opts.systemPromptFile, mcpConfigFile: opts.mcpConfigFile, cwd: member.cwd, hooks: geminiHooksFile(...hookSets) });

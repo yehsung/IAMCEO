@@ -75,7 +75,7 @@ import { providerLaunch } from "./runner/providers.ts";
 import { CoreRunner, codexBackgroundTerminals, ensureCoreServer, eofLogBaseline, type CoreCompactState, type CoreRunnerDeps, type CoreRunnerOptions } from "./runner/core.ts";
 import { approvalSummary } from "./runner/core-approval.ts";
 import { CLAUDE_BACKGROUND_REASON, CLAUDE_LOGIN_ERRORS, CLAUDE_LOGIN_REASON } from "./runner/claude-turn.ts";
-import { ToolPermissions, type ToolPermissionPoll, type ToolPermissionRequest } from "./tool-permission.ts";
+import { ToolPermissions, type GeminiEffectiveMode, type ToolPermissionPoll, type ToolPermissionRequest } from "./tool-permission.ts";
 import { exactSource, measureContext } from "./runner/context.ts";
 import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, RunnerStartResult, RunnerTerminalIdentity, RunnerReattachResult, DeliveryRepair } from "./runner/types.ts";
 import { ApiError, type AppliedConfig, type ExecutionJournal, type NewDelivery, type Store } from "./store.ts";
@@ -702,7 +702,8 @@ export class Orchestrator implements OrchestratorApi {
     // K(E2): 허용하며 남긴 메모는 훅의 답에 실을 수 없어 팀장의 다음 입력으로 보낸다(결재와 묶지 않는다: 전달 실패가 카드를 다시 열지 않게).
     this.toolPermissions = new ToolPermissions({ store: this.store, notify: (title, body) => this.notifyInbox(title, body),
       deliverNote: (member, decision) => { this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "answer", text: formatAnswer(decision) }); void this.pump(member.id); },
-      stillBlocked: member => this.notifyInbox(textRef("notice.approval_wait.title", { name: member.name }), textRef("notice.tool_card_unanswered")) });
+      stillBlocked: member => this.notifyInbox(textRef("notice.approval_wait.title", { name: member.name }), textRef("notice.tool_card_unanswered")),
+      geminiMode: member => this.geminiEffectiveMode(member) });
     this.store.repairRejectedLimit();
     this.apiRecovery = new ApiRecovery({ ...deps.apiRecovery, store: this.store,
       notify: (projectId, text, alertOwner = true) => { this.systemMessage(projectId, text); if (alertOwner) this.store.afterCommit(() => this.notifyInbox(textRef("notice.api_usage.title"), text)); },
@@ -4727,6 +4728,26 @@ export class Orchestrator implements OrchestratorApi {
     // Gemini: auto 가 들지 않은 팀장은 대신하는 모드로 다시 연다(칸이 다르면 쉴 때 같은 대화를 이어 연다). 칸이 없으면 예전 적용 기록과 글자까지 같다.
     const geminiMode = this.geminiAutoFallback(member) ? { geminiMode: "auto-fallback" as const } : {};
     return { model, effort, staffModel: staff.model, staffEffort: staff.effort, ...(account ? { account } : {}), ...geminiMode };
+  }
+
+  /**
+   * Gemini 팀장의 지금 모드(결재함 승인 카드의 판정, tool-permission.ts geminiNeedsCard). 띄운 뜻(권한 방식, 지금 세션이 대신하는 모드로 떴나)에서 시작해
+   * 실행기가 알려 준 실제 모드(상태줄의 cycle_mode, CoreRunner.geminiMode)가 있으면 그것을 따른다.
+   * 묻지 않기 팀장에게는 승인 훅을 싣지 않는다. 그래도 요청이 왔다면(띄운 뒤 권한 방식을 바꿨다) agy 는 띄울 때의 정책으로 묻고 있으니 default 로 본다.
+   */
+  private geminiEffectiveMode(member: Member): GeminiEffectiveMode {
+    const fallback = this.store.getAppliedConfig(member.id)?.geminiMode === "auto-fallback";
+    const launched: GeminiEffectiveMode = this.store.getSettings().permissionMode === "auto" ? (fallback ? "fallback" : "auto") : "default";
+    const runner = this.runners.get(this.backendOf(member)) as (Runner & { geminiMode?(memberId: string): { cycleMode: string; sandbox: boolean | null } | null }) | undefined;
+    const seen = runner?.geminiMode?.(member.id) ?? null;
+    switch (seen?.cycleMode) {
+      case undefined: return launched;
+      case "auto": return "auto";
+      // 대신하는 모드로 띄운 세션이 샌드박스를 켠 채 accept-edits 면 그 모드다. 사람이 Shift+Tab 으로 고른 accept-edits(샌드박스 없음)는 명령을 묻는다.
+      case "accept-edits": return fallback && seen.sandbox !== false ? "fallback" : "accept-edits";
+      case "default": case "plan": return "default";
+      default: return launched;
+    }
   }
 
   /** 이 Gemini 팀장을 권한 auto 대신의 모드로 띄울 것인가(권한 방식이 auto 이고 이 서버에서 그 팀장의 auto 가 들지 않은 적이 있다). */

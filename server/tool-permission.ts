@@ -15,6 +15,7 @@ import type { AnswerReq, Decision, DecisionOption, Member, ToolPermissionInfo } 
 import { ApiError, type Store } from "./store.ts";
 import { josa } from "./roles.ts";
 import { TOOL_PERMISSION_POLL_MS, TOOL_PERMISSION_TTL_MS } from "./runner/permission-hook.ts";
+import { GEMINI_TOOL_KINDS, type GeminiToolKind } from "./runner/gemini-tool-hook.ts";
 import { langsParam, mustRender, SERVER_TEXTS, textRef, type ServerTextCode, type ServerTextRef, type TextLang } from "../shared/server-text.ts";
 
 export { TOOL_PERMISSION_POLL_MS, TOOL_PERMISSION_TTL_MS };
@@ -38,6 +39,49 @@ export interface ToolPermissionRequest {
   cwd?: string | null;
   permissionMode?: string | null;
   agentId?: string | null;
+  /** 0.2.10: "gemini" 면 Antigravity CLI 의 도구 훅(PreToolUse)이 올린 것이다. 없으면 Claude 의 PermissionRequest 훅이다. */
+  cli?: string | null;
+  /** Gemini: 훅이 정한 도구의 종류(gemini-tool-hook.ts GEMINI_TOOL_KINDS). 서버가 지금 모드에서 agy 가 물을 종류인지 가린다. */
+  geminiKind?: string | null;
+  /** Gemini: 그 도구 호출의 id(훅 입력 toolCall.id). 기록에만 쓴다. */
+  toolCallId?: string | null;
+}
+
+/**
+ * Gemini(Antigravity CLI) 팀장의 지금 모드. agy 의 PreToolUse 훅은 모든 도구 호출에 와서, 카드를 열지는 '그 모드에서 agy 가 물을 것인가'로 정한다.
+ * default: 권한 '매번 묻기'(agentMode "")·plan, 또는 auto 가 들지 않은 실행. accept-edits: 작업 폴더 안 파일 쓰기만 묻지 않는다(사람이 Shift+Tab 으로 고름).
+ * auto: agy auto 모드(파일 고치기·샌드박스 안 명령은 묻지 않고, 샌드박스 밖 명령은 agy 의 평가기가 위험한 것만 묻는다).
+ * fallback: auto 대신의 모드(accept-edits + 터미널 샌드박스 + proceed-in-sandbox).
+ */
+export type GeminiEffectiveMode = "default" | "accept-edits" | "auto" | "fallback";
+/**
+ * 그 모드에서 agy 가 묻는 종류(문서 docs_permissions.md·docs_cli_modes.md, 1.5.14 헤드리스 실측). Claude 와 같은 뜻이 되게 한다:
+ * Claude 의 PermissionRequest 는 CLI 가 승인 창을 띄우려 할 때만 오므로, agy 가 창을 띄울 종류만 카드로 연다.
+ * - 명령: default·accept-edits 는 매번 묻는다(request-review). auto·fallback 은 샌드박스 안이면 묻지 않고 밖은 agy 의 평가기·창이 정한다:
+ *   훅에서는 어느 쪽인지 모르므로 카드를 열지 않고 agy 에 맡긴다(위험한 명령은 오늘처럼 agy 의 창 = 터미널 승인 대기).
+ * - 작업 공간 안 파일 쓰기: default 만 묻는다(diff 검토). 임시 폴더: auto·fallback 은 묻지 않는다. 그 밖의 폴더·IAMCEO 밖의 연결 도구·웹: 늘 묻는다.
+ */
+const GEMINI_ASKS: Record<GeminiEffectiveMode, ReadonlySet<GeminiToolKind>> = {
+  default: new Set(GEMINI_TOOL_KINDS),
+  "accept-edits": new Set<GeminiToolKind>(["command", "edit_temp", "edit_outside", "read_temp", "read_outside", "mcp", "web"]),
+  auto: new Set<GeminiToolKind>(["edit_outside", "read_outside", "mcp", "web"]),
+  fallback: new Set<GeminiToolKind>(["edit_outside", "read_outside", "mcp", "web"]),
+};
+/** 그 모드에서 이 종류의 도구에 결재함 카드를 열 것인가. 모르는 종류는 열지 않는다(agy 의 원래 창으로 둔다). */
+export function geminiNeedsCard(kind: string | null | undefined, mode: GeminiEffectiveMode): boolean {
+  return typeof kind === "string" && (GEMINI_TOOL_KINDS as readonly string[]).includes(kind) && GEMINI_ASKS[mode].has(kind as GeminiToolKind);
+}
+/**
+ * Gemini 훅이 올린 도구를 카드에 보일 이름·입력으로 바꾼다. call_mcp_tool 은 Claude 와 같은 `mcp__<서버>__<도구>` 와 그 인자로 보인다(연결 도구 카드).
+ * 그 밖은 이름 그대로다(run_command·write_file … 은 ACTIONS 에서 '명령 실행'·'파일 쓰기' 등으로 그린다).
+ */
+export function geminiToolForCard(toolName: string, toolInput: unknown): { toolName: string; toolInput: unknown } {
+  const input = toolInput && typeof toolInput === "object" && !Array.isArray(toolInput) ? toolInput as Record<string, unknown> : {};
+  if (toolName === "call_mcp_tool" && typeof input.ServerName === "string" && typeof input.ToolName === "string") {
+    const part = (value: string) => value.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "_";
+    return { toolName: `mcp__${part(input.ServerName)}__${part(input.ToolName)}`, toolInput: input.Arguments ?? {} };
+  }
+  return { toolName, toolInput };
 }
 /** 훅이 받는 답. pending 이면 같은 id 로 다시 기다린다. allow·deny 면 CLI 에 그대로 답하고, closed 면 아무것도 출력하지 않는다. */
 export interface ToolPermissionPoll { id: string | null; state: "pending" | "allow" | "deny" | "closed"; message?: string }
@@ -50,6 +94,8 @@ export interface ToolPermissionDeps {
   deliverNote(member: Member, decision: Decision): void;
   /** 답 없이 시간이 지나 닫았는데 팀장이 아직 승인 창 앞이다. */
   stillBlocked?(member: Member): void;
+  /** Gemini 팀장의 지금 모드(Orchestrator: 권한 방식·대신하는 모드·상태줄의 cycle_mode). 없으면 default 로 본다(모든 종류에 카드). */
+  geminiMode?(member: Member): GeminiEffectiveMode;
   now?(): number;
   ttlMs?: number;
   pollMs?: number;
@@ -73,6 +119,11 @@ interface Entry {
   closed: boolean;
   /** 이 카드가 열린 뒤 팀장이 승인 창 앞(blocked)으로 관측된 적이 있다. */
   sawBlocked: boolean;
+  /**
+   * '승인 창이 닫혔으니 터미널에서 먼저 답했다'로 닫을 수 있는 카드인가. Gemini 카드는 아니다: agy 는 훅이 붙잡는 동안 그 호출의 창을 띄우지 않으므로
+   * 터미널에서 먼저 답할 수 없고, 같은 팀장의 서브에이전트가 띄운 다른 창(blocked)이 닫힌 것을 이 카드의 답으로 읽으면 안 된다.
+   */
+  terminalAnswerable: boolean;
   grace: ReturnType<typeof setTimeout> | null;
   wake: Set<() => void>;
 }
@@ -170,6 +221,22 @@ const ACTIONS: Record<string, string> = {
   Agent: "하위 작업 맡기기",
   Skill: "스킬 쓰기",
   SlashCommand: "명령어 쓰기",
+  // Gemini(Antigravity CLI) 의 도구 이름(훅에 보이는 이름). 같은 '무엇을'로 그린다.
+  run_command: "명령 실행",
+  write_file: "파일 쓰기",
+  write_to_file: "파일 쓰기",
+  edit_file: "파일 고치기",
+  replace_file_content: "파일 고치기",
+  multi_replace_file_content: "파일 고치기",
+  sed_file: "파일 고치기",
+  notebook_edit: "노트북 고치기",
+  read_file: "파일 읽기",
+  view_file: "파일 읽기",
+  read_url_content: "웹 페이지 가져오기",
+  open_browser_url: "웹 페이지 가져오기",
+  browser_subagent: "웹 페이지 가져오기",
+  search_web: "웹 검색",
+  invoke_subagent: "하위 작업 맡기기",
 };
 
 /**
@@ -197,6 +264,22 @@ export function describeToolRequest(toolName: string, toolInput: unknown, lang: 
     case "WebSearch": target = str(input.query) ?? ""; break;
     case "Task": case "Agent":
       target = [str(input.subagent_type), str(input.description)].filter(Boolean).join(" · "); break;
+    // Gemini(Antigravity CLI) 의 인자 이름(1.5.14 실측: run_command CommandLine·Cwd, write_file Path·Content, edit_file Path, read_file Path).
+    case "run_command": target = str(input.CommandLine) ?? ""; break;
+    case "write_file": case "write_to_file": {
+      const file = str(input.Path) ?? str(input.TargetFile);
+      const body = typeof input.Content === "string" ? input.Content : typeof input.CodeContent === "string" ? input.CodeContent : null;
+      target = `${file ? homeShort(file) : FRAGMENTS[lang].noPath}${body !== null ? FRAGMENTS[lang].size(Array.from(body).length) : ""}`;
+      break;
+    }
+    case "edit_file": case "replace_file_content": case "multi_replace_file_content": case "sed_file": case "notebook_edit": case "read_file": case "view_file": {
+      const file = str(input.Path) ?? str(input.TargetFile) ?? str(input.AbsolutePath) ?? str(input.FilePath);
+      target = file ? homeShort(file) : "";
+      break;
+    }
+    case "read_url_content": case "open_browser_url": target = str(input.Url) ?? str(input.url) ?? ""; break;
+    case "search_web": target = str(input.query) ?? str(input.Query) ?? ""; break;
+    case "invoke_subagent": target = [str(input.TypeName), str(input.Role)].filter(Boolean).join(" · "); break;
     default:
       target = mcp ? `${mcp[2]} ${safeJson(toolInput)}` : safeJson(toolInput);
   }
@@ -225,6 +308,10 @@ const ACTION_CODES: Record<string, ServerTextCode> = {
   Edit: "tool.action.edit", MultiEdit: "tool.action.edit", Write: "tool.action.write", NotebookEdit: "tool.action.notebook_edit",
   Read: "tool.action.read", Glob: "tool.action.glob", Grep: "tool.action.grep", LS: "tool.action.ls", WebFetch: "tool.action.web_fetch",
   WebSearch: "tool.action.web_search", Task: "tool.action.task", Agent: "tool.action.task", Skill: "tool.action.skill", SlashCommand: "tool.action.slash_command",
+  // Gemini(Antigravity CLI): 기존 코드에 잇는다(새 글 코드·앱 변경 없음).
+  run_command: "tool.action.bash", write_file: "tool.action.write", write_to_file: "tool.action.write", edit_file: "tool.action.edit", replace_file_content: "tool.action.edit",
+  multi_replace_file_content: "tool.action.edit", sed_file: "tool.action.edit", notebook_edit: "tool.action.notebook_edit", read_file: "tool.action.read", view_file: "tool.action.read",
+  read_url_content: "tool.action.web_fetch", open_browser_url: "tool.action.web_fetch", browser_subagent: "tool.action.web_fetch", search_web: "tool.action.web_search", invoke_subagent: "tool.action.task",
 };
 export function toolActionRef(toolName: string): ServerTextRef {
   const known = ACTION_CODES[toolName];
@@ -333,6 +420,12 @@ export class ToolPermissions {
     if (!project || project.archived) return { id: null, state: "closed" };
     // 사람이 터미널에서 직접 골라야 하는 도구(질문 창·계획 확정)는 CLI 가 훅의 허용을 받지 않는다. 카드를 띄우지 않는다.
     if (PERSON_ONLY_TOOLS.has(input.toolName)) return { id: null, state: "closed" };
+    // Gemini: 훅은 모든 도구 호출에 온다. 지금 모드에서 agy 가 물을 종류일 때만 카드를 연다(아니면 훅은 판정 없이 끝나 agy 가 정한다).
+    const gemini = input.cli === "gemini";
+    if (gemini) {
+      if (member.cli !== "gemini" || !geminiNeedsCard(input.geminiKind, this.deps.geminiMode?.(member) ?? "default")) return { id: null, state: "closed" };
+      input = { ...input, ...geminiToolForCard(input.toolName, input.toolInput) };
+    }
     // Y: '무엇을'·대상은 보고 언어로 적는다(한국어면 예전과 같다). 카드의 글은 코드로 넘겨 저장소가 보고 언어로 그린다.
     const lang = store.reportLang();
     const targets = describeToolTargets(input.toolName, input.toolInput);
@@ -347,7 +440,7 @@ export class ToolPermissions {
     const decision = store.createToolPermissionDecision({ projectId: member.projectId, memberId: member.id, who: member.name, title, detail, options: TOOL_PERMISSION_OPTIONS, toolPermission: info,
       texts: toolPermissionCardTexts(member, info, this.ttl, targets) });
     const entry: Entry = { id: decision.id, memberId: member.id, expiresAt, inflight: 0, targets, lastSeen: this.now(), answer: null, closed: false,
-      sawBlocked: member.status === "blocked", grace: null, wake: new Set() };
+      sawBlocked: member.status === "blocked", terminalAnswerable: !gemini, grace: null, wake: new Set() };
     this.entries.set(decision.id, entry);
     store.appendActivity(member.id, "system", textRef("activity.tool_requested", { action: actionRef, target: activityTarget("activity.tool_requested", actionRef, targets) }));
     this.deps.notify(textRef("notice.tool_permission.title", { name: member.name }), textRef("card.tool_permission.title", { action: actionRef, titleTarget: oneLine(target) }));
@@ -459,6 +552,8 @@ export class ToolPermissions {
   memberStatus(memberId: string, status: string): void {
     for (const entry of this.entries.values()) {
       if (entry.memberId !== memberId || entry.closed || entry.answer) continue;
+      // Gemini 카드는 터미널 상태로 닫지 않는다(terminalAnswerable). 터미널이 끝나면(gone) 닫는다.
+      if (!entry.terminalAnswerable && status !== "gone") continue;
       if (status === "blocked") {
         entry.sawBlocked = true;
         if (entry.grace) { clearTimeout(entry.grace); entry.grace = null; }

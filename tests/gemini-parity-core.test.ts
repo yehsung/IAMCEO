@@ -14,6 +14,12 @@ import type { Runner, RunnerEvent, RunnerMember, SendResult, StartOpts } from ".
 import { Store } from "../server/store.ts";
 import type { Backend, Member } from "../shared/types.ts";
 import { startFakeCore, type FakeCoreOptions } from "./fixtures/core-harness.ts";
+import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
+import { describeToolRequest, geminiNeedsCard, geminiToolForCard, ToolPermissions, type GeminiEffectiveMode } from "../server/tool-permission.ts";
+import { geminiToolHookSet } from "../server/runner/gemini-tool-hook.ts";
+import { startServer, type RunningServer, type ServerContext } from "../server/http.ts";
+import { PushStore } from "../server/push/store.ts";
+import { VERSION } from "../server/config.ts";
 
 /** 세션을 띄우지 않고 받은 것만 적는다. Gemini 는 실제 실행기처럼 새 세션을 대화 id 없이 띄운다(tests/gemini-orchestrator.test.ts 의 것과 같은 꼴). */
 class FakeRunner implements Runner {
@@ -224,5 +230,179 @@ describe("권한 auto: 실제 모드 확인(실행기, 가짜 core + 실제 Core
     await f.runner.screen({ ...f.member, paneId: started.paneId });
     await until("모드 알림", () => { f.core.drawGeminiStatus("m_gem1"); return modes(f.events).length > 0; });
     expect(modes(f.events)[0]).toMatchObject({ cycleMode: "accept-edits", sandbox: true });
+  });
+});
+
+// ---- 결재함 도구 승인 ----
+describe("결재함 승인: 모드별로 agy 가 물을 종류에만 카드(Claude 의 PermissionRequest 와 같은 뜻)", () => {
+  test("모드 × 종류 표", () => {
+    const kinds = ["command", "edit", "edit_temp", "edit_outside", "read_temp", "read_outside", "mcp", "web"] as const;
+    const asked = (mode: GeminiEffectiveMode) => kinds.filter(kind => geminiNeedsCard(kind, mode));
+    expect(asked("default")).toEqual([...kinds]);
+    expect(asked("accept-edits")).toEqual(["command", "edit_temp", "edit_outside", "read_temp", "read_outside", "mcp", "web"]);
+    expect(asked("auto")).toEqual(["edit_outside", "read_outside", "mcp", "web"]);
+    expect(asked("fallback")).toEqual(["edit_outside", "read_outside", "mcp", "web"]);
+    for (const odd of [null, undefined, "", "Bash", "read"]) expect(geminiNeedsCard(odd, "default")).toBe(false);
+  });
+  test("연결 도구는 Claude 와 같은 mcp__서버__도구 이름과 그 인자로 보인다", () => {
+    expect(geminiToolForCard("call_mcp_tool", { ServerName: "github", ToolName: "create_issue", Arguments: { title: "버그" } })).toEqual({ toolName: "mcp__github__create_issue", toolInput: { title: "버그" } });
+    expect(geminiToolForCard("call_mcp_tool", { ServerName: "a b/c", ToolName: "x" }).toolName).toBe("mcp__a_b_c__x");
+    expect(geminiToolForCard("run_command", { CommandLine: "ls" })).toEqual({ toolName: "run_command", toolInput: { CommandLine: "ls" } });
+    expect(describeToolRequest("run_command", { CommandLine: "npm test", Cwd: "/w" })).toEqual({ action: "명령 실행", target: "npm test" });
+    expect(describeToolRequest("write_file", { Path: "/w/a.env", Content: "SECRET=1\n" })).toEqual({ action: "파일 쓰기", target: "/w/a.env (9자)" });
+    expect(describeToolRequest("edit_file", { Path: "/w/a.ts", Target: "a", Replacement: "b" })).toEqual({ action: "파일 고치기", target: "/w/a.ts" });
+    expect(describeToolRequest("read_file", { Path: "/etc/hosts" })).toEqual({ action: "파일 읽기", target: "/etc/hosts" });
+    expect(describeToolRequest("read_url_content", { Url: "https://example.com/a" })).toEqual({ action: "웹 페이지 가져오기", target: "https://example.com/a" });
+    expect(describeToolRequest(...Object.values(geminiToolForCard("call_mcp_tool", { ServerName: "github", ToolName: "create_issue", Arguments: { title: "버그" } })) as [string, unknown]).action).toBe("연결 도구 쓰기(github)");
+  });
+
+  function storeFixture(cli: Member["cli"] = "gemini") {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-gpc-tp-")));
+    const db = openDb(join(dir, "iamceo.db"));
+    const store = new Store(db, new Bus());
+    const project = store.createProject({ name: "도구 승인", cwd: dir });
+    const member = store.createMember({ projectId: project.id, handle: "pay", name: "결제 연동", kind: "worker", cwd: dir, origin: "runner", backend: "core", status: "working", sessionId: crypto.randomUUID(), paneId: "pane-1", cli });
+    cleanups.push(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+    return { dir, store, member };
+  }
+  function permissions(store: Store, mode: () => GeminiEffectiveMode) {
+    const tp = new ToolPermissions({ store, notify: () => {}, deliverNote: () => {}, geminiMode: () => mode(), ttlMs: 2_000, pollMs: 200, goneMs: 300, graceMs: 80, sweepMs: 20 });
+    cleanups.push(() => tp.dispose());
+    return tp;
+  }
+  const gemini = (toolName: string, toolInput: unknown, geminiKind: string) => ({ toolName, toolInput, sessionId: "conv", cwd: null, cli: "gemini", geminiKind, toolCallId: "call_1" });
+
+  test("default: 명령은 카드(명령 실행·명령줄·폴더), 허용하면 훅이 allow 를 받는다. auto: 명령은 카드 없이 닫힘, 연결 도구는 카드", async () => {
+    const { store, member, dir } = storeFixture();
+    let mode: GeminiEffectiveMode = "default";
+    const tp = permissions(store, () => mode);
+    const pending = tp.request(member, gemini("run_command", { CommandLine: "npm test", Cwd: dir }, "command"));
+    const card = store.listOpenToolPermissions()[0]!;
+    expect(card.toolPermission).toMatchObject({ tool: "run_command", action: "명령 실행", target: "npm test", cwd: dir });
+    expect(card.title).toBe("명령 실행: npm test");
+    expect(card.options.map(o => o.k)).toEqual(["allow", "deny"]);
+    tp.answer(card.id, { choice: "allow" });
+    expect(await pending).toEqual({ id: card.id, state: "allow" });
+
+    mode = "auto";
+    expect(await tp.request(member, gemini("run_command", { CommandLine: "rm -rf build" }, "command"))).toEqual({ id: null, state: "closed" });
+    expect(await tp.request(member, gemini("write_file", { Path: join(dir, "a.txt"), Content: "x" }, "edit"))).toEqual({ id: null, state: "closed" });
+    expect(store.listOpenToolPermissions()).toEqual([]);
+    const mcp = tp.request(member, gemini("call_mcp_tool", { ServerName: "github", ToolName: "create_issue", Arguments: { title: "버그" } }, "mcp"));
+    const mcpCard = store.listOpenToolPermissions()[0]!;
+    expect(mcpCard.toolPermission).toMatchObject({ tool: "mcp__github__create_issue", action: "연결 도구 쓰기(github)" });
+    tp.answer(mcpCard.id, { choice: "deny", note: "이슈는 내가 만든다" });
+    expect(await mcp).toEqual({ id: mcpCard.id, state: "deny", message: "대표가 결재함에서 거절했습니다. 대표 메모: \"이슈는 내가 만든다\"" });
+  });
+
+  test("Gemini 카드는 터미널 상태(승인 창 앞→다른 상태)로 닫지 않는다: 서브에이전트의 다른 창이 닫힌 것을 이 카드의 답으로 읽지 않게. 터미널이 끝나면 닫는다", async () => {
+    const { store, member } = storeFixture();
+    const tp = permissions(store, () => "default");
+    const pending = tp.request(member, gemini("run_command", { CommandLine: "make" }, "command"));
+    const card = store.listOpenToolPermissions()[0]!;
+    tp.memberStatus(member.id, "blocked");
+    tp.memberStatus(member.id, "working");
+    // 터미널에서 답한 것으로 보는 유예(graceMs 80)를 넘겨도 열려 있다(한 번의 기다림 pollMs 200 안에서 본다).
+    await Bun.sleep(130);
+    expect(store.requireDecision(card.id).status).toBe("open");
+    tp.memberStatus(member.id, "gone");
+    expect(await pending).toEqual({ id: card.id, state: "closed" });
+    expect(store.requireDecision(card.id).status).toBe("closed");
+  });
+
+  test("Gemini 가 아닌 팀장이 Gemini 요청을 올리면 카드를 열지 않는다. Claude 요청(새 칸 없음)은 예전 그대로다", async () => {
+    const { store, member } = storeFixture("claude");
+    const tp = permissions(store, () => "default");
+    expect(await tp.request(member, gemini("run_command", { CommandLine: "ls" }, "command"))).toEqual({ id: null, state: "closed" });
+    const pending = tp.request(member, { toolName: "Bash", toolInput: { command: "ls" }, sessionId: "s", cwd: null });
+    const card = store.listOpenToolPermissions()[0]!;
+    expect(card.toolPermission).toMatchObject({ tool: "Bash", action: "명령 실행", target: "ls" });
+    // Claude 카드는 예전처럼 승인 창이 닫히면(터미널에서 답함) 닫힌다.
+    tp.memberStatus(member.id, "blocked");
+    tp.memberStatus(member.id, "working");
+    expect(await pending).toEqual({ id: card.id, state: "closed" });
+  });
+
+  test("지금 모드: 띄운 뜻(권한 방식·대신하는 모드)에서 시작해 실행기가 알려 준 실제 모드를 따른다", async () => {
+    const t = setup({ permissionMode: "auto" });
+    const member = await t.add("자료 조사", "research", { cli: "gemini" });
+    const mode = () => t.priv<GeminiEffectiveMode>("geminiEffectiveMode", t.store.requireMember(member.id));
+    expect(mode()).toBe("auto");
+    t.runner.modes.set(member.id, { cycleMode: "default", sandbox: false });
+    expect(mode()).toBe("default");
+    t.runner.modes.set(member.id, { cycleMode: "auto", sandbox: true });
+    expect(mode()).toBe("auto");
+    t.runner.modes.set(member.id, { cycleMode: "plan", sandbox: true });
+    expect(mode()).toBe("default");
+    // 사람이 Shift+Tab 으로 고른 accept-edits(대신하는 모드로 띄운 세션이 아님).
+    t.runner.modes.set(member.id, { cycleMode: "accept-edits", sandbox: true });
+    expect(mode()).toBe("accept-edits");
+    // 대신하는 모드로 띄운 세션.
+    t.runner.modes.delete(member.id);
+    t.runner.emit({ type: "gemini_mode", memberId: member.id, cycleMode: "default", sandbox: false, initial: true });
+    await until("대신하는 모드로 다시 띄움", () => t.store.getAppliedConfig(member.id)?.geminiMode === "auto-fallback");
+    expect(mode()).toBe("fallback");
+    t.runner.modes.set(member.id, { cycleMode: "accept-edits", sandbox: true });
+    expect(mode()).toBe("fallback");
+    t.runner.modes.set(member.id, { cycleMode: "accept-edits", sandbox: false });
+    expect(mode()).toBe("accept-edits");
+    t.store.patchSettings({ permissionMode: "default" });
+    t.runner.modes.delete(member.id);
+    expect(mode()).toBe("default");
+  });
+});
+
+describe("결재함 승인: 실제 훅 스크립트 → 실제 서버(/agent/permission) → 대표 답", () => {
+  test("Gemini 팀장의 명령이 카드로 뜨고, 대표가 허용하면 훅이 auto_approve(바로잡은 Cwd 와 함께)를 낸다. 옛 칸만 보내는 요청도 받는다", async () => {
+    const isolated = createIsolatedRuntime();
+    const env = { IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: isolated.socketPath, IAMCEO_HERDR_SOCKET: isolated.herdrSocketPath,
+      IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin, IAMCEO_GEMINI_BIN: isolated.bins.geminiBin };
+    updateConfigFile({ accessCode: "gemini-permission-test", hosts: ["127.0.0.1"] }, env);
+    const config = loadConfig(env);
+    const bus = new Bus();
+    const store = new Store(openDb(config.dbPath), bus);
+    store.patchSettings({ boardTidyHours: 0, permissionMode: "default" });
+    const runner = new FakeRunner();
+    const orch = new Orchestrator({ config, store, runners: new Map<Backend, Runner>([["core", runner]]), providerHomes: isolated.providerHomes, timings: { tickMs: 60_000, healthMs: 60_000 } });
+    const context: ServerContext = { config, store, bus, orch, delivery: orch.deliveryRecovery, push: { store: new PushStore(store.db), providers: () => [] }, daemon: () => ({ ready: true, buildId: "gemini-permission", version: VERSION }) };
+    let server: RunningServer | undefined;
+    do { if (server) await server.stop(); server = await startServer(context); } while (server.port === 7878);
+    const base = `http://127.0.0.1:${server.port}`;
+    orch.setServerUrl(base);
+    cleanups.push(async () => { await server!.stop(); await orch.shutdown(); store.db.close(); await isolated.stop(); });
+    const project = store.createProject({ name: "도구 승인", cwd: isolated.paths.work });
+    const member = store.createMember({ projectId: project.id, handle: "gem", name: "자료 조사", kind: "worker", backend: "core", origin: "runner", status: "working", sessionId: crypto.randomUUID(), paneId: "fake:gem", cwd: isolated.paths.work, cli: "gemini" });
+    // 팀장 열쇠가 든 MCP 설정과 도구 훅(운영과 같은 함수).
+    const run = join(config.home, "run");
+    const own = join(run, `${member.id}.gemini`);
+    mkdirSync(own, { recursive: true, mode: 0o700 });
+    const mcpConfigFile = join(own, "mcp.json");
+    writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers: { iamceo: { command: "/bin/echo", args: [], env: { IAMCEO_URL: base, IAMCEO_TOKEN: store.getMemberToken(member.id) } } } }), { mode: 0o600 });
+    const injectDir = join(own, "agy", member.id);
+    mkdirSync(injectDir, { recursive: true });
+    const set = geminiToolHookSet({ runDir: run, cwd: isolated.paths.work, injectDir, permission: { mcpConfigFile } });
+    const command = set.PreToolUse![0]!.hooks[0]!.command;
+    const input = JSON.stringify({ conversationId: "conv-1", cwd: injectDir, hookEventName: "PreToolUse", stepIdx: 2, toolCall: { id: "call_9", name: "run_command", args: { CommandLine: "bun test", WaitMsBeforeAsync: 5000 } }, workspacePaths: [injectDir, isolated.paths.work] });
+    const child = Bun.spawn(["/bin/sh", "-c", command], { stdin: new Blob([input]), stdout: "pipe", stderr: "pipe" });
+    const output = new Response(child.stdout).text();
+    await until("카드", () => store.listOpenToolPermissions().length === 1);
+    const card = store.listOpenToolPermissions()[0]!;
+    expect(card.toolPermission).toMatchObject({ tool: "run_command", action: "명령 실행", target: "bun test", cwd: isolated.paths.work });
+    const answer = await fetch(`${base}/api/decisions/${card.id}/answer`, { method: "POST", headers: { Authorization: `Bearer ${config.accessCode}`, "Content-Type": "application/json" }, body: JSON.stringify({ choice: "allow" }) });
+    expect(answer.status).toBe(200);
+    expect(JSON.parse(await output)).toEqual({ decision: "auto_approve", overwrite: { Cwd: isolated.paths.work } });
+    expect(await child.exited).toBe(0);
+    // auto 로 바꾸면 같은 명령은 카드 없이 agy 에 맡긴다(바로잡은 Cwd 만).
+    store.patchSettings({ permissionMode: "auto" });
+    const second = Bun.spawn(["/bin/sh", "-c", command], { stdin: new Blob([input]), stdout: "pipe" });
+    expect(JSON.parse(await new Response(second.stdout).text())).toEqual({ decision: "allow", overwrite: { Cwd: isolated.paths.work } });
+    expect(store.listOpenToolPermissions()).toEqual([]);
+    // 옛 Claude 훅의 요청 모양(새 칸 없음)도 그대로 받는다.
+    const token = store.getMemberToken(member.id);
+    const legacy = fetch(`${base}/agent/permission`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ toolName: "Bash", toolInput: { command: "ls" }, sessionId: "s", cwd: null }) });
+    await until("옛 요청 카드", () => store.listOpenToolPermissions().length === 1);
+    const old = store.listOpenToolPermissions()[0]!;
+    await fetch(`${base}/api/decisions/${old.id}/answer`, { method: "POST", headers: { Authorization: `Bearer ${config.accessCode}`, "Content-Type": "application/json" }, body: JSON.stringify({ choice: "deny" }) });
+    expect(await (await legacy).json()).toMatchObject({ state: "deny" });
   });
 });

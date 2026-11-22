@@ -8,6 +8,15 @@
 //    다른 길은 실측으로 닫혔다: --settings 는 hooks 를 받지 않는다(`Error: --settings: unknown setting "hooks"`, 규칙·MCP 칸도 문서에 없다).
 //    주입 폴더를 프로젝트보다 뒤로 정렬되는 곳에 두려면 IAMCEO 홈 밖(지속되지 않는 임시 폴더)이나 대표의 프로젝트 옆에 둬야 해 하지 않는다.
 //    규칙 첫 조각에도 작업 폴더를 적는다(gemini-inject.ts).
+// 2) 결재함 도구 승인(K(E2), Claude 의 PermissionRequest 훅 permission-hook.ts 와 같은 결재 카드). agy 에는 '승인 창을 띄우려 할 때만' 오는 훅이 없고,
+//    PreToolUse 는 정책 판단 전에 모든 호출에 온다. 그래서 훅이 도구의 종류(geminiKind: 명령·작업 폴더 안/밖 파일 쓰기·밖 읽기·연결 도구·웹)를 정해
+//    서버(/agent/permission)에 올리고, 서버가 지금 모드(상태줄의 cycle_mode)에서 agy 가 물을 종류일 때만 카드를 연다(tool-permission.ts geminiNeedsCard).
+//    대표가 허용하면 `auto_approve`(agy 가 물으려던 것을 승인. 대표가 agy 에 둔 거절 규칙은 그대로 듣는다), 거절하면 `deny` + 까닭(모델이 받는다).
+//    카드가 필요 없거나 답이 없으면(닫힘·시간 초과·서버 없음) 승인 판정 없이 끝난다 = agy 의 원래 창(오늘의 동작). 읽기 전용 도구(작업 폴더 안 읽기)와
+//    IAMCEO 의 MCP 도구(call_mcp_tool ServerName=iamceo, --settings 의 허용 규칙)는 서버에 묻지 않는다.
+//    1.5.14 실측: auto_approve·deny 가 run_command·write_file·edit_file·call_mcp_tool·invoke_subagent 에 듣고, 서브에이전트의 도구 호출도 이 훅을 거치며,
+//    훅을 630초 붙잡아도 agy 가 기다린다(제한 시간 700). 한 대화 안에서는 훅이 하나씩 돈다(부모와 서브에이전트는 동시에 돌 수 있다).
+// 3) 서브에이전트 단계는 아래 설정의 tier 가 있을 때 invoke_subagent 의 Model 을 바꿔 쓴다(뒤 커밋).
 //
 // 지키는 것
 // - 언제나 0 으로 끝난다. 표준 출력에는 판정 JSON 하나를 내거나 아무것도 내지 않는다. agy 1.5.14 실측: 빈 출력 + 0 = agy 의 기본 정책,
@@ -19,6 +28,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSy
 import { dirname, isAbsolute, join } from "node:path";
 import { bunScriptCommand, shellQuote as quote } from "./bun-script.ts";
 import type { GeminiHookSet } from "./gemini-hooks.ts";
+import { PERMISSION_HOOK_TIMEOUT_SEC, TOOL_PERMISSION_POLL_MS, TOOL_PERMISSION_TTL_MS } from "./permission-hook.ts";
 
 export const GEMINI_TOOL_HOOK_MARKER = "iamceo-gemini-tool-hook";
 /** 판정만 하는 훅의 제한 시간(초). 스크립트는 그 전에 스스로 끝난다(LOCAL_MS). 넘기면 agy 가 끊고 도구를 막는다. */
@@ -26,8 +36,18 @@ export const GEMINI_TOOL_HOOK_LOCAL_TIMEOUT_SEC = 30;
 const LOCAL_MS = 20_000;
 /** 파일을 쓰는 도구(훅에 보이는 이름). 1.5.14 의 실제 호출은 write_file·edit_file 이고, 나머지는 문서·init.tools 의 이름이다(맞지 않아도 해가 없다). */
 export const GEMINI_WRITE_TOOLS = ["write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file", "notebook_edit"] as const;
+/** 파일을 읽는 도구. 작업 폴더 밖을 읽을 때만 결재함에 묻는다(agy 도 그때만 묻는다). */
+export const GEMINI_READ_TOOLS = ["read_file", "view_file"] as const;
+/** 웹 페이지를 읽거나 여는 도구(agy 의 read_url·execute_url 허락. 허용 규칙이 없으면 묻는다). */
+export const GEMINI_WEB_TOOLS = ["read_url_content", "open_browser_url", "browser_subagent"] as const;
 /** 경로를 담는 인자 이름(실측: write_file·edit_file·read_file 은 Path). */
 const PATH_KEYS = ["Path", "TargetFile", "AbsolutePath", "FilePath"];
+/**
+ * 훅이 서버에 알리는 도구의 종류. command: 셸 명령, edit: 작업 공간 안 파일 쓰기, edit_temp·read_temp: 임시 폴더, edit_outside·read_outside: 그 밖,
+ * mcp: IAMCEO 밖의 연결 도구, web: 웹 페이지. 작업 공간 안 읽기와 IAMCEO 연결 도구는 종류가 없다(묻지 않는다).
+ */
+export const GEMINI_TOOL_KINDS = ["command", "edit", "edit_temp", "edit_outside", "read_temp", "read_outside", "mcp", "web"] as const;
+export type GeminiToolKind = (typeof GEMINI_TOOL_KINDS)[number];
 
 /** 정규식의 이름 묶음: `^(a|b|c)$`. 도구 이름은 영문 소문자·숫자·`_` 뿐이라 따로 이스케이프하지 않는다. */
 function anchored(names: readonly string[]): string {
@@ -51,7 +71,7 @@ const finish = (out) => {
 process.on('uncaughtException', () => finish());
 process.on('unhandledRejection', () => finish());
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGPIPE']) { try { process.on(signal, () => finish()); } catch {} }
-setTimeout(() => finish(), LOCAL_MS);
+let safety = setTimeout(() => finish(), LOCAL_MS);
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const absText = (value) => typeof value === 'string' && value.length > 0 && value.length <= 4096 && isAbsolute(value) && !value.includes('\0');
 // 한 경로가 가리키는 자리들: 적힌 것(정규화)과 실제 경로(/tmp → /private/tmp). 아직 없는 파일은 가장 가까운 있는 부모의 실제 경로로 잇는다.
@@ -96,7 +116,75 @@ try {
   }
   const paths = PATH_KEYS.map((key) => args[key]).filter((value) => typeof value === 'string' && value.length > 0);
   if (WRITE_TOOLS.includes(name) && paths.some(inInject)) finish(JSON.stringify({ decision: 'deny', reason: String(config.injectDeny || '') }));
-  if (Object.keys(overwrite).length) fallback = JSON.stringify({ decision: 'allow', overwrite });
+  const changed = Object.keys(overwrite).length > 0;
+  if (changed) fallback = JSON.stringify({ decision: 'allow', overwrite });
+  // 2) 결재함 승인: 도구의 종류. 서버가 지금 모드에서 agy 가 물을 종류인지 정한다.
+  const permission = isObject(config.permission) ? config.permission : null;
+  if (!permission || typeof permission.mcpConfigFile !== 'string') finish();
+  const spaceForms = workspaces.flatMap(forms);
+  const tempForms = ['/tmp', '/private/tmp', '/var/folders', process.env.TMPDIR].filter(absText).flatMap(forms);
+  const place = (path) => {
+    const at = forms(resolve(base, path));
+    if (at.some((form) => within(form, spaceForms))) return 'inside';
+    return at.some((form) => within(form, tempForms)) ? 'temp' : 'outside';
+  };
+  const worst = () => paths.map(place).reduce((a, b) => (a === 'outside' || b === 'outside' ? 'outside' : a === 'temp' || b === 'temp' ? 'temp' : 'inside'), 'inside');
+  let kind = null;
+  if (name === 'run_command') kind = 'command';
+  else if (WRITE_TOOLS.includes(name)) { const at = worst(); kind = at === 'inside' ? 'edit' : at === 'temp' ? 'edit_temp' : 'edit_outside'; }
+  else if (READ_TOOLS.includes(name)) { const at = worst(); kind = at === 'inside' ? null : at === 'temp' ? 'read_temp' : 'read_outside'; }
+  else if (name === 'call_mcp_tool') kind = args.ServerName === 'iamceo' ? null : 'mcp';
+  else if (WEB_TOOLS.includes(name)) kind = 'web';
+  if (!kind) finish();
+  const env = JSON.parse(readFileSync(permission.mcpConfigFile, 'utf8'))?.mcpServers?.iamceo?.env ?? {};
+  const serverBase = typeof env.IAMCEO_URL === 'string' ? env.IAMCEO_URL.replace(/\/+$/, '') : '';
+  const token = env.IAMCEO_TOKEN;
+  if (!/^https?:\/\/[^\s]+$/.test(serverBase) || typeof token !== 'string' || !token) finish();
+  // 이 Mac 의 서버(127.0.0.1)로 가는 요청은 프록시를 거치지 않는다(permission-hook.ts 와 같은 까닭: 팀장 열쇠가 실린 요청이 밖으로 나가지 않게).
+  for (const key of ['NO_PROXY', 'no_proxy']) process.env[key] = [process.env[key], '127.0.0.1', 'localhost', '::1'].filter(Boolean).join(',');
+  clearTimeout(safety);
+  safety = setTimeout(() => finish(), TOTAL_MS + 5000);
+  const started = Date.now();
+  const post = async (path, body) => {
+    const left = TOTAL_MS - (Date.now() - started);
+    if (left <= 0) return null;
+    const response = await fetch(serverBase + path, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(Math.min(POLL_MS + 20000, left + 5000)),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return isObject(data) ? data : null;
+  };
+  // 긴 글은 자르고, 깊은 구조·긴 목록은 잘라 낸다. 가리기·요약은 서버가 한다.
+  const shrink = (value, depth) => {
+    if (typeof value === 'string') return value.length > MAX_STRING ? value.slice(0, MAX_STRING) + '…' : value;
+    if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+    if (depth >= 5) return '…';
+    if (Array.isArray(value)) return value.slice(0, 40).map((item) => shrink(item, depth + 1));
+    if (isObject(value)) { const out = {}; for (const key of Object.keys(value).slice(0, 60)) out[key] = shrink(value[key], depth + 1); return out; }
+    return null;
+  };
+  const text = (value, max) => typeof value === 'string' && value.length > 0 ? value.slice(0, max) : null;
+  // 바꿔 쓴 인자(Cwd)가 실제로 돌 값이다. 카드에도 그 값을 보인다.
+  const effective = { ...args, ...overwrite };
+  let answer = await post('/agent/permission', {
+    toolName: name.slice(0, 200),
+    toolInput: shrink(effective, 0),
+    sessionId: text(input.conversationId, 128),
+    cwd: text(typeof effective.Cwd === 'string' ? effective.Cwd : config.cwd, 4096),
+    cli: 'gemini',
+    geminiKind: kind,
+    toolCallId: text(input.toolCall.id, 128),
+  });
+  while (answer && answer.state === 'pending' && typeof answer.id === 'string') answer = await post('/agent/permission/wait', { id: answer.id });
+  if (answer && answer.state === 'allow') finish(JSON.stringify({ decision: 'auto_approve', ...(changed ? { overwrite } : {}) }));
+  if (answer && answer.state === 'deny') {
+    const message = typeof answer.message === 'string' && answer.message ? answer.message.slice(0, 2000) : '대표가 결재함에서 거절했습니다.';
+    finish(JSON.stringify({ decision: 'deny', reason: message }));
+  }
 } catch {}
 finish();
 `;
@@ -105,6 +193,9 @@ export interface GeminiToolHookScriptOptions {
   execPath?: string;
   /** 시험에서만 바꾼다. */
   localMs?: number;
+  /** 시험에서만 줄인다. 실제로는 TOOL_PERMISSION_TTL_MS 보다 조금 길다(permission-hook.ts 와 같다). */
+  totalMs?: number;
+  pollMs?: number;
 }
 
 /** run/iamceo-gemini-tool-hook.mjs 를 쓴다(내용이 같으면 다시 쓰지 않는다). 스크립트 경로를 돌려준다. */
@@ -112,8 +203,12 @@ export function writeGeminiToolHook(runDir: string, options: GeminiToolHookScrip
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
   const path = join(runDir, `${GEMINI_TOOL_HOOK_MARKER}.mjs`);
   const local = options.localMs ?? LOCAL_MS;
-  if (!Number.isSafeInteger(local) || local <= 0) throw new Error("Invalid gemini tool hook limits");
-  const content = `const LOCAL_MS = ${local};\nconst MAX_INPUT = ${16 * 1024 * 1024};\nconst WRITE_TOOLS = ${JSON.stringify(GEMINI_WRITE_TOOLS)};\nconst PATH_KEYS = ${JSON.stringify(PATH_KEYS)};\n${SCRIPT}`;
+  const total = options.totalMs ?? TOOL_PERMISSION_TTL_MS + 30_000;
+  const poll = options.pollMs ?? TOOL_PERMISSION_POLL_MS;
+  if (![local, total, poll].every(value => Number.isSafeInteger(value) && value > 0)) throw new Error("Invalid gemini tool hook limits");
+  const content = [`const LOCAL_MS = ${local};`, `const TOTAL_MS = ${total};`, `const POLL_MS = ${poll};`, "const MAX_STRING = 4000;", `const MAX_INPUT = ${16 * 1024 * 1024};`,
+    `const WRITE_TOOLS = ${JSON.stringify(GEMINI_WRITE_TOOLS)};`, `const READ_TOOLS = ${JSON.stringify(GEMINI_READ_TOOLS)};`, `const WEB_TOOLS = ${JSON.stringify(GEMINI_WEB_TOOLS)};`,
+    `const PATH_KEYS = ${JSON.stringify(PATH_KEYS)};`, SCRIPT].join("\n");
   writePrivate(path, content);
   return path;
 }
@@ -145,6 +240,11 @@ export interface GeminiToolHookInput extends GeminiToolHookScriptOptions {
   cwd: string;
   /** 이 팀장의 주입 폴더(gemini-inject.ts geminiInjectDir). */
   injectDir: string;
+  /**
+   * 결재함 도구 승인. 있으면 묻는 도구를 이 Mac 의 서버에 올린다. mcpConfigFile 은 팀장 열쇠가 든 IAMCEO MCP 설정(0600, 주입 폴더 밖):
+   * 주소와 열쇠를 거기서 읽는다(명령줄·설정 파일에 열쇠를 싣지 않는다). 없으면 승인은 agy 가 정한다(묻지 않기 팀장, 받을 서버가 없음).
+   */
+  permission?: { mcpConfigFile: string } | null;
 }
 
 /**
@@ -153,12 +253,17 @@ export interface GeminiToolHookInput extends GeminiToolHookScriptOptions {
  * 스크립트가 돌지 못하면 아무것도 내지 않고 0 으로 끝난다(= agy 의 기본 정책). 상대 경로면 던진다.
  */
 export function geminiToolHookSet(input: GeminiToolHookInput): GeminiHookSet {
-  if (!isAbsolute(input.runDir) || !isAbsolute(input.cwd) || !isAbsolute(input.injectDir)) throw new Error("Gemini tool hook paths must be absolute");
+  if (!isAbsolute(input.runDir) || !isAbsolute(input.cwd) || !isAbsolute(input.injectDir) || (input.permission && !isAbsolute(input.permission.mcpConfigFile))) throw new Error("Gemini tool hook paths must be absolute");
   const script = writeGeminiToolHook(input.runDir, input);
   const configFile = geminiToolHookConfigFile(input.injectDir);
   // 주입 폴더의 부모(…/agy)는 처음 띄울 때 아직 없다. 주입 폴더를 쓰는 쪽(gemini-inject.ts)과 같은 권한(0700)으로 만든다.
   mkdirSync(dirname(configFile), { recursive: true, mode: 0o700 });
-  writePrivate(configFile, `${JSON.stringify({ v: 1, cwd: input.cwd, injectDir: input.injectDir, injectDeny: geminiInjectDenyReason(input.cwd, input.injectDir) })}\n`);
+  const permission = input.permission ? { mcpConfigFile: input.permission.mcpConfigFile } : null;
+  writePrivate(configFile, `${JSON.stringify({ v: 1, cwd: input.cwd, injectDir: input.injectDir, injectDeny: geminiInjectDenyReason(input.cwd, input.injectDir), permission })}\n`);
   const command = `cd ${quote(input.runDir)} 2>/dev/null && ${bunScriptCommand(input.execPath ?? process.execPath, input.runDir, script)} ${quote(configFile)} 2>/dev/null; exit 0`;
-  return { PreToolUse: [{ matcher: anchored(["run_command", ...GEMINI_WRITE_TOOLS]), hooks: [{ type: "command", command, timeout: GEMINI_TOOL_HOOK_LOCAL_TIMEOUT_SEC }] }] };
+  // 프로세스는 matcher 에 맞는 호출에만 뜬다: 폴더 바로잡기는 명령·쓰기, 승인은 읽기·연결 도구·웹을 더한다.
+  const names = ["run_command", ...GEMINI_WRITE_TOOLS, ...(permission ? [...GEMINI_READ_TOOLS, "call_mcp_tool", ...GEMINI_WEB_TOOLS] : [])];
+  // 승인을 기다리면 대표의 답까지 붙잡는다: 서버가 카드를 닫는 시간보다 넉넉히 길다(Claude 승인 훅과 같다).
+  const timeout = permission ? PERMISSION_HOOK_TIMEOUT_SEC : GEMINI_TOOL_HOOK_LOCAL_TIMEOUT_SEC;
+  return { PreToolUse: [{ matcher: anchored(names), hooks: [{ type: "command", command, timeout }] }] };
 }

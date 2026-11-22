@@ -1090,8 +1090,10 @@ export function openDb(path: string): Database {
     ensureProjectRules(db);
     // 0.2.7 묶음 4: 결재·자료의 판 갈이와 결재 답 첨부. 판 번호를 올리지 않는다(이전 판 서버도 이 DB 를 그대로 연다).
     ensureRevisionColumns(db);
-    // 이주가 끝났으면 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다.
-    if (backup) removePreMigrationBackups(path, all => all.slice(PRE_MIGRATION_KEEP).filter(entry => Date.now() - entry.at > PRE_MIGRATION_KEEP_MS));
+    // 최근 사본 몇 개만 남긴다. 하루 안에 만든 것은 개수와 상관없이 둔다(방금 만든 사본은 늘 가장 최근 것이다).
+    // 11-22: 예전에는 번호 이주가 실제로 돈 시작 때만 정리했는데, v33 뒤의 스키마 변경은 모두 ensure* 라 이주가 없어
+    // v12~v32 사본 11개(263 MB)가 그대로 남았다. 이제 DB 를 열 때마다 본다(파일 목록 한 번이라 시작 시간에 영향이 없다).
+    if (path !== ":memory:" && path !== "") removePreMigrationBackups(path, all => all.slice(PRE_MIGRATION_KEEP).filter(entry => Date.now() - entry.at > PRE_MIGRATION_KEEP_MS && entry.path !== backup));
     // Source parsing/index failures cannot roll back the schema or delay server startup.
     // Durable pending rows survive shutdown and resume in bounded, best-effort batches.
     scheduleFileSearchBackfill(db);

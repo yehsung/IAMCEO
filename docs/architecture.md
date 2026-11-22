@@ -138,11 +138,11 @@ APNs 발신 대기열은 CLI 입력 대기열과 별개다. 새 기기는 알림
 |---|---|
 | `config.json` | 접속 코드·포트·주소·실행 파일 경로, 권한 0600 |
 | `iamceo.db` | WAL SQLite의 프로젝트·멤버·결재·할 일·업무·대화·파일·전달·설정과 실행 기록 |
-| `iamceo.db.pre-v*.bak` | 마이그레이션 전 DB 백업, 권한 0600 |
+| `iamceo.db.pre-v*.bak` | 마이그레이션 전 DB 백업, 권한 0600. DB 를 열 때마다 최근 3개(하루 안의 것은 모두)만 남긴다 |
 | `uploads/`, `inbox/<member>/` | 첨부 원본과 멤버에게 전달할 파일 |
 | `roles/`, `run/`, `logs/` | 역할 템플릿, 호출별 규칙·MCP 설정·core 소켓, 서비스 로그 |
 | `core-state/`, `core-config/` | IAMCEO 전용 core 상태·설정 |
-| `backups/` | 정기 백업(일별 7개·주별 4개) |
+| `backups/` | 정기 백업(일별 7개·주별 4개, APFS 면 첨부는 clone). 배포·설치 직전 사본(`pre-*`·`app-pre-*`)은 종류마다 최근 3개 |
 | `diagnostics/` | 진단 파일 폴더와 zip, 최근 5개 |
 | `cli-versions.json` | 서버가 읽은 Claude·Codex 버전과 처음 본 시각(비밀 없음) |
 | `run/events/` | Claude 훅 사건 기록(`<팀장>.jsonl`, 1MiB 넘으면 `.1` 로 한 번 돌림, 30일 안 쓰면 지움)과 비교 숫자 `compare.json`. 글 본문 없음. 판정에는 아직 쓰지 않음(spec '추가 계약 3차') |

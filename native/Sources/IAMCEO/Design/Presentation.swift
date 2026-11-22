@@ -3,13 +3,18 @@ import Foundation
 // Pure mapping from server values to honest Korean UI language. No View code here so it stays testable.
 // Labels match the web client so the same person sees the same words on every device.
 
+/// CLI 의 짧은 이름(서버 shared/types.ts CLI_INFO 의 short). 이 앱이 모르는 값은 받은 글자를 그대로 보인다(다른 CLI 이름으로 바꾸지 않는다).
 func providerName(_ cli: String) -> String {
-    switch cli { case "claude": "Claude"; case "codex": "Codex"; default: cli.capitalized }
+    switch cli { case "claude": "Claude"; case "codex": "Codex"; case "gemini": "Gemini"; default: cli.capitalized }
 }
 
+/// CLI 의 긴 이름(제품 이름). Gemini 팀장을 띄우는 프로그램은 Google Antigravity CLI(`agy`)다.
 func providerFullName(_ cli: String) -> String {
-    switch cli { case "claude": "Claude Code"; case "codex": "Codex CLI"; default: cli }
+    switch cli { case "claude": "Claude Code"; case "codex": "Codex CLI"; case "gemini": "Antigravity CLI"; default: cli }
 }
+
+/// 이 앱이 모르는 CLI 를 가리키는 이름. 다른 CLI 의 이름·모델·설정을 대신 보이지 않고 이렇게 적는다.
+var unknownCLIName: String { String(localized: "알 수 없는 CLI") }
 
 func rankName(_ kind: String) -> String {
     switch kind { case "conductor": String(localized: "총괄"); case "root": String(localized: "본사 AI"); case "worker": String(localized: "팀장"); default: kind }
@@ -176,10 +181,15 @@ struct BlockedGuide: Sendable, Equatable {
             label = String(localized: "폴더 신뢰 확인 필요")
             // Named after the session's own CLI, as the first-run choice names them; an unknown kind is left unnamed
             // rather than called Claude Code.
-            let cli = ["claude": "Claude Code", "codex": "Codex"][member.cli]
+            let cli = ["claude": "Claude Code", "codex": "Codex", "gemini": "Antigravity CLI"][member.cli]
             explanation = (cli.map { String(localized: "\($0)\(subjectParticle($0)) 이 폴더를 신뢰할지 묻고 있습니다.") } ?? String(localized: "이 폴더를 신뢰할지 묻는 창이 떠 있습니다."))
                 + String(localized: " 터미널에서 직접 답해 주세요.")
             actionTitle = String(localized: "터미널 열어 직접 답하기")
+        case "gemini_setup":
+            // The sign-in and first-run consent screens of Antigravity CLI are answered by the owner only; the server never sends keys there.
+            label = String(localized: "로그인·첫 설정 필요")
+            explanation = String(localized: "Antigravity CLI의 로그인·첫 설정이 끝나지 않았습니다. 터미널을 열어 직접 끝내 주세요.")
+            actionTitle = String(localized: "터미널 열어 직접 끝내기")
         case "start_not_ready":
             label = String(localized: "시작 지연")
             explanation = String(localized: "시작이 늦어지고 있습니다. 터미널을 열어 상태를 확인해 주세요.")
@@ -264,8 +274,13 @@ struct PermissionModeChoice: Identifiable, Sendable, Equatable {
     }
     static let firstRunTitle = String(localized: "팀장이 명령을 실행하는 방식")
     /// `onThisMac`: the Mac app on the server's own Mac. An iPhone or a remote Mac says "연결된 Mac".
-    static func firstRunLead(onThisMac: Bool) -> String {
-        String(localized: "팀장은 \(onThisMac ? String(localized: "이 Mac") : String(localized: "연결된 Mac"))에서 Claude Code·Codex로 명령을 실행합니다. 파일을 고치고 지우는 일, 프로그램 설치, git 명령이 포함됩니다. 어떻게 실행할지 골라 주세요. 설정에서 언제든 바꿀 수 있습니다.")
+    /// `gemini`: 그 Mac 에 Antigravity CLI 도 깔려 있다. 그때만 Gemini 를 함께 적는다(없는 Mac 의 안내는 예전 그대로다).
+    static func firstRunLead(onThisMac: Bool, gemini: Bool = false) -> String {
+        let place = onThisMac ? String(localized: "이 Mac") : String(localized: "연결된 Mac")
+        if gemini {
+            return String(localized: "팀장은 \(place)에서 Claude Code·Codex·Gemini로 명령을 실행합니다. 파일을 고치고 지우는 일, 프로그램 설치, git 명령이 포함됩니다. 어떻게 실행할지 골라 주세요. 설정에서 언제든 바꿀 수 있습니다.")
+        }
+        return String(localized: "팀장은 \(place)에서 Claude Code·Codex로 명령을 실행합니다. 파일을 고치고 지우는 일, 프로그램 설치, git 명령이 포함됩니다. 어떻게 실행할지 골라 주세요. 설정에서 언제든 바꿀 수 있습니다.")
     }
     static let firstRunConfirm = String(localized: "이대로 시작")
 }
@@ -472,6 +487,7 @@ struct DeliveryEvidenceInfo: Sendable {
         switch evidence.source {
         case "claude_log": sourceLabel = String(localized: "Claude 주 세션 입력 기록")
         case "codex_log": sourceLabel = String(localized: "Codex 주 세션 입력 기록")
+        case "gemini_log": sourceLabel = String(localized: "Gemini 주 세션 입력 기록")
         case "transport": sourceLabel = String(localized: "터미널 응답")
         case "core_screen", "herdr_screen": sourceLabel = evidence.location == "composer" ? String(localized: "입력칸") : String(localized: "터미널 화면")
         default: sourceLabel = String(localized: "전달 근거")

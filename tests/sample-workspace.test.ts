@@ -170,7 +170,7 @@ async function buildSample(lang: Lang): Promise<string> {
   const isolated = createIsolatedRuntime();
   const env = { IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0",
     IAMCEO_CORE_SOCKET: isolated.socketPath, IAMCEO_HERDR_SOCKET: isolated.herdrSocketPath,
-    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin };
+    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin, IAMCEO_GEMINI_BIN: isolated.bins.geminiBin };
   updateConfigFile({ accessCode: "sample-workspace", hosts: ["127.0.0.1"] }, env);
   const config = loadConfig(env);
   // 시각을 고정한다. 아래의 at(분) 은 '기준 시각에서 몇 분 전'으로 시계를 옮긴다.

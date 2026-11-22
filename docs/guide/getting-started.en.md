@@ -11,6 +11,7 @@ IAMCEO is a server that runs on your Mac plus native Mac and iPhone apps. The se
 - [ ] **An Apple Silicon Mac on macOS 14 (Sonoma) or later.** Intel Macs are not supported.
 - [ ] **Claude Code, installed and signed in.** Install it from [claude.com/claude-code](https://claude.com/claude-code), then run `claude` once in Terminal and sign in. Without a sign-in, staff stop right after starting.
 - [ ] **(Optional) Codex CLI.** To run staff on Codex, install it and run `codex` once in Terminal to sign in.
+- [ ] **(Optional, from 0.2.10) Antigravity CLI.** To run the lead or staff on Gemini, install the [Antigravity CLI](https://antigravity.google/docs/getting-started) and run `agy` once in Terminal to sign in and finish the first-run setup (terms). You do the sign-in and accept the terms yourself; IAMCEO never does it for you.
 - [ ] **(For the iPhone) Tailscale.** Install [Tailscale](https://tailscale.com) on the Mac and the iPhone and sign in with the same account. See [Connecting an iPhone](iphone.en.md).
 - [ ] **You understand the permission mode.** By default the lead and staff run commands without stopping at approval prompts ("don't ask"). You pick one of three modes on first start. What is blocked and what is not is in [Security](../security.en.md).
 
@@ -109,6 +110,7 @@ See how much the lead and staff have used in **설정 → AI 모델 → 사용�
 - The numbers are exactly what the CLIs reported. IAMCEO does not calculate or estimate them.
   - Claude Code reports a cost (in US dollars) and tokens. On a subscription plan, that amount can differ from what you are actually billed.
   - Codex reports tokens only, so tokens appear instead of a cost.
+  - Gemini (the Antigravity CLI) reports a cost the CLI estimates, and tokens. Its limits appear one line per quota group that Antigravity reports, as the share used.
 - The server collects the numbers every minute and files them under the day it received them (usage near midnight can land on the next day). Usage older than 90 days is deleted.
 - For a session that was already running before this feature, its running total up to that point lands on the day it is first collected.
 - This group appears only on a server that collects usage; connected to an older server, it is hidden.

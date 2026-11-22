@@ -19,7 +19,19 @@ import type { CliAccount, CliAccountCli, CliLogin, CliLoginApplied, CliLoginPhas
 import { ERROR_CODES, type ErrorCode } from "../shared/error-codes.ts";
 import { childEnv } from "./runner/env.ts";
 
+/**
+ * 로그인을 다루는 CLI. Gemini(Antigravity CLI)는 넣지 않는다: 로그인 하위 명령이 없고 브라우저로만 로그인한다.
+ * 이미 나간 앱(0.2.8·0.2.9)은 모르는 CLI 의 계정 줄을 'Claude Code' 로 그리므로, 계정 목록(GET /api/cli-accounts)에도 싣지 않는다.
+ */
 export const CLI_LOGIN_CLIS: readonly CliAccountCli[] = ["claude", "codex"];
+// 이 파일의 갈림(claude 가 아니면 codex)은 CliAccountCli 가 이 둘뿐이라는 데 기댄다. 값을 더하면 아래 줄이 컴파일 오류가 된다:
+// 새 CLI 가 Codex 길(`codex login --device-auth`, ~/.codex/auth.json, Codex 출력 해석)로 빠지기 전에 갈림마다 가지를 더하게 한다.
+const ONLY_CLAUDE_AND_CODEX: [Exclude<CliAccountCli, "claude" | "codex">] extends [never] ? true : never = true;
+void ONLY_CLAUDE_AND_CODEX;
+/** 타입을 거치지 않은 값(요청 본문 등)이 로그인을 다루는 CLI 인가. */
+export function isCliLoginCli(value: unknown): value is CliAccountCli {
+  return (CLI_LOGIN_CLIS as readonly unknown[]).includes(value);
+}
 const CLAUDE_LOGIN_MS = 15 * 60_000;
 /** Codex 의 기기 코드는 15분. CLI 가 스스로 끝내지 못했을 때를 위해 1분 더 둔다. */
 const CODEX_LOGIN_MS = 16 * 60_000;
@@ -299,6 +311,8 @@ export class CliLogins {
   }
 
   private async startOnce(cli: CliAccountCli, restart: boolean): Promise<CliLogin> {
+    // 타입 밖의 값(gemini 등)으로 불렸으면 Codex 로그인으로 흘려보내지 않고 거절한다.
+    if (!isCliLoginCli(cli)) throw new CliLoginError(400, "cli_login_start_failed");
     if (this.closed) throw new CliLoginError(503, "cli_login_start_failed");
     const running = [...this.sessions.values()].find(s => s.view.cli === cli && ACTIVE.has(s.view.phase));
     if (running && !restart) return { ...running.view };

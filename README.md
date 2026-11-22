@@ -6,7 +6,7 @@
 
 **Run your AI coding agents like a company. You talk and decide — that's it.**
 
-Split several Claude Code and Codex sessions into a lead and staff,<br/>
+Split several Claude Code, Codex and Gemini sessions into a lead and staff,<br/>
 then give instructions and approve decisions from one Mac and iPhone app.
 
 [![Latest release](https://img.shields.io/github/v/release/yehsung/IAMCEO?style=flat-square&color=8b5cf6&label=release)](https://github.com/yehsung/IAMCEO/releases/latest)
@@ -27,7 +27,7 @@ then give instructions and approve decisions from one Mac and iPhone app.
 - **Deliverables, not paths** — documents, tables, images, videos and HTML pages open right in the app, under Files.
 - **Keep going away from the desk** — instruct and approve from your iPhone while your Mac keeps the work running. iPhone notifications go through a small relay run by the developer → [Notifications](#notifications).
 - **Your records, on your Mac** — conversations, decisions and files live in SQLite on your Mac and survive AI account changes.
-- **Your CLI setup carries over** — agents run the official Claude Code and Codex CLIs under your own log-in, so what you keep in the CLIs' settings files — settings, MCP servers, skills, `CLAUDE.md` — keeps working. → [What is different](#what-is-different)
+- **Your CLI setup carries over** — agents run the official Claude Code, Codex and Antigravity CLIs under your own log-in, so what you keep in the CLIs' settings files — settings, MCP servers, skills, `CLAUDE.md` — keeps working. → [What is different](#what-is-different)
 - **No reinvented wheels** — the official CLIs, herdr-core, MCP, SQLite and Tailscale are used as they are; IAMCEO builds only the layer that makes them work like a company. → [Design](#how-it-works)
 
 Mac and iPhone native apps are the supported clients. The iOS app is for iPhone only; iPad is not supported. The web client was removed on 2026-11-10; existing native app API contracts remain supported.
@@ -40,9 +40,9 @@ brew install --cask yehsung/tap/iamceo
 
 Or `curl -fsSL https://raw.githubusercontent.com/yehsung/IAMCEO/main/install.sh | sh` · [download the DMG](https://github.com/yehsung/IAMCEO/releases/latest)
 
-**Requires** an Apple Silicon Mac on macOS 14+ and [Claude Code](https://claude.com/claude-code), installed and logged in. [Codex CLI](https://github.com/openai/codex) is optional. Each CLI runs under your own account and its usage limits.
+**Requires** an Apple Silicon Mac on macOS 14+ and [Claude Code](https://claude.com/claude-code), installed and logged in. [Codex CLI](https://github.com/openai/codex) and, for Gemini, the [Antigravity CLI](https://antigravity.google/docs/getting-started) (from 0.2.10) are optional. Each CLI runs under your own account and its usage limits.
 
-**Know this before you start:** by default, the lead and staff run commands without stopping at approval prompts (Claude Code in `bypassPermissions` mode, Codex with approvals and its sandbox bypassed). The first time you start on a Mac you choose one of three — don't ask (the default choice), ask only when risky, or ask every time — and you can change it later in Settings. What the server enforces and what is only a promise is in [Who decides](#who-decides); the trust model is in [Security](docs/security.en.md).
+**Know this before you start:** by default, the lead and staff run commands without stopping at approval prompts (Claude Code in `bypassPermissions` mode, Codex with approvals and its sandbox bypassed, the Antigravity CLI with `--dangerously-skip-permissions`). The first time you start on a Mac you choose one of three — don't ask (the default choice), ask only when risky, or ask every time — and you can change it later in Settings. What the server enforces and what is only a promise is in [Who decides](#who-decides); the trust model is in [Security](docs/security.en.md).
 
 ## Quick start
 
@@ -132,6 +132,7 @@ Only what the code actually does.
   - Claude Code: the status line is wrapped so IAMCEO can read context usage (your own status line command still runs), and prompt suggestions are off
   - Claude Code: hooks for these sessions only, through which the CLI itself writes session start, prompt received, turn end, error type and compaction to `~/.iamceo/run/events`, one line each and no message text. For now IAMCEO only compares them with its own reading; your own hooks stay as they are
   - Codex: multi-agent is on, the update check at start is off, and the role instructions go in as `developer_instructions`, which takes the place of one set in your `config.toml` for these sessions
+  - Gemini (Antigravity CLI): the role instructions, the connection to IAMCEO's tools and the event hooks live in a per-session folder under `~/.iamceo/run` that is passed with `--add-dir`. The status line of these sessions is replaced by IAMCEO's so it can read context usage and the conversation ID (your own status line command is not shown in them), and tips and surveys are off. Nothing is written to your `~/.gemini` settings or to the project folder
 
 **What it does not do**
 
@@ -148,7 +149,7 @@ flowchart LR
     APP["Mac · iPhone apps<br/>(SwiftUI)"] -- "REST · WebSocket<br/>Tailscale" --> D["IAMCEO server<br/>delivery queue · decisions · files"]
     D --- DB[("SQLite")]
     D -- "holds terminals" --> CORE["herdr-core"]
-    CORE --> L["Lead<br/>Claude Code"] & W["Staff<br/>Claude Code · Codex"]
+    CORE --> L["Lead<br/>Claude Code"] & W["Staff<br/>Claude Code · Codex · Gemini"]
     L & W -- "MCP tools<br/>post · ask · file · team_assign" --> D
     classDef own fill:#8b5cf6,stroke:#6d28d9,color:#ffffff
     classDef reuse fill:#f4f1fa,stroke:#b8a9d9,color:#1f1633
@@ -162,7 +163,7 @@ flowchart LR
 
 | Job | What does it | What you get |
 |---|---|---|
-| The AI and its coding tools | The official [Claude Code](https://claude.com/claude-code) and [Codex CLI](https://github.com/openai/codex) | Your own subscription and log-in. No API key, no fee added by IAMCEO, and new CLI features arrive as soon as the CLI ships them. |
+| The AI and its coding tools | The official [Claude Code](https://claude.com/claude-code), [Codex CLI](https://github.com/openai/codex) and [Antigravity CLI](https://antigravity.google/docs/getting-started) | Your own subscription and log-in. No API key, no fee added by IAMCEO, and new CLI features arrive as soon as the CLI ships them. |
 | Holding terminals | [herdr-core](https://github.com/herdrdev/herdr-core) | Sessions stay alive when you close the app or restart the server. |
 | Talking to the agents | The [MCP](https://modelcontextprotocol.io) standard | No screen scraping. Reports and requests arrive as tool calls, so everything is recorded. |
 | Server and data | [Bun](https://bun.sh) and SQLite | No database server to install. Your data sits in one folder on your Mac (`~/.iamceo`: a SQLite database and the attachments), and the server makes a checked backup of it once a day. Only two runtime packages. |
@@ -181,7 +182,7 @@ flowchart LR
 
 ### Design rules
 
-- **The official CLIs, unchanged.** Claude Code and Codex run in interactive terminals under your own log-ins. IAMCEO only adds role instructions, an MCP connection, and a status line and event hooks for its own sessions, and never edits the CLIs' global settings.
+- **The official CLIs, unchanged.** Claude Code, Codex and the Antigravity CLI run in interactive terminals under your own log-ins. IAMCEO only adds role instructions, an MCP connection, and a status line and event hooks for its own sessions, and never edits the CLIs' global settings.
 - **Sessions outlive the apps and the server.** herdr-core holds the terminals, so closing the app or restarting the server never stops the work.
 - **No guessing at state.** Whether a member is working or done comes from the record the CLI writes. When that is unknown, IAMCEO stops typing and asks you to check.
 - **Reports are tool calls, not screen scraping.** Reports (`post`), decisions (`ask`), files (`file`) and assignments (`team_assign`) are all recorded.

@@ -254,7 +254,8 @@ struct OfficeView: View {
     }
 
     private func contextDue(_ member: Member) -> Int? {
-        guard let pct = member.contextPct else { return nil }
+        // '압축 권장' 표시다. IAMCEO 가 압축하지 않는 CLI(Gemini: 스스로 압축한다)에는 띄우지 않는다.
+        guard RankSettingsCLI(cli: member.cli)?.compacts != false, let pct = member.contextPct else { return nil }
         let value = Int(min(max(pct, 0), 100).rounded())
         return value >= compactAt ? value : nil
     }
@@ -1031,7 +1032,8 @@ struct OfficeMessageBox: View {
             .layoutProbe("office.bubble.detail")
         if let member {
             let count = decisions[member.id] ?? 0
-            let due: Int? = member.contextPct.flatMap { pct in
+            // '압축 권장' 표시다. IAMCEO 가 압축하지 않는 CLI(Gemini)에는 띄우지 않는다.
+            let due: Int? = RankSettingsCLI(cli: member.cli)?.compacts == false ? nil : member.contextPct.flatMap { pct in
                 let value = Int(min(max(pct, 0), 100).rounded())
                 return value >= compactAt ? value : nil
             }
@@ -1385,9 +1387,12 @@ private struct TeamSessionMenu: View {
             } else {
                 Button("재우기", systemImage: "moon") { Task { _ = await store.sleepMember(member) } }
                     .disabled(!store.canWrite || busy)
-                Button("문맥 압축", systemImage: "arrow.down.right.and.arrow.up.left") {
-                    Task { _ = await store.memberAction(member, action: "compact") }
-                }.disabled(!store.canWrite || busy)
+                // 서버가 압축 요청을 받지 않는 CLI(Gemini: 스스로 압축한다)에는 이 항목을 내지 않는다.
+                if RankSettingsCLI(cli: member.cli)?.compacts != false {
+                    Button("문맥 압축", systemImage: "arrow.down.right.and.arrow.up.left") {
+                        Task { _ = await store.memberAction(member, action: "compact") }
+                    }.disabled(!store.canWrite || busy)
+                }
             }
         }
     }

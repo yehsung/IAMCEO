@@ -1,0 +1,147 @@
+{
+ "apiOutage": null,
+ "version": "0.2.9",
+ "runtime": {
+  "backend": "core",
+  "core": {
+   "installed": true,
+   "available": true,
+   "version": null,
+   "detail": null
+  },
+  "providers": {
+   "claude": {
+    "installed": true
+   },
+   "codex": {
+    "installed": true
+   },
+   "gemini": {
+    "installed": true
+   }
+  }
+ },
+ "settings": {
+  "backend": "core",
+  "permissionMode": "bypassPermissions",
+  "ranks": {
+   "manager": {
+    "model": null,
+    "effort": null
+   },
+   "lead": {
+    "model": null,
+    "effort": null
+   },
+   "staff": {
+    "model": null,
+    "effort": null
+   }
+  },
+  "codexRanks": {
+   "manager": {
+    "model": null,
+    "effort": null
+   },
+   "lead": {
+    "model": null,
+    "effort": null
+   },
+   "staff": {
+    "model": null,
+    "effort": null
+   }
+  },
+  "geminiRanks": {
+   "manager": {
+    "model": null,
+    "effort": null
+   },
+   "lead": {
+    "model": "gemini-4-neon",
+    "effort": "high"
+   },
+   "staff": {
+    "model": null,
+    "effort": null
+   }
+  },
+  "maxConcurrentTurns": 4,
+  "compactAtPct": 70,
+  "contextWindowDefault": 1000000,
+  "contextWindows": {
+   "gpt-6-astra": 475000
+  },
+  "maxAwakeWorkers": 8,
+  "notifyMac": false,
+  "macScriptNotifications": true,
+  "boardTidyHours": 0,
+  "permissionAcknowledged": false,
+  "reportLanguage": "ko"
+ },
+ "projects": [
+  {
+   "id": "hq",
+   "name": "본사",
+   "isHq": true,
+   "cwd": "/Users/sample",
+   "now": "",
+   "runnerEnabled": true,
+   "connection": {
+    "ok": true,
+    "reason": null,
+    "detail": null
+   },
+   "decisionCount": 0,
+   "todoCount": 0,
+   "needsCount": 0,
+   "needsDanger": false,
+   "inboxCount": 0,
+   "workingCount": 0,
+   "subagentWorkingCount": 0,
+   "blockedCount": 0,
+   "errorCount": 0,
+   "memberCount": 0
+  },
+  {
+   "id": "p_taF4X7sGZvjw",
+   "name": "호환 덤프",
+   "isHq": false,
+   "cwd": "/Users/sample/work",
+   "now": "",
+   "runnerEnabled": true,
+   "connection": {
+    "ok": true,
+    "reason": null,
+    "detail": null
+   },
+   "decisionCount": 4,
+   "todoCount": 1,
+   "needsCount": 6,
+   "needsDanger": true,
+   "inboxCount": 5,
+   "workingCount": 0,
+   "subagentWorkingCount": 0,
+   "blockedCount": 0,
+   "errorCount": 1,
+   "memberCount": 3
+  }
+ ],
+ "herdr": {
+  "installed": false,
+  "running": false,
+  "version": null,
+  "protocol": null,
+  "compatible": false,
+  "warning": null
+ },
+ "home": "/Users/sample/.iamceo",
+ "urls": [
+  "http://127.0.0.1:7878"
+ ],
+ "cli": "iamceo",
+ "rankOverrides": {
+  "manager": 0,
+  "lead": 0
+ }
+}

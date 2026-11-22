@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
-import { CONDUCTOR_TOOLS, fileKindOf, MANUAL_TOOLS, ROOT_TOOLS, WORKER_TOOLS, type Attachment, type FileKind, type Member } from "../shared/types.ts";
+import { CLI_PROVIDERS, CONDUCTOR_TOOLS, fileKindOf, MANUAL_TOOLS, ROOT_TOOLS, WORKER_TOOLS, type Attachment, type FileKind, type Member } from "../shared/types.ts";
 import { FilePublication, importPath, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, type PreparedImport, type SavedFile } from "./files.ts";
 import { createStorageReferences } from "./storage-maintenance.ts";
 import { toStorageError } from "./storage-errors.ts";
@@ -497,7 +497,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
     z.strictObject({
       name: oneLine(40).describe("화면 이름: 맡은 일(예: 결제 연동). 사람 이름도 직급·호칭(팀장, 사원 등)도 쓰지 않는다. 한국어, 프로젝트 안에서 유일, 한 줄. 같은 역할이 더 필요하면 뒤에 2, 3"),
       role: oneLine(300).describe("맡을 역할(한 줄). 모델 이름은 적지 않는다(실제 모델은 roster 에 보인다)"),
-      cli: z.enum(["claude", "codex"]).optional().describe("직원이 쓸 CLI. 대표가 CLI 를 말했을 때만 넣는다. 생략하면 너와 같은 CLI"),
+      cli: z.enum(CLI_PROVIDERS).optional().describe("직원이 쓸 CLI: claude(Claude Code) · codex(Codex) · gemini(Gemini, Antigravity CLI). 대표가 CLI 를 말했을 때만 넣는다('제미나이로'·'Gemini 로'는 gemini). 생략하면 너와 같은 CLI"),
       model: z.string().nullable().optional().describe("대표가 바로 이 직원(이 일)의 모델을 말했을 때만 넣는다(서버 모델 목록의 값). 앞 일에 준 모델 지시나 다른 직원의 모델을 이어 쓰지 않는다. 생략하거나 null이면 설정의 직급 기본값"),
       handle: z.string().optional().describe("영문 소문자 핸들"),
       cwd: z.string().optional().describe("작업 폴더. 기본은 프로젝트 폴더. 프로젝트 폴더 안이어야 한다. 밖이 꼭 필요하면 ask 로 묻고, 대표가 그 경로를 쓴 글을 user_quote 에 싣는다"),
@@ -544,7 +544,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
   ),
 
   team_compact: tool(
-    "직원 세션을 압축한다. 보통은 서버가 자동으로 하니 화제가 크게 바뀔 때만. 일하는 중이면 끝난 뒤로 미룬다.",
+    "직원 세션을 압축한다. 보통은 서버가 자동으로 하니 화제가 크게 바뀔 때만. 일하는 중이면 끝난 뒤로 미룬다. Gemini(Antigravity CLI) 직원은 CLI 가 스스로 압축하므로 쓸 수 없다(부르면 거절된다).",
     z.strictObject({ member: memberRef, focus: oneLineOpt(1000).optional().describe("요약에 남길 것(한 줄, 중요한 것부터). Claude 직원의 압축 명령은 400자로 잘린다(넘는 뒤쪽은 버림)") }),
     async (orch, member, a) => {
       const target = await orch.compactMember(orch.requireInProject(member.projectId, a.member).id, a.focus);
@@ -659,7 +659,7 @@ const TOOLS: Record<ToolName, Tool<any>> = {
       cwd: text.describe("이미 있는 프로젝트 폴더"),
       goal: z.string().optional().describe("프로젝트 목표. 대표의 말 그대로"),
       start_conductor: z.boolean().optional().describe("총괄을 바로 띄운다"),
-      chief_cli: z.enum(["claude", "codex"]).optional().describe("총괄이 쓸 CLI. 대표가 CLI 를 말했을 때만 넣는다. 생략하면 너와 같은 CLI"),
+      chief_cli: z.enum(CLI_PROVIDERS).optional().describe("총괄이 쓸 CLI: claude(Claude Code) · codex(Codex) · gemini(Gemini, Antigravity CLI). 대표가 CLI 를 말했을 때만 넣는다. 생략하면 너와 같은 CLI"),
     }),
     async (orch, member, a) => {
       const cwd = expandPath(a.cwd, member.cwd);

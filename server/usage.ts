@@ -5,9 +5,12 @@
 //   세션 누적 비용(cost.total_cost_usd)·누적 토큰(context_window.total_input/output_tokens)·계정 한도 사용률(rate_limits)을 그대로 옮긴 것이다.
 // - Codex: 그 세션의 rollout 기록(`<CODEX_HOME>/sessions/**/rollout-*-<세션>.jsonl`)의 token_count 사건. 누적 토큰(total_token_usage)과
 //   한도 사용률(rate_limits)만 있다. Codex 는 비용을 보고하지 않으므로 비용은 늘 없음(null)이다.
+// - Gemini(Antigravity CLI): 상태줄 래퍼가 팀장마다 `<홈>/context/gemini/<팀장>.json` 에 남기는 기록(runner/gemini-status.ts). agy 가 상태줄에 넘긴
+//   대화 누적 비용(cost.total_usd)·누적 토큰(context_window.total_input/output_tokens)·한도 묶음(quota)을 옮긴 것이다. 세션이 아니라 팀장마다 하나이고,
+//   어느 대화의 값인지는 기록의 conversationId 로 안다. 대화가 아직 없으면 한도만 읽는다. ~/.gemini 는 읽지 않는다.
 //
 // 어떻게 모으나
-// - 둘 다 세션 누적값이다. 세션마다 마지막으로 본 누적값(usage_sessions)을 기준으로 늘어난 몫만 그 수치를 본 날의 칸(usage_daily)에 더한다.
+// - 셋 다 세션 누적값이다. 세션마다 마지막으로 본 누적값(usage_sessions)을 기준으로 늘어난 몫만 그 수치를 본 날의 칸(usage_daily)에 더한다.
 //   누적값이 줄었으면(세션을 다시 열어 CLI 가 0 부터 셌다) 새 값 전체를 늘어난 몫으로 본다.
 // - 서버가 새로 띄운 세션은 띄울 때 '0 에서 시작'으로 적어 둔다(registerFreshSession). 그 세션의 첫 표본부터 늘어난 몫으로 그날에 들어간다.
 // - 처음 보는 세션(이 기능 전부터 있던 세션, 오래 잠들었다가 깨운 세션 등)의 누적값은 언제 쓴 것인지 알 수 없다. 기준값으로만 삼고 날짜 칸에
@@ -19,9 +22,10 @@ import type { Database } from "bun:sqlite";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { USAGE_MAX_DAYS, type CliProvider, type MemberKind, type UsageAmounts, type UsageDayRow, type UsageLimitWindow, type UsageMemberRow, type UsageProjectRow, type UsageReport } from "../shared/types.ts";
+import { CLI_PROVIDERS, USAGE_MAX_DAYS, type CliProvider, type MemberKind, type UsageAmounts, type UsageDayRow, type UsageLimitWindow, type UsageMemberRow, type UsageProjectRow, type UsageReport } from "../shared/types.ts";
 import { CONTEXT_SESSION_RE, writeStatuslineWrapper } from "./runner/statusline.ts";
 import { jsonObject, parseCodexSessionMeta, readJsonlRange, type JsonlCursor } from "./runner/delivery-evidence.ts";
+import { geminiStatusPath, readGeminiStatus, type GeminiStatusRecord } from "./runner/gemini-status.ts";
 import { RECORD_RETENTION_MS } from "./storage-maintenance.ts";
 
 /** 모으는 간격. 앱이 사용량을 열면 그때도 한 번 모은다(5초 안에 다시 모으지는 않는다). */
@@ -153,6 +157,33 @@ export function readCodexUsageFile(root: string, path: string, sessionId: string
   return { cursor, sample: { provider: "codex", sessionId, at: latest.at ?? now, costUsd: null, inputTokens: latest.inputTokens, outputTokens: latest.outputTokens, limits: latest.limits } };
 }
 
+/**
+ * Gemini 의 한도 묶음을 한도 창으로. 남은 비율을 알려 준 묶음만 옮긴다: 쓴 비율 = (1 - 남은 비율) × 100.
+ * 묶음 id 가 그대로 창 이름이다. 창의 길이는 알려 주지 않아 모름(null)이다. 꺼진 묶음(disabled)과 남은 양만 알려 준 묶음은 뺀다.
+ */
+export function geminiLimits(quota: GeminiStatusRecord["quota"]): UsageLimitSample[] {
+  const out: UsageLimitSample[] = [];
+  for (const [name, bucket] of Object.entries(quota)) {
+    if (bucket.disabled || bucket.remainingFraction === null) continue;
+    // 소수 계산의 끝자리 흔들림만 지운다(0.37 → 63.00000000000001 이 되지 않게).
+    const used = percent(Math.round((1 - bucket.remainingFraction) * 1e6) / 1e4);
+    if (used === null) continue;
+    out.push({ window: name, windowMinutes: null, usedPct: used, resetsAt: isoTime(bucket.resetAt) });
+  }
+  return out;
+}
+
+/**
+ * Gemini 상태줄 기록 하나를 표본으로. 대화가 아직 없으면(conversationId 없음) 표본이 없다(null). 그때의 한도는 geminiLimits 로 따로 읽는다.
+ * 비용·토큰은 agy 가 알려 준 대화 누적값 그대로다(Claude 상태줄 기록과 같은 방식). 정수가 아닌 토큰 수는 없는 것으로 둔다.
+ */
+export function parseGeminiUsageRecord(record: GeminiStatusRecord): UsageSample | null {
+  const at = Date.parse(record.at);
+  if (record.conversationId === null || !CONTEXT_SESSION_RE.test(record.conversationId) || !Number.isFinite(at) || at <= 0) return null;
+  return { provider: "gemini", sessionId: record.conversationId, at, costUsd: amount(record.costUsd), inputTokens: count(record.context.inputTokens),
+    outputTokens: count(record.context.outputTokens), limits: geminiLimits(record.quota) };
+}
+
 // ---- 날짜 ----
 const pad = (n: number) => String(n).padStart(2, "0");
 /** 서버가 도는 Mac 의 시간대로 본 날짜(YYYY-MM-DD). */
@@ -173,6 +204,23 @@ function tablesReady(db: Database): boolean {
     return row?.n === 3;
   } catch { return false; }
 }
+
+/** 새 세션의 비용 기준값. 비용을 보고하는 CLI 는 0 에서 시작하고, 보고하지 않는 CLI(Codex)는 비용이 늘 없음(null)이다. */
+function freshCost(provider: CliProvider): number | null {
+  switch (provider) {
+    case "claude": return 0;
+    case "codex": return null;
+    case "gemini": return 0;
+    // CLI 를 더하면 여기서 컴파일 오류가 난다(비용을 보고하는 CLI 인지 정하게).
+    default: { const unlisted: never = provider; return unlisted; }
+  }
+}
+
+/** 계정 한도 한 줄. 더 새로 본 값이 있으면 그대로 둔다. */
+const LIMIT_UPSERT = `INSERT INTO usage_limits (provider, window_id, window_minutes, used_pct, resets_at, observed_at) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(provider, window_id) DO UPDATE SET window_minutes = excluded.window_minutes, used_pct = excluded.used_pct,
+            resets_at = excluded.resets_at, observed_at = excluded.observed_at
+          WHERE excluded.observed_at > usage_limits.observed_at`;
 
 export class UsageLedger {
   private ready: boolean | null = null;
@@ -223,25 +271,35 @@ export class UsageLedger {
           sample_at = excluded.sample_at, updated_at = excluded.updated_at`)
         .run(sample.provider, sample.sessionId, member.id, member.projectId, sample.costUsd, sample.inputTokens, sample.outputTokens, sample.at, nowIso);
       for (const limit of sample.limits) {
-        this.db.query(`INSERT INTO usage_limits (provider, window_id, window_minutes, used_pct, resets_at, observed_at) VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(provider, window_id) DO UPDATE SET window_minutes = excluded.window_minutes, used_pct = excluded.used_pct,
-            resets_at = excluded.resets_at, observed_at = excluded.observed_at
-          WHERE excluded.observed_at > usage_limits.observed_at`)
-          .run(sample.provider, limit.window, limit.windowMinutes, limit.usedPct, limit.resetsAt, atIso);
+        this.db.query(LIMIT_UPSERT).run(sample.provider, limit.window, limit.windowMinutes, limit.usedPct, limit.resetsAt, atIso);
       }
       return true;
     })();
   }
 
   /**
+   * 세션 표본 없이 계정 한도만 남긴다. Gemini 는 대화를 열기 전에도 상태줄이 한도를 알려 준다(그때는 넣을 세션이 없다).
+   * 보존 기한보다 오래된 값은 받지 않고, 더 새로 본 값이 있으면 그대로 둔다. 고친 줄 수를 돌려준다.
+   */
+  recordLimits(provider: CliProvider, limits: readonly UsageLimitSample[], at: number, now = Date.now(), retentionMs = RECORD_RETENTION_MS): number {
+    if (!this.available() || !limits.length || !Number.isFinite(at) || at < now - retentionMs) return 0;
+    const atIso = new Date(Math.min(at, now)).toISOString();
+    return this.db.transaction(() => {
+      let changed = 0;
+      for (const limit of limits) changed += this.db.query(LIMIT_UPSERT).run(provider, limit.window, limit.windowMinutes, limit.usedPct, limit.resetsAt, atIso).changes;
+      return changed;
+    })();
+  }
+
+  /**
    * 0.2.7(D4-9): 서버가 새로 띄운 세션을 '0 에서 시작한 세션'으로 적어 둔다. 그래야 그 세션의 첫 표본이 기준값이 아니라 늘어난 몫으로 그날에 든다.
    * 이미 적힌 세션(본 적이 있다)은 그대로 둔다. 표가 없으면 아무것도 하지 않는다. 적었으면 참.
-   * 표본 시각은 0 으로 둔다: Codex 는 세션을 늦게 알아내(첫 턴 뒤) 그 전에 남은 token_count 도 이 세션의 몫이다.
+   * 표본 시각은 0 으로 둔다: Codex 는 세션을 늦게 알아내(첫 턴 뒤) 그 전에 남은 token_count 도 이 세션의 몫이다(Gemini 도 대화 id 를 늦게 안다).
    */
   registerFreshSession(provider: CliProvider, sessionId: string, member: UsageMemberRef, now = Date.now()): boolean {
     if (!this.available() || !CONTEXT_SESSION_RE.test(sessionId)) return false;
     return this.db.query(`INSERT OR IGNORE INTO usage_sessions (provider, session_id, member_id, project_id, cost_usd, input_tokens, output_tokens, sample_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?)`).run(provider, sessionId, member.id, member.projectId, provider === "claude" ? 0 : null, new Date(now).toISOString()).changes > 0;
+      VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?)`).run(provider, sessionId, member.id, member.projectId, freshCost(provider), new Date(now).toISOString()).changes > 0;
   }
 
   /**
@@ -260,12 +318,13 @@ export class UsageLedger {
 }
 
 // ---- 모으기 ----
-interface SessionMap { claude: Map<string, UsageMemberRef>; codex: Map<string, UsageMemberRef> }
-/** 지금 세션과 지난 세션(member_session_history)을 팀장에 잇는다. 같은 세션이 겹치면 지금 세션이 먼저다. */
+type SessionMap = Record<CliProvider, Map<string, UsageMemberRef>>;
+const isCliProvider = (value: unknown): value is CliProvider => (CLI_PROVIDERS as readonly unknown[]).includes(value);
+/** 지금 세션과 지난 세션(member_session_history)을 팀장에 잇는다. 같은 세션이 겹치면 지금 세션이 먼저다. 모르는 cli 값의 행만 버린다. */
 function sessionMap(db: Database): SessionMap {
-  const map: SessionMap = { claude: new Map(), codex: new Map() };
+  const map: SessionMap = { claude: new Map(), codex: new Map(), gemini: new Map() };
   const put = (cli: unknown, sessionId: unknown, ref: UsageMemberRef, overwrite: boolean) => {
-    if ((cli !== "claude" && cli !== "codex") || typeof sessionId !== "string" || !CONTEXT_SESSION_RE.test(sessionId)) return;
+    if (!isCliProvider(cli) || typeof sessionId !== "string" || !CONTEXT_SESSION_RE.test(sessionId)) return;
     if (overwrite || !map[cli].has(sessionId)) map[cli].set(sessionId, ref);
   };
   for (const r of db.query("SELECT h.cli, h.session_id, m.id, m.project_id, m.name, m.kind FROM member_session_history h JOIN members m ON m.id = h.member_id WHERE h.session_id IS NOT NULL").all() as Row[]) {
@@ -277,12 +336,25 @@ function sessionMap(db: Database): SessionMap {
   return map;
 }
 
+/**
+ * 상태줄 기록을 읽어 볼 Gemini 팀장: 지금 Gemini 를 쓰는 팀장과, Gemini 세션 기록이 남은 팀장(CLI 를 바꾼 직후의 마지막 몫).
+ * 기록 파일이 팀장마다 하나라 세션이 아니라 팀장으로 찾는다.
+ */
+function geminiMembers(db: Database, sessions: Map<string, UsageMemberRef>): UsageMemberRef[] {
+  const members = new Map<string, UsageMemberRef>();
+  for (const r of db.query("SELECT id, project_id, name, kind FROM members WHERE cli = 'gemini'").all() as Row[]) {
+    members.set(r.id as string, { id: r.id as string, projectId: r.project_id as string, name: r.name as string, kind: r.kind as string });
+  }
+  for (const ref of sessions.values()) if (!members.has(ref.id)) members.set(ref.id, ref);
+  return [...members.values()];
+}
+
 /** 앱이 사용량을 열 때 부르는 쪽(GET /api/usage). */
 export interface UsageSource { refresh(): void }
 
 export interface UsageCollectorOptions {
   db: Database;
-  /** IAMCEO 홈(상태줄 기록은 `<홈>/context`). */
+  /** IAMCEO 홈(상태줄 기록은 `<홈>/context`, Gemini 팀장의 기록은 `<홈>/context/gemini`). */
   home: string;
   /** Codex 홈. 없으면 CODEX_HOME 또는 ~/.codex(실행기가 Codex 를 띄우는 곳과 같다). null 이면 Codex 는 읽지 않는다. */
   codexHome?: string | null;
@@ -293,7 +365,8 @@ export interface UsageCollectorOptions {
   wrap?: <T>(name: string, work: () => T) => T;
   log?: (line: string) => void;
 }
-export interface UsageTickResult { claude: number; codex: number; pruned: { days: number; sessions: number; limits: number } | null }
+/** CLI 마다 이번에 넣은 표본 수. */
+export interface UsageTickResult extends Record<CliProvider, number> { pruned: { days: number; sessions: number; limits: number } | null }
 
 export class UsageCollector implements UsageSource {
   private readonly ledger: UsageLedger;
@@ -308,6 +381,8 @@ export class UsageCollector implements UsageSource {
   private readonly codexPaths = new Map<string, { path: string | null; tries: number }>();
   private nextCodexScan = -Infinity;
   private readonly codexCursors = new Map<string, CodexUsageCursor>();
+  /** Gemini 팀장마다 다 읽은 기록의 수정 시각. 그대로면 다시 읽지 않는다. */
+  private readonly geminiSeen = new Map<string, number>();
 
   constructor(private readonly options: UsageCollectorOptions) {
     this.ledger = new UsageLedger(options.db);
@@ -358,12 +433,13 @@ export class UsageCollector implements UsageSource {
   /** 한 번 모은다. 시험이 직접 부른다. */
   tick(now = this.now()): UsageTickResult {
     this.lastTick = now;
-    const result: UsageTickResult = { claude: 0, codex: 0, pruned: null };
+    const result: UsageTickResult = { claude: 0, codex: 0, gemini: 0, pruned: null };
     if (!this.ledger.available()) return result;
     const retention = this.options.retentionMs ?? RECORD_RETENTION_MS;
     const sessions = sessionMap(this.options.db);
     result.claude = this.collectClaude(sessions.claude, now, retention);
     result.codex = this.collectCodex(sessions.codex, now, retention);
+    result.gemini = this.collectGemini(sessions.gemini, now, retention);
     if (now - this.lastPrune >= PRUNE_EVERY_MS) {
       this.lastPrune = now;
       result.pruned = this.ledger.prune(now, retention);
@@ -440,6 +516,36 @@ export class UsageCollector implements UsageSource {
       if (read.cursor) this.codexCursors.set(sessionId, read.cursor); else this.codexCursors.delete(sessionId);
       // 넣다가 실패해도(DB 잠김 등) 다음 token_count 의 누적값이 빠진 몫까지 담는다.
       try { if (read.sample && this.ledger.ingest(read.sample, member, now, retention)) ingested++; } catch { /* 다음 사건에 이어 센다. */ }
+    }
+    return ingested;
+  }
+
+  /**
+   * Gemini 팀장의 상태줄 기록을 읽는다. 기록의 대화(conversationId)가 그 팀장의 세션으로 적힌 뒤에만 누적값을 넣는다:
+   * 서버가 그 대화를 알아내 '0 에서 시작'으로 적기(registerFreshSession) 전에 넣으면 첫 몫이 기준값으로만 쓰이고 빠진다.
+   * 대화가 아직 없거나 서버가 아직 모르는 대화면 계정 한도만 남긴다.
+   */
+  private collectGemini(sessions: Map<string, UsageMemberRef>, now: number, retention: number): number {
+    let ingested = 0;
+    for (const member of geminiMembers(this.options.db, sessions)) {
+      try {
+        const stat = lstatSync(geminiStatusPath(this.options.home, member.id));
+        if (!stat.isFile() || stat.mtimeMs < now - retention) continue;
+        // 래퍼는 쓸 때마다 새 파일로 바꿔 넣는다(rename). 수정 시각이 그대로면 같은 기록이다.
+        if (this.geminiSeen.get(member.id) === stat.mtimeMs) continue;
+        const record = readGeminiStatus(this.options.home, member.id);
+        if (!record) continue;
+        const sample = parseGeminiUsageRecord(record);
+        if (sample && sessions.get(sample.sessionId)?.id === member.id) {
+          if (this.ledger.ingest(sample, member, now, retention)) ingested++;
+          // 넣다가 실패하면(DB 잠김 등) 표시하지 않아 다음에 다시 읽는다.
+          this.geminiSeen.set(member.id, stat.mtimeMs);
+          continue;
+        }
+        this.ledger.recordLimits("gemini", geminiLimits(record.quota), Date.parse(record.at), now, retention);
+        // 대화가 없는 기록은 더 읽을 것이 없다. 서버가 아직 모르는 대화의 기록은 표시하지 않고 다음에 다시 본다.
+        if (!sample) this.geminiSeen.set(member.id, stat.mtimeMs);
+      } catch { /* 기록이 없거나(아직 띄운 적 없음) 쓰는 도중이다: 다음에 다시 본다. */ }
     }
     return ingested;
   }

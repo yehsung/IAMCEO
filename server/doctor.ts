@@ -1,15 +1,16 @@
 // B3: 스스로 점검. 서버·실행 엔진·Claude·Codex(설치와 로그인)·CLI 버전·Tailscale·자동 시작·백업·저장 공간을 항목별로 보고
-// 고치는 법을 한 줄씩 붙인다. 같은 결과를 GET /api/doctor(앱의 설정 '실행 환경')와 `iamceo doctor`(서버가 꺼져 있어도)가 낸다.
+// 고치는 법을 한 줄씩 붙인다. Gemini(Antigravity CLI)는 깔려 있거나 쓰는 총괄·팀장이 있을 때만 Codex 다음 줄에 붙는다. 같은 결과를 GET /api/doctor(앱의 설정 '실행 환경')와 `iamceo doctor`(서버가 꺼져 있어도)가 낸다.
 // 고치는 법은 일반 사용자가 할 수 있는 동작(앱 버튼 이름, 설치 명령)만 가리킨다. 개발자 명령(bun run …)은 쓰지 않는다.
 // 사실 모으기(probe)와 판정(doctorChecks)을 나눠, 판정은 주입한 사실만으로 시험한다.
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
-import { DOCTOR_CHECK_IDS, DOCTOR_ROLES_CHECK_ID, type CliProvider, type CliVersionInfo, type DoctorCheck, type DoctorReport, type EngineStatus, type RuntimeInfo, type TailnetHttpsStatus, type TailnetStatus } from "../shared/types.ts";
-import { readCliVersions } from "./cli-version.ts";
+import { CLI_INFO, DOCTOR_CHECK_IDS, DOCTOR_ROLES_CHECK_ID, type CliProvider, type CliVersionInfo, type DoctorCheck, type DoctorReport, type EngineStatus, type RuntimeInfo, type TailnetHttpsStatus, type TailnetStatus } from "../shared/types.ts";
+import { readCliVersions, type CliBins } from "./cli-version.ts";
 import { CORE_VERSION, defaultCoreBin, detectTailscaleIp, VERSION, type Config } from "./config.ts";
 import { roleCustomizations, type RoleCustomization } from "./roles.ts";
+import { readGeminiStatus } from "./runner/gemini-status.ts";
 
 export type DoctorLang = "ko" | "en";
 const t = (lang: DoctorLang, ko: string, en: string): string => (lang === "ko" ? ko : en);
@@ -72,9 +73,14 @@ export interface DoctorFacts {
   now: Date;
   server: ServerFacts;
   engine: EngineFacts;
-  providers: Record<CliProvider, ProviderFacts>;
+  /** gemini(Antigravity CLI)는 선택 칸이다. 없으면 깔려 있지 않은 것으로 본다. */
+  providers: Record<"claude" | "codex", ProviderFacts> & Partial<Record<"gemini", ProviderFacts>>;
   /** Codex 를 쓰는 총괄·팀장이 있다. 모르면 null(선택 기능으로 본다). */
   codexInUse: boolean | null;
+  /** Gemini 를 쓰는 총괄·팀장이 있다. 모르면 null 이거나 없다(쓰지 않는 것으로 본다). */
+  geminiInUse?: boolean | null;
+  /** Gemini 팀장의 상태줄 기록에서 본, 대화가 돌던 마지막 시각(ISO). 본 적이 없으면 null 이거나 없다. */
+  geminiActiveAt?: string | null;
   cliVersions: CliVersionInfo[] | null;
   tailscale: TailscaleFacts;
   service: ServiceFacts;
@@ -198,13 +204,51 @@ function codexCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
   return check("codex", "unknown", "Codex", `${installed} · ${t(lang, "로그인은 세션을 열 때 확인합니다", "sign-in is checked when a session starts")}`);
 }
 
+/** 고정 목록(DOCTOR_CHECK_IDS) 밖의 점검 id. Antigravity CLI(agy)가 깔려 있거나 Gemini 를 쓰는 총괄·팀장이 있을 때만 Codex 다음에 붙는다. */
+export const DOCTOR_GEMINI_CHECK_ID = "gemini";
+/** 이 안에 대화가 돌았으면 '최근에 동작했다'고 적는다. */
+const GEMINI_ACTIVE_RECENT_MS = 7 * 86_400_000;
+
+/**
+ * Gemini(Antigravity CLI, `agy`). 깔려 있지 않고 쓰는 팀장도 없으면 항목을 만들지 않는다(쓰지 않는 사람에게는 보이지 않는다).
+ * 로그인은 판정하지 않는다: agy 는 브라우저로 로그인하고, 로그인 상태를 읽을 명령이나 확인된 기록이 없다(Codex 기준으로 보지 않는다).
+ * Gemini 팀장의 상태줄 기록에 최근 대화가 돌던 흔적이 있으면 그것만 '정상'의 근거로 삼는다.
+ */
+function geminiCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck | null {
+  const p = f.providers.gemini;
+  const inUse = f.geminiInUse === true;
+  if (!p?.installed && !inUse) return null;
+  const id = DOCTOR_GEMINI_CHECK_ID, title = CLI_INFO.gemini.short;
+  const firstRun = t(lang, "이 Mac의 터미널에서 agy를 한 번 실행해 로그인과 첫 설정(약관 동의)을 끝내세요.",
+    "run agy once in Terminal on this Mac to sign in and finish the first-run setup (terms).");
+  if (!p?.installed) {
+    return { id, state: "fail", title,
+      detail: t(lang, "Gemini를 쓰는 총괄·팀장이 있는데 Antigravity CLI(agy)를 찾지 못했습니다", "Some sessions use Gemini, but the Antigravity CLI (agy) was not found"),
+      fix: t(lang, `Antigravity CLI를 설치한 뒤(curl -fsSL https://antigravity.google/cli/install.sh | bash) ${firstRun}`,
+        `Install the Antigravity CLI (curl -fsSL https://antigravity.google/cli/install.sh | bash), then ${firstRun}`) };
+  }
+  const version = versionOf(f, "gemini");
+  const installed = t(lang, `Antigravity CLI 설치됨${version ? ` · ${version}` : ""}`, `Antigravity CLI installed${version ? ` · ${version}` : ""}`);
+  const activeAt = f.geminiActiveAt ? Date.parse(f.geminiActiveAt) : NaN;
+  const age = f.now.getTime() - activeAt;
+  if (Number.isFinite(age) && age <= GEMINI_ACTIVE_RECENT_MS) {
+    return { id, state: "ok", title, detail: `${installed} · ${t(lang, `마지막 대화 ${ago(age, lang)}`, `last conversation ${ago(age, lang)}`)}` };
+  }
+  const detail = `${installed} · ${t(lang, "로그인은 세션을 열 때 확인합니다", "sign-in is checked when a session starts")}`;
+  // 쓰는 팀장이 있을 때만 첫 설정 안내를 붙인다. 깔려만 있고 쓰지 않으면 아무것도 권하지 않는다.
+  return inUse
+    ? { id, state: "unknown", title, detail, fix: t(lang, `Gemini 팀장이 시작하지 못하고 멈추면 ${firstRun}`, `If a Gemini session stops right after starting, ${firstRun}`) }
+    : { id, state: "unknown", title, detail };
+}
+
 function cliVersionCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
   const title = t(lang, "CLI 버전", "CLI versions");
   if (!f.cliVersions) return check("cli_version", "unknown", title, t(lang, "확인하지 못했습니다", "Not checked"));
-  const name = (provider: CliProvider) => (provider === "claude" ? "Claude Code" : "Codex");
+  const name = (provider: CliProvider) => CLI_INFO[provider].name;
   const installed = f.cliVersions.filter(info => info.installed);
   if (!installed.length) return check("cli_version", "unknown", title, t(lang, "설치된 CLI가 없습니다", "No CLI installed"));
-  const unverified = installed.filter(info => info.version && !info.known);
+  // Antigravity CLI 는 Gemini 를 쓰는 총괄·팀장이 있을 때만 '확인되지 않은 버전'으로 알린다. 깔려만 있고 IAMCEO 에서 쓰지 않으면 알리지 않는다.
+  const unverified = installed.filter(info => info.version && !info.known && (info.provider !== "gemini" || f.geminiInUse === true));
   if (unverified.length) {
     const list = unverified.map(info => `${name(info.provider)} ${info.version}`).join(", ");
     return check("cli_version", "warn", title, t(lang, `확인되지 않은 CLI 버전: ${list}`, `Unverified CLI version: ${list}`),
@@ -350,13 +394,23 @@ function rolesCheck(roles: RoleCustomization[], lang: DoctorLang): DoctorCheck {
   return { id: DOCTOR_ROLES_CHECK_ID, state: fixes.length ? "warn" : "ok", title: t(lang, "고쳐 쓴 역할 지침", "Edited role rules"), detail: parts.join(" · "), ...(fix ? { fix } : {}) };
 }
 
-/** 사실에서 점검표를 만든다. 항목 순서는 DOCTOR_CHECK_IDS 그대로이고, 고친 역할 지침이 있으면 끝에 `roles` 가 붙는다. */
+/**
+ * 사실에서 점검표를 만든다. 항목 순서는 DOCTOR_CHECK_IDS 그대로이고, 고친 역할 지침이 있으면 끝에 `roles` 가 붙는다.
+ * Antigravity CLI 가 깔려 있거나 Gemini 를 쓰는 총괄·팀장이 있으면 `codex` 다음에 `gemini` 가 붙는다(없으면 목록은 예전 그대로다).
+ */
 export function doctorChecks(facts: DoctorFacts, lang: DoctorLang = "ko"): DoctorCheck[] {
   const builders: Record<(typeof DOCTOR_CHECK_IDS)[number], (f: DoctorFacts, lang: DoctorLang) => DoctorCheck> = {
     server: serverCheck, engine: engineCheck, claude: claudeCheck, codex: codexCheck, cli_version: cliVersionCheck,
     tailscale: tailscaleCheck, service: serviceCheck, backup: backupCheck, disk: diskCheck,
   };
-  const checks = DOCTOR_CHECK_IDS.map(id => builders[id](facts, lang));
+  const checks: DoctorCheck[] = [];
+  for (const id of DOCTOR_CHECK_IDS) {
+    checks.push(builders[id](facts, lang));
+    if (id === "codex") {
+      const gemini = geminiCheck(facts, lang);
+      if (gemini) checks.push(gemini);
+    }
+  }
   return facts.roles?.length ? [...checks, rolesCheck(facts.roles, lang)] : checks;
 }
 
@@ -385,6 +439,8 @@ function readText(path: string): string | null {
  * CLI 가 남긴 로그인 기록을 본다. 내용(토큰·계정)은 읽어 두지 않고 있는지만 본다. 키체인은 건드리지 않는다.
  * Claude Code: 설정 폴더의 .claude.json 에 oauthAccount 가 있거나 .credentials.json 이 있거나, API 키·클라우드 사용 환경 변수나 apiKeyHelper 가 있으면 로그인된 것으로 본다.
  * Codex: CODEX_HOME(기본 ~/.codex)의 auth.json 이 있거나 OPENAI_API_KEY 가 있으면 로그인된 것으로 본다. 키체인에 둔 설정이면 모른다.
+ * Gemini(Antigravity CLI): 판정하지 않는다(unknown). 브라우저로 로그인하고, 로그인 여부를 알려 주는 명령이나 확인된 기록 파일이 없다.
+ * ~/.gemini 는 읽지 않는다.
  */
 export function probeLogin(provider: CliProvider, homes: ProviderHomes = {}, env: NodeJS.ProcessEnv = process.env): LoginState {
   const userHome = homes.userHome ?? homedir();
@@ -400,6 +456,9 @@ export function probeLogin(provider: CliProvider, homes: ProviderHomes = {}, env
       if (settings && /"apiKeyHelper"\s*:\s*"[^"]+"/.test(settings)) return "yes";
       return "no";
     }
+    if (provider === "gemini") return "unknown";
+    // 여기부터는 Codex 의 기준이다. CLI 를 더하면 아래 줄이 컴파일 오류가 된다(새 CLI 를 Codex 기준으로 판정하지 않게).
+    provider satisfies "codex";
     if (env.OPENAI_API_KEY?.trim()) return "yes";
     const dir = homes.codexHome ?? env.CODEX_HOME ?? join(userHome, ".codex");
     try { if (statSync(join(dir, "auth.json")).size > 2) return "yes"; } catch { /* 없다 */ }
@@ -508,7 +567,7 @@ export interface DoctorProbes {
   service: (dataHome: string) => Promise<ServiceFacts>;
   disk: (path: string) => DiskFacts | null;
   login: (provider: CliProvider, homes: ProviderHomes) => LoginState;
-  cliVersions: (bins: { claudeBin?: string; codexBin?: string }) => Promise<CliVersionInfo[] | null>;
+  cliVersions: (bins: CliBins) => Promise<CliVersionInfo[] | null>;
   tailscaleAddress: () => string | null;
   /** 명령 하나(실행 엔진 --version 등)를 돌린다. */
   run: (command: string[]) => Promise<{ code: number; stdout: string }>;
@@ -527,7 +586,7 @@ export function defaultDoctorProbes(): DoctorProbes {
   };
 }
 
-type DoctorConfig = Pick<Config, "home" | "dbPath" | "claudeBin" | "codexBin" | "claudeHome" | "codexHome" | "coreBin"> & { hostsAuto?: boolean };
+type DoctorConfig = Pick<Config, "home" | "dbPath" | "claudeBin" | "codexBin" | "geminiBin" | "claudeHome" | "codexHome" | "coreBin"> & { hostsAuto?: boolean };
 type BackupStatusLike = { lastSuccessAt: string | null; failing: boolean; failures: number; cause: string | null };
 
 /** 서버 안에서 모은다(GET /api/doctor). 실행 엔진·Tailscale 꺼짐·백업 상태는 서버가 이미 아는 값을 쓴다. */
@@ -544,6 +603,11 @@ export interface ServerDoctorInput {
   /** 지금 확인된 Tailscale 주소(서버의 주소 감지). */
   detectedTailnet: string[];
   codexInUse: boolean | null;
+  /**
+   * Gemini 를 쓰는 총괄·팀장(보관하지 않은 프로젝트)의 id. 하나라도 있으면 쓰는 것으로 본다. 없거나 모르면 비우거나 뺀다.
+   * 이 팀장들의 상태줄 기록(<홈>/context/gemini/<id>.json)에서 마지막으로 대화가 돌던 시각을 읽는다.
+   */
+  geminiMemberIds?: readonly string[] | null;
   backupIntervalMs?: number;
   probes?: Partial<DoctorProbes>;
   now?: Date;
@@ -556,9 +620,12 @@ export async function serverDoctorFacts(input: ServerDoctorInput): Promise<Docto
   const homes = { claudeHome: config.claudeHome, codexHome: config.codexHome };
   const [service, cliVersions] = await Promise.all([
     probes.service(config.home).catch((): ServiceFacts => ({ state: "unknown" })),
-    probes.cliVersions({ claudeBin: config.claudeBin, codexBin: config.codexBin }).catch(() => null),
+    probes.cliVersions({ claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin: config.geminiBin }).catch(() => null),
   ]);
   const runtime = input.runtime;
+  // 서버가 아는 값(runtime)에는 Antigravity CLI 가 깔려 있을 때만 gemini 가 실린다. 서버 값이 없을 때만 설정이 찾아 둔 실행 파일을 본다.
+  const geminiInstalled = runtime ? runtime.providers.gemini?.installed === true : !!config.geminiBin && probes.installed(config.geminiBin);
+  const geminiMemberIds = input.geminiMemberIds ?? null;
   const backupStatus = runtime?.backup;
   const lastSuccessAt = backupStatus?.lastSuccessAt ?? newestBackupAt(join(config.home, "backups"));
   return {
@@ -574,8 +641,11 @@ export async function serverDoctorFacts(input: ServerDoctorInput): Promise<Docto
     providers: {
       claude: { installed: runtime?.providers.claude.installed ?? probes.installed(config.claudeBin), login: probes.login("claude", homes) },
       codex: { installed: runtime?.providers.codex.installed ?? probes.installed(config.codexBin ?? "codex"), login: probes.login("codex", homes) },
+      ...(geminiInstalled ? { gemini: { installed: true, login: probes.login("gemini", homes) } } : {}),
     },
     codexInUse: input.codexInUse,
+    geminiInUse: geminiMemberIds ? geminiMemberIds.length > 0 : null,
+    geminiActiveAt: geminiMemberIds ? geminiLastActiveAt(config.home, geminiMemberIds) : null,
     cliVersions,
     tailscale: {
       auto: input.config.hostsAuto !== false,
@@ -612,15 +682,18 @@ export async function localDoctorFacts(input: LocalDoctorInput): Promise<DoctorF
   const config = input.config;
   const claudeBin = config?.claudeBin ?? env.IAMCEO_CLAUDE_BIN ?? "claude";
   const codexBin = config?.codexBin ?? env.IAMCEO_CODEX_BIN ?? "codex";
+  // provider 값("gemini")이 아니라 실행 파일 이름(agy)이다. `gemini` 는 다른 프로그램(옛 Gemini CLI)이다.
+  const geminiBin = config?.geminiBin ?? env.IAMCEO_GEMINI_BIN ?? CLI_INFO.gemini.program;
   // 설정 파일이 아직 없어도 앱 묶음 안의 엔진(runtime/Herdr Core.app)을 먼저 본다.
   const coreBin = config?.coreBin ?? env.IAMCEO_CORE_BIN ?? defaultCoreBin();
   const homes = { claudeHome: config?.claudeHome ?? env.CLAUDE_CONFIG_DIR, codexHome: config?.codexHome ?? env.CODEX_HOME };
   const coreInstalled = probes.installed(coreBin);
   const [service, cliVersions, version] = await Promise.all([
     probes.service(input.home).catch((): ServiceFacts => ({ state: "unknown" })),
-    probes.cliVersions({ claudeBin, codexBin }).catch(() => null),
+    probes.cliVersions({ claudeBin, codexBin, geminiBin }).catch(() => null),
     coreInstalled ? coreVersion(coreBin, probes.run).catch(() => null) : Promise.resolve(null),
   ]);
+  const geminiMemberIds = config ? readGeminiMemberIds(config.dbPath) : null;
   let tailnetSeen = false;
   let address: string | null = null;
   try { address = probes.tailscaleAddress(); } catch { address = null; }
@@ -634,8 +707,11 @@ export async function localDoctorFacts(input: LocalDoctorInput): Promise<DoctorF
     providers: {
       claude: { installed: probes.installed(claudeBin), login: probes.login("claude", homes) },
       codex: { installed: probes.installed(codexBin), login: probes.login("codex", homes) },
+      ...(probes.installed(geminiBin) ? { gemini: { installed: true, login: probes.login("gemini", homes) } } : {}),
     },
     codexInUse: config ? readCodexInUse(config.dbPath) : null,
+    geminiInUse: geminiMemberIds ? geminiMemberIds.length > 0 : null,
+    geminiActiveAt: geminiMemberIds ? geminiLastActiveAt(input.home, geminiMemberIds) : null,
     cliVersions,
     tailscale: { auto: config?.hostsAuto !== false, address, everOpened: tailnetSeen, status: null },
     service,
@@ -665,6 +741,31 @@ function readTailnetSeen(dbPath: string): boolean {
 
 function readCodexInUse(dbPath: string): boolean | null {
   return readDb<boolean | null>(dbPath, db => !!db.query("SELECT 1 FROM members m JOIN projects p ON p.id = m.project_id WHERE m.cli = 'codex' AND p.archived = 0 LIMIT 1").get(), null);
+}
+
+/** 상태줄 기록을 읽어 볼 Gemini 팀장 수의 위. */
+const GEMINI_MEMBER_LIMIT = 200;
+/** 이 상태로 남은 기록은 대화가 돌았다는 근거로 치지 않는다(로그인 대기·시작하는 중·오류). */
+const GEMINI_NOT_ACTIVE = new Set(["authenticating", "initializing", "error"]);
+
+/** Gemini 를 쓰는 총괄·팀장(보관하지 않은 프로젝트)의 id. DB 를 읽지 못하면 null(모름). */
+function readGeminiMemberIds(dbPath: string): string[] | null {
+  return readDb<string[] | null>(dbPath, db => db.query<{ id: string }, []>(
+    `SELECT m.id FROM members m JOIN projects p ON p.id = m.project_id WHERE m.cli = 'gemini' AND p.archived = 0 LIMIT ${GEMINI_MEMBER_LIMIT}`).all().map(row => row.id), null);
+}
+
+/**
+ * Gemini 팀장들의 상태줄 기록(<IAMCEO 홈>/context/gemini/<팀장>.json) 가운데 대화가 돌던 가장 새 시각(ISO). 없으면 null.
+ * agy 가 대화 id 를 알려 줬고(대화가 열렸다) 로그인 대기·오류 상태가 아니던 기록만 센다. 기록이 없거나 깨졌으면 건너뛴다. 읽기만 한다.
+ */
+export function geminiLastActiveAt(contextHome: string, memberIds: readonly string[]): string | null {
+  let newest: string | null = null;
+  for (const id of memberIds.slice(0, GEMINI_MEMBER_LIMIT)) {
+    const record = readGeminiStatus(contextHome, id);
+    if (!record || record.conversationId === null || (record.agentState !== null && GEMINI_NOT_ACTIVE.has(record.agentState))) continue;
+    if (newest === null || record.at > newest) newest = record.at;
+  }
+  return newest;
 }
 
 // ---- 명령줄에서 서버에 묻기 ----

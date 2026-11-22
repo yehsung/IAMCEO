@@ -35,7 +35,7 @@ type Internals = {
 async function fixture(deps: Partial<CoreRunnerDeps> = {}) {
   const isolated = createIsolatedRuntime();
   const config = loadConfig({ IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: isolated.socketPath,
-    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin });
+    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin, IAMCEO_GEMINI_BIN: isolated.bins.geminiBin });
   const db = openDb(config.dbPath), store = new Store(db, new Bus());
   const project = store.createProject({ name: "Member health", cwd: isolated.paths.work });
   const calls: Array<{ method: string; params: Record<string, any> }> = [];

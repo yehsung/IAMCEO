@@ -5,19 +5,25 @@ import { readCodexContextFile } from "./codex-context.ts";
 import { readCodexTurnEnd, type CodexTurnCursor } from "./codex-turn.ts";
 import { textRef } from "../../shared/server-text.ts";
 import { createHash } from "node:crypto";
-import { constants, closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { constants, closeSync, existsSync, fstatSync, lstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ApprovalPrompt, Backend, MemberKind } from "../../shared/types.ts";
+import type { ApprovalPrompt, Backend, DeliveryEvidence, MemberKind } from "../../shared/types.ts";
 import { claudeFolderTrust, codexFolderTrust, looksLikeFolderTrust } from "./core-approval.ts";
 import { cleanText, clipUtf16 } from "../text.ts";
+import { defaultGeminiHome } from "../config.ts";
 import { childEnv } from "./env.ts";
 import { claudeQuietScreen, inputText, screenContextPct } from "./claude-screen.ts";
+import { GEMINI_SELECTED_OPTION, GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE, geminiDraft, geminiSetupBlocked, geminiTurnToStop } from "./gemini-screen.ts";
+import { geminiStatusPath, readGeminiStatus, type GeminiStatusRecord } from "./gemini-status.ts";
+import { geminiHookEventsDir, geminiHookLastWrite, readGeminiDeliveryEvidence, readGeminiHookConversation, type GeminiHookConversationWatch } from "./gemini-hooks.ts";
+import { geminiInjectDir } from "./gemini-inject.ts";
+import { validWindow } from "./context.ts";
 import { CLAUDE_BACKGROUND_REASON, CLAUDE_LOGIN_ERRORS, CLAUDE_LOGIN_REASON, claudeHookTurn, readClaudeTurn, type ClaudeHookTurnState, type ClaudeTurnCursor, type ClaudeTurnError } from "./claude-turn.ts";
 import { defaultClaudeHome, findSessionFile } from "./session-files.ts";
 import { readClaudeSubagents, readCodexSubagents, type ClaudeSubagentCursor, type CodexSubagentState, type SubagentReading } from "./subagents.ts";
 import { CoreError, coreRpc, coreSocketPath, type CoreHello, type CoreTerminal } from "./core-client.ts";
-import { providerFor, providerLaunch, isProviderArgv, type ProviderBins } from "./providers.ts";
+import { GEMINI_LAUNCH_LABEL, providerFor, providerLaunch, isProviderArgv, type CoreProvider, type ProviderBins } from "./providers.ts";
 import { codexBindingMarker, discoverCodexSession, observeCompactBoundary, type CodexBindingCursor, type CompactBoundaryBaseline, type CompactBoundaryCursor } from "./core-context.ts";
 import { readDeliveryEvidence, readJsonlRange, parseCodexSessionMeta, providerLogPath, type DeliveryEvidenceCursor, type JsonlCursor } from "./delivery-evidence.ts";
 import type { DeliveryDispatch, RunnerRecoveryStore, TerminalLease } from "../service-contracts.ts";
@@ -28,8 +34,12 @@ import { hookEventsDir } from "./hooks.ts";
 import type { FullRunner, RunnerEvent, RunnerMember, SendResult, StartOpts, TerminalControlAction, TerminalControlResult, DeliveryProbe, DeliveryInspection, DeliveryRepair, DeliveryLogBaseline, RunnerTerminalIdentity, RunnerReattachResult, RunnerObservation } from "./types.ts";
 import { ERROR_CODES } from "../../shared/error-codes.ts";
 
-/** claudeHome: Claude session transcripts (default CLAUDE_CONFIG_DIR or ~/.claude), read for context usage only. */
-export interface CoreRunnerOptions extends ProviderBins { coreBin?: string; socketPath?: string; session?: string; stateDir?: string; configDir?: string; claudeHome?: string; codexHome?: string; contextHome?: string }
+/**
+ * claudeHome: Claude session transcripts (default CLAUDE_CONFIG_DIR or ~/.claude), read for context usage only.
+ * geminiHome: Antigravity CLI(agy)의 자료 폴더(기본 IAMCEO_GEMINI_HOME 또는 ~/.gemini/antigravity-cli). 이어 열 대화가 있는지(conversations/<id>.db)만 본다.
+ * geminiBin(ProviderBins): Antigravity CLI 실행 파일(기본 `agy`).
+ */
+export interface CoreRunnerOptions extends ProviderBins { coreBin?: string; socketPath?: string; session?: string; stateDir?: string; configDir?: string; claudeHome?: string; codexHome?: string; geminiHome?: string; contextHome?: string }
 export interface CoreCompactState {
   id: string; baseline: CompactBoundaryBaseline; phase: "sending" | "running" | "uncertain" | "succeeded" | "failed";
   startedAt: number; cursor: CompactBoundaryCursor | null;
@@ -119,6 +129,11 @@ interface Track {
   settledAt: number; settleTries: number;
   epoch: number; endedTurn: number; completing: boolean; refresh: Promise<CoreTerminal> | null;
   nonce: string | null; bindingSince: string; binding: CodexBindingCursor | null; compact: CoreCompactState | null;
+  /**
+   * Antigravity CLI: 이 터미널을 띄울 때 정한 값(터미널 라벨 GEMINI_LAUNCH_LABEL). 상태줄 기록의 launch 칸이 이 값과 같아야 이 터미널의 기록이다.
+   * 서버를 다시 켠 뒤 다시 붙을 때도 라벨에서 읽는다. null: 라벨이 없는 터미널이다(그 터미널의 기록은 쓰인 시각으로만 가른다).
+   */
+  launch: string | null;
   /** 이 압축(id)의 끝을 알리는 훅을 찾는 읽기. 한 번 찾으면 seen 이 남는다. */
   compactHook: { id: string; reader: HookEventReader; seen: boolean } | null;
   dispatches: DeliveryDispatch[]; evidence: Map<string, DeliveryEvidenceCursor>; lastError: string | null;
@@ -249,6 +264,15 @@ interface ClaudeWatch {
 }
 
 /**
+ * Antigravity CLI 의 대화 id 를 훅 기록에서 찾을 때의 기억(track 마다, CoreRunner.geminiHookConversation).
+ * sent: 이 실행기가 이 터미널에 넣은(넣으려 한) 전달 묶음의 표지. storeAsked: 저장소의 마지막 실행 봉투를 이미 물었다(서버를 다시 켠 뒤 한 번).
+ * hook: 사건 파일을 읽던 자리.
+ * knownAt: 지금 아는 대화 id 의 근거가 적힌 시각(ms). 상태줄 기록이면 그 기록을 쓴 시각, 훅 줄이면 그 줄의 시각, 붙을 때 넘겨받은 id 면 붙은 시각이다.
+ *   훅 줄은 이보다 나중 것만 id 를 바꿀 수 있다: 상태줄이 알려 준(또는 넘겨받은) id 를 그보다 앞선 훅 줄이 되돌리지 않는다.
+ */
+interface GeminiSessionWatch { sent: Set<string>; storeAsked: boolean; hook: GeminiHookConversationWatch | null; knownAt: number }
+
+/**
  * 0.2.7(묶음 6): 지금 돌고 있는 서브에이전트 수의 관측(track 마다, observeSubagents). 바뀔 때만 subagents 사건을 낸다.
  * path: 찾아 둔 Claude 주 대화 기록. key: 마지막으로 낸 값(quality:count).
  */
@@ -267,6 +291,23 @@ export function codexExecutionPreference(kind: MemberKind, parallel: boolean): s
   return "IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.\n\n";
 }
 
+/**
+ * 대화 id 를 모르는 Antigravity CLI 터미널에 잃을 대화가 있을 수 있는가. agy 는 첫 글을 받을 때 대화를 만든다(그 전에는 대화 id 가 없다, 문서).
+ * 한 번도 턴이 끝난 적이 없고(core 턴 번호 0), 지금 턴이 도는 중도 아니고, 서버가 넣고 결과를 기다리는 글도 없는 터미널은 대화를 만든 적이 없다:
+ * 그런 터미널이 사라지거나 재워졌을 때까지 '앞 대화를 잃었다'고 막으면, 지시를 받기 전에 재운 팀장을 다시 열 수 없다(새 세션으로만 시작해야 한다).
+ * 하나라도 모르면 있을 수 있다고 본다(막는 쪽이 안전하다).
+ */
+export function geminiMayHaveConversed(terminal: Pick<CoreTerminal, "turn" | "status">, pending: boolean): boolean {
+  if (pending || (terminal.turn ?? 0) > 0) return true;
+  const state = terminal.status?.state;
+  // 보고가 아예 없으면(뜨는 중에 사라짐) 대화도 없다. idle·done 은 쉬는 중이다.
+  if (state === undefined || state === "idle" || state === "done") return false;
+  // 로그인·첫 설정 화면에서는 아직 대화를 시작할 수 없다.
+  if (geminiSetupBlocked(terminal.status)) return false;
+  // 그 밖(working·승인 창·error)은 턴이 돌았거나 도는 중일 수 있다.
+  return true;
+}
+
 /** Terminals belong to core's holders. IAMCEO shutdown only detaches. */
 export class CoreRunner implements FullRunner {
   readonly kind: Backend = "core";
@@ -281,7 +322,17 @@ export class CoreRunner implements FullRunner {
   private readonly configuring = new Set<string>();
   private readonly parallelPreferences = new Map<string, boolean>();
   private readonly leases = new Map<string, TerminalLease>();
+  /**
+   * 세션 id 를 알기 전에 터미널이 사라진 팀장(세대). Codex 와 Antigravity CLI 는 새 세션의 id 를 스스로 정해, 모르는 채로 다시 띄우면
+   * 조용히 새 대화가 된다. 그 다시 띄우기를 session_unknown 으로 거절하는 데 쓴다.
+   */
   private readonly lostCodex = new Map<string, number | undefined>();
+  /**
+   * 이 서버가 사라지는(또는 끝내는) 것을 지켜봤고 대화가 있었을 수 없다고 가린 Antigravity CLI 터미널(팀장 → 그 터미널). lostCodex 의 반대쪽이다.
+   * 총괄은 사라진 core 터미널의 칸 번호를 곧바로 비우지 않는다. 명부에 그 칸 번호가 남은 채 다시 띄우라고 해도, 이 터미널이면 막지 않는다
+   * (지켜본 판정이 디스크에 남은 근거보다 정확하다). 지켜보지 못한 터미널(서버가 꺼진 사이 사라졌다)은 여기 없고 디스크의 근거로 가린다.
+   */
+  private readonly geminiCleared = new Map<string, string>();
   private readonly unknownStarts = new Set<string>();
   private readonly sending = new Set<string>();
   private readonly starts = new Map<string, Promise<{ sessionId: string | null; paneId: string; rejoined?: boolean }>>();
@@ -291,6 +342,8 @@ export class CoreRunner implements FullRunner {
   private readonly claudeWatch = new WeakMap<Track, ClaudeWatch>();
   /** 서브에이전트 수의 관측(track 마다). 새 track(다시 띄운 CLI)은 처음부터 다시 잰다. */
   private readonly subagentWatch = new WeakMap<Track, SubagentWatch>();
+  /** Antigravity CLI 의 대화 id 를 훅 기록에서 찾는 기억(track 마다). 새 track(다시 띄운 CLI)은 처음부터 다시 본다. */
+  private readonly geminiSessionWatch = new WeakMap<Track, GeminiSessionWatch>();
   /** 0.2.7 배포 전 확인(P3): 멈춘 압축(id)의 되살아난 명령을 지웠는가·안내했는가(track 마다, 압축마다 한 번). */
   private readonly compactDrafts = new WeakMap<Track, { id: string; cleared: boolean; noted: boolean }>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -302,6 +355,8 @@ export class CoreRunner implements FullRunner {
   private readonly hookShadow: HookShadow | null;
   /** 훅 사건 폴더. 압축 끝 훅을 완료의 근거로 읽을 때만 쓴다(checkCompact). 훅을 넣지 않는 환경이면 null. */
   private readonly hookEvents: string | null;
+  /** Antigravity CLI 훅 사건 폴더(gemini-hooks.ts). 전달 수신 증거(PreInvocation 의 표지)를 읽는다. 훅을 넣지 않는 환경이면 null. */
+  private readonly geminiHookEvents: string | null;
 
   constructor(private readonly options: CoreRunnerOptions = {}, private readonly deps: CoreRunnerDeps = {}) {
     this.socketPath = options.socketPath || coreSocketPath(options.session);
@@ -309,6 +364,7 @@ export class CoreRunner implements FullRunner {
     this.sendTimeoutMs = deps.sendTimeoutMs ?? 20_000;
     // 훅은 contextHome 이 있을 때만 넣는다(providers.ts). 같은 조건에서만 비교한다.
     this.hookEvents = options.contextHome && (options.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0") ? hookEventsDir(options.contextHome) : null;
+    this.geminiHookEvents = options.contextHome && (options.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0") ? geminiHookEventsDir(options.contextHome) : null;
     this.hookShadow = deps.hookShadow === false ? null : deps.hookShadow ?? (this.hookEvents ? new HookShadow({ eventsDir: this.hookEvents }) : null);
   }
   /** Scope cancellation to this attempt; a late read must never initiate another input. */
@@ -487,7 +543,7 @@ export class CoreRunner implements FullRunner {
     const launch = terminal.labels["iamceo.operation"] ? this.deps.recoveryStore?.getLifecycleJournal?.(terminal.labels["iamceo.operation"]) : null;
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
     const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, restorePending: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, composerSeen: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
-      epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null, compactHook: null,
+      epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, launch: terminal.labels[GEMINI_LAUNCH_LABEL] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null, compactHook: null,
       dispatches: [], evidence: new Map(), logFile: null, lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
     // The terminal exists whether or not the persisted input state can be read. Throwing here left a terminal that
     // nobody tracked (terminal.run had already succeeded) and a start whose result read as unknown: every later
@@ -530,6 +586,15 @@ export class CoreRunner implements FullRunner {
     // on a transport failure, a missing snapshot, or an unknown Codex session.
     if (member.origin === "adopted") throw new CoreError("unsupported", "Core does not adopt terminals without IAMCEO ownership labels");
     if (providerFor(member) === "codex" && (member.paneId || (this.lostCodex.has(member.id) && this.lostCodex.get(member.id) === member.sessionGeneration)) && !member.sessionId) throw new CoreError("session_unknown", "The previous Codex terminal is gone and its native session id is unknown; explicitly start a fresh session with context handoff");
+    // Antigravity CLI 도 대화 id 를 스스로 정한다. id 를 알기 전에 사라진 터미널을 그대로 다시 띄우면 앞 대화를 잃은 줄 모르고 새 대화가 된다.
+    // 이 서버가 사라지는 것을 본 터미널은 그때 가렸다: 대화가 있었을 수 있으면 lostCodex 에(막는다), 없었으면 geminiCleared 에 적었다(막지 않는다).
+    // 명부에 칸 번호만 남았고 이 서버가 지켜본 적이 없는 터미널(서버가 꺼진 사이 사라졌다)은 디스크의 근거로 가린다(geminiGoneMayHaveConversed):
+    // 대화가 있었을 수 없으면 막지 않는다. 지시를 받기 전에 사라진 팀장을 다시 열 길이 '새 세션으로'뿐이 되지 않게.
+    if (providerFor(member) === "gemini" && !member.sessionId) {
+      const lost = this.lostCodex.has(member.id) && this.lostCodex.get(member.id) === member.sessionGeneration;
+      const unseen = !!member.paneId && this.geminiCleared.get(member.id) !== member.paneId;
+      if (lost || (unseen && this.geminiGoneMayHaveConversed(member, opts))) throw new CoreError("session_unknown", "The previous Antigravity CLI terminal is gone and its native session id is unknown; explicitly start a fresh session with context handoff");
+    }
     const launch = providerLaunch(member, opts, this.options);
     const env = childEnv();
     for (const key of Object.keys(env)) if (/^(HC_|HERDR_)/.test(key)) delete env[key];
@@ -544,15 +609,38 @@ export class CoreRunner implements FullRunner {
     let terminal: CoreTerminal;
     try { terminal = await this.call<CoreTerminal>("terminal.run", {
       argv: launch.argv, cwd: member.cwd, env, name: this.name(member), size: { cols: 160, rows: 50 },
-      labels: { ...this.labels(member), "iamceo.startedAt": new Date().toISOString(), ...(member.sessionGeneration !== undefined ? { "iamceo.generation": String(member.sessionGeneration) } : {}), ...(opts.operationId ? { "iamceo.operation": opts.operationId } : {}), ...(nonce ? { "iamceo.binding": nonce } : {}), ...(launch.sessionId ? { "iamceo.session": launch.sessionId } : {}) },
+      // launch.labels(띄우기마다의 라벨)를 먼저 펴서, 소유권·세대 라벨을 덮지 못하게 한다.
+      labels: { ...(launch.labels ?? {}), ...this.labels(member), "iamceo.startedAt": new Date().toISOString(), ...(member.sessionGeneration !== undefined ? { "iamceo.generation": String(member.sessionGeneration) } : {}), ...(opts.operationId ? { "iamceo.operation": opts.operationId } : {}), ...(nonce ? { "iamceo.binding": nonce } : {}), ...(launch.sessionId && this.pinsSession(providerFor(member)) ? { "iamceo.session": launch.sessionId } : {}) },
       no_parent: true, outlive_parent: true, no_notify: true, keep: false, rm: false, wait: false,
     }, this.sendTimeoutMs);
       if (!terminal?.address || !terminal.labels || !Array.isArray(terminal.argv) || terminal.cwd !== member.cwd || !this.owns(terminal, member) || (terminal.turn !== undefined && (!Number.isSafeInteger(terminal.turn) || terminal.turn < 0))) throw new CoreError("protocol", "Invalid terminal.run identity; creation may have occurred", true);
     } catch (error) { if (!(error instanceof CoreError) || error.uncertain) this.unknownStarts.add(member.id); throw error; }
     // A timed-out run may have spawned a holder. A later start first searches
     // the stable member labels/name, rather than replaying terminal.run.
-    await this.bind(member, terminal, launch.sessionId);
-    return { sessionId: launch.sessionId, paneId: terminal.address };
+    const track = await this.bind(member, terminal, launch.sessionId);
+    // Antigravity CLI: 없는 id 로 이어 열면 agy 가 새 대화를 연다. 붙는 사이에 그 새 id 를 이미 알아냈으면(discoverGeminiSession) 그것을 돌려준다.
+    return { sessionId: providerFor(member) === "gemini" ? track.sessionId ?? launch.sessionId : launch.sessionId, paneId: terminal.address };
+  }
+  /**
+   * 띄울 때의 세션 id 를 터미널 라벨(iamceo.session)에 박아 두는가. 라벨은 뒤에 바꿀 수 없다.
+   * Antigravity CLI 는 박지 않는다: 없는 id 로 이어 열면 경고만 찍고 새 대화(새 id)를 열어, 라벨의 id 가 그 터미널의 대화가 아니게 된다.
+   * 그러면 서버를 다시 켠 뒤 다시 붙기가 '세션이 바뀜'으로 거절된다. agy 의 대화 id 는 상태줄 기록(없으면 훅 기록)으로 안다(discoverGeminiSession).
+   */
+  private pinsSession(provider: CoreProvider): boolean {
+    switch (provider) {
+      case "claude": case "codex": return true;
+      case "gemini": return false;
+      default: { const unlisted: never = provider; void unlisted; return true; }
+    }
+  }
+  /** 이 CLI 의 실행 파일 설정값(터미널 소유권 확인에 쓴다). 설정하지 않았으면 undefined 이고 실행 파일 이름으로만 견준다. */
+  private configuredBin(provider: CoreProvider): string | undefined {
+    switch (provider) {
+      case "claude": return this.options.claudeBin;
+      case "codex": return this.options.codexBin;
+      case "gemini": return this.options.geminiBin;
+      default: { const unlisted: never = provider; void unlisted; return undefined; }
+    }
   }
   /** The orchestrator verified that no owned terminal appeared; a later start may create one again. */
   forgetUnknownStart(memberId: string): void { this.unknownStarts.delete(memberId); }
@@ -593,7 +681,7 @@ export class CoreRunner implements FullRunner {
     if (!matches.length) return { outcome: "not_found", code: "no_owned_terminal" };
     if (matches.length !== 1) return { outcome: "conflict", code: "multiple_terminals", detail: "Multiple live terminals claim this member" };
     const terminal = matches[0];
-    if (!this.owns(terminal, member) || !isProviderArgv(terminal.argv, providerFor(member), providerFor(member) === "claude" ? this.options.claudeBin : this.options.codexBin) || terminal.cwd !== member.cwd ||
+    if (!this.owns(terminal, member) || !isProviderArgv(terminal.argv, providerFor(member), this.configuredBin(providerFor(member))) || terminal.cwd !== member.cwd ||
       (member.sessionId && terminal.labels["iamceo.session"] && terminal.labels["iamceo.session"] !== member.sessionId)) return { outcome: "conflict", code: "ownership_changed", detail: "Core terminal ownership, provider, cwd or generation changed" };
     const current = this.tracks.get(member.id);
     const sessionId = terminal.labels["iamceo.session"] || member.sessionId || (current?.terminal.address === terminal.address ? current.sessionId : null);
@@ -620,6 +708,9 @@ export class CoreRunner implements FullRunner {
     let status: "working" | "idle" | "blocked" | "gone" = terminal.state !== "live" ? "gone" : reported === "working" ? "working" : ["idle", "done", "error"].includes(reported || "") ? "idle" : "blocked";
     if (!initial && (terminal.turn !== previous.turn || reported !== previous.status?.state)) this.bump(track);
     if (status === "gone" && providerFor(track.member) === "codex" && !track.sessionId) this.lostCodex.set(track.member.id, track.member.sessionGeneration);
+    if (status === "gone" && providerFor(track.member) === "gemini" && !track.sessionId && (geminiMayHaveConversed(previous, track.pending || track.uncertain || track.dispatches.length > 0) || (terminal.turn ?? 0) > 0)) this.lostCodex.set(track.member.id, track.member.sessionGeneration);
+    // 엔진이 그 터미널을 모른다고만 답한 경우(not_found)는 새 관측이 아니다(마지막으로 본 옛 모습이다): '대화 없음'으로 적어 두지 않는다. 다시 띄울 때 디스크의 근거로 가린다.
+    else if (status === "gone" && providerFor(track.member) === "gemini" && !track.sessionId && terminal.reason !== "not_found") this.geminiCleared.set(track.member.id, terminal.address);
     // Pump input has its own mandatory composer read. Diagnostic screen reads must
     // not consume that attempt's deadline or hide its pre-write timeout boundary.
     const screen = terminal.state === "live" && (!this.operation.getStore() || status === "blocked") ? await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 }).then(r => r.text, () => null) : null;
@@ -636,15 +727,17 @@ export class CoreRunner implements FullRunner {
     // A CLI that never reported (turn 0) and any screen without the composer (dialog, setup) stay blocked.
     // A turn whose end was not seen (counter moved, no report) is ended only after the gap has lasted a moment.
     const silent = track.silentSince !== null && terminal.reported !== false && (terminal.turn ?? 0) > 0 && screen !== null &&
-      (providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen)) !== null;
+      composerDraft(providerFor(track.member), screen) !== null;
     track.lost = silent && ((terminal.turn ?? 0) <= track.endedTurn || this.pollNow() - track.silentSince! >= SILENT_SETTLE_MS);
     const state = track.lost || background || claude ? "done" : reported;
     // 로그인 밖의 API 오류로 끝난 턴은 core 의 error 보고처럼 쉬는 CLI 다(관측 상태 error, stateOf).
     if (track.lost || background || claude?.kind === "background" || claude?.kind === "error") status = "idle";
     // 로그인(계정) 오류로 끝난 턴: 다시 로그인해 다음 턴이 돌 때까지 막힘으로 보이고 전달은 보류한다.
     if (claude?.kind === "login") status = "blocked";
-    const usage = screen !== null && state !== "working" ? usageLimitMenu(screen) : null;
-    const retry = state === "working" && (screen === null ? track.setupError?.code === "network_retry" : networkRetryScreen(screen));
+    // 사용 한도 메뉴·API 재시도·오류 줄의 화면 문구는 Claude·Codex 에서 본 것뿐이다. Antigravity CLI 화면에는 대지 않는다(OSC 의 error·blocked 보고만 따른다).
+    const wording = screenWordingKnown(providerFor(track.member));
+    const usage = wording && screen !== null && state !== "working" ? usageLimitMenu(screen) : null;
+    const retry = wording && state === "working" && (screen === null ? track.setupError?.code === "network_retry" : networkRetryScreen(screen));
     if (initial && state === "error" && !track.compact) {
       track.lastError = usage?.raw ?? (terminal.status?.msg || "CLI reported an error");
       this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: true, errorText: track.lastError });
@@ -665,13 +758,13 @@ export class CoreRunner implements FullRunner {
       // An idle report never clears an unresolved external write fence.
       // A turn read as over only because its report vanished mostly ended in an API error, so it is no proof of a
       // working connection (inferred). When the CLI's own error line sits above the composer, end it as that error.
-      const failed = track.lost && !usage ? screenTurnError(screen!) : null;
+      const failed = track.lost && !usage && wording ? screenTurnError(screen!) : null;
       track.lastError = usage?.raw ?? (state === "error" ? terminal.status?.msg || "CLI reported an error" : failed);
       this.event(track, { type: "turn_end", memberId: track.member.id, finalText: "", isError: state === "error" || !!usage || !!failed, ...(state === "error" || usage || failed ? { errorText: track.lastError! } : {}), ...(track.lost ? { inferred: true } : {}) });
     }
     if (status === "gone") track.pending = false;
     if (screen !== null && ["idle", "done", "error"].includes(state ?? "") && !usage) {
-      const draft = providerFor(track.member) === "claude" ? inputText(screen) : codexDraft(screen);
+      const draft = composerDraft(providerFor(track.member), screen);
       // D2-7: 입력칸을 못 알아보던 CLI 가 빈 입력칸을 그렸으면, 글이 남아 있던 칸이 비었을 때처럼 미뤄 둔 전달을 다시 밀게 한다.
       const unseen = track.composerSeen === false;
       track.composerSeen = draft !== null;
@@ -680,24 +773,27 @@ export class CoreRunner implements FullRunner {
         this.event(track, { type: "input_ready", memberId: track.member.id });
       }
     }
-    const setup = screen !== null && !usage && status === "blocked" ? (providerFor(track.member) === "claude" ? claudeFolderTrust : codexFolderTrust)(screen, track.member.cwd) : null;
+    const setup = screen !== null && !usage && status === "blocked" ? folderTrust(providerFor(track.member), screen, track.member.cwd) : null;
+    // Antigravity CLI 가 로그인·첫 설정(약관·데이터 수집 동의)에서 막혀 있다고 알렸다. 사람만 끝낼 수 있다: 키를 보내지 않고 알리기만 한다.
+    const geminiSetup = providerFor(track.member) === "gemini" && terminal.state === "live" && geminiSetupBlocked(terminal.status);
     // Labels for the owner only; neither sends a key. A dialog that merely reads like folder trust is never answered.
     const unreported = status === "blocked" && !usage && !setup && !reported;
     const trustLike = unreported && screen !== null && trustDialogLike(screen, providerFor(track.member));
     const notReady = unreported && !trustLike && (terminal.turn ?? 0) === 0 && Date.now() - Date.parse(track.bindingSince) >= (this.deps.startNotReadyMs ?? 60_000);
     // 0.2.6 Y: 정해진 메모는 오류 표의 대표 문장(observation_<code>). 앱은 영어 화면에서 코드로 영어 문장을 고른다(폴더는 ': ' 뒤 그대로).
     track.setupError = usage ? { code: "usage_limit", note: usage.raw } : claude?.kind === "login" ? { code: "login_required", note: ERROR_CODES.observation_login_required.ko }
+      : geminiSetup ? { code: GEMINI_SETUP_CODE, note: GEMINI_SETUP_NOTE }
       : retry ? { code: "network_retry", note: ERROR_CODES.observation_network_retry.ko } : setup ? { code: "folder_trust", note: `${ERROR_CODES.observation_folder_trust.ko}: ${track.member.cwd}` }
       : trustLike ? { code: "trust_dialog_unrecognized", note: `${ERROR_CODES.observation_trust_dialog_unrecognized.ko}: ${track.member.cwd}` }
       : notReady ? { code: "start_not_ready", note: ERROR_CODES.observation_start_not_ready.ko } : null;
     if (usage) { status = "blocked"; track.pending = false; }
-    const blockedReason = usage ? "usage_limit" : setup || claude?.kind === "login" ? "setup" : state === "blocked" ? BLOCKED_KINDS[terminal.status?.kind || ""] ?? "status_unknown" : status === "blocked" ? "status_unknown" : null;
+    const blockedReason = usage ? "usage_limit" : setup || claude?.kind === "login" || geminiSetup ? "setup" : state === "blocked" ? BLOCKED_KINDS[terminal.status?.kind || ""] ?? "status_unknown" : status === "blocked" ? "status_unknown" : null;
     if (state === "error" || claude?.kind === "error") {
       if (track.statusTimer) clearTimeout(track.statusTimer);
       track.statusTimer = null; track.pendingStatus = null;
     }
     // 백그라운드 터미널 상태에 들고 날 때도 쉬는 중을 다시 알린다: 나올 때의 알림이 미뤄 둔 전달을 곧바로 다시 밀게 한다.
-    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry, trustLike ? "trust_dialog_unrecognized" : notReady ? "start_not_ready" : null, ...(background ? ["codex_background"] : []), ...(claude ? [`claude_${claude.kind}`] : [])]);
+    const statusKey = JSON.stringify([status, blockedReason, setup?.prompt.fingerprint ?? null, usage?.fingerprint ?? null, retry, trustLike ? "trust_dialog_unrecognized" : notReady ? "start_not_ready" : null, ...(background ? ["codex_background"] : []), ...(claude ? [`claude_${claude.kind}`] : []), ...(geminiSetup ? [GEMINI_SETUP_CODE] : [])]);
     // While the end of a silent turn is being watched (SILENT_SETTLE_MS) nothing is blocked yet: publishing it sent the
     // owner an approval alert for a dialog that does not exist. The next observation decides.
     if (silent && !track.lost && !track.failure && blockedReason === "status_unknown") return;
@@ -728,6 +824,8 @@ export class CoreRunner implements FullRunner {
       if (reading) this.event(track, { type: "context_usage", memberId: track.member.id, ...reading, model: reading.model ?? track.member.model });
       return;
     }
+    // Antigravity CLI 는 Claude 의 기록·화면 막대로 읽지 않는다. agy 가 상태줄로 알려 준 값만 쓴다.
+    if (providerFor(track.member) === "gemini") { await this.reportGeminiContext(track, sessionId, endedAt, turn); return; }
     let tokens: number | null = null;
     let model: string | null = null;
     let compacted = false;
@@ -757,6 +855,138 @@ export class CoreRunner implements FullRunner {
     if (reading.tokens === null && reading.shownPct === null && !reading.exact) return;
     this.event(track, { type: "context_usage", memberId: track.member.id, sessionId, ...reading });
   }
+  /**
+   * Antigravity CLI 의 턴 끝 문맥 %: agy 가 상태줄로 알려 준 값(상태줄 기록의 context.usedPct·windowSize)이다. 화면이나 세션 기록은 읽지 않는다.
+   * 턴이 끝날 무렵의 기록(끝나기 2초 전 이후에 쓴 것)이면 창 크기와 함께 정확한 값으로, 그보다 오래된 기록이면 % 만 싣는다.
+   * 토큰 수는 싣지 않는다(기록에는 지금 문맥의 토큰이 아니라 세션 누적 토큰이 있다). 이 대화의 기록이 아니거나 % 가 없으면 재지 않는다.
+   */
+  private async reportGeminiContext(track: Track, sessionId: string, endedAt: number, turn: number | undefined): Promise<void> {
+    const fresh = (record: GeminiStatusRecord | null) => !!record && Date.parse(record.at) >= endedAt - 2000;
+    let record = this.geminiStatus(track);
+    // agy 는 쉬는 중이 되면서 상태줄을 다시 그린다(300ms 에 한 번까지). 그 기록을 잠깐 기다린다. 오지 않으면 앞선 기록의 % 만 쓴다.
+    const waitMs = Math.min(this.deps.contextTimeoutMs ?? 2000, 600);
+    for (let waited = 0; !fresh(record) && waited < waitMs; waited += 100) {
+      await Bun.sleep(100);
+      if (this.closed || this.tracks.get(track.member.id) !== track) return;
+      record = this.geminiStatus(track);
+    }
+    if (this.closed || this.tracks.get(track.member.id) !== track || (track.sessionId || track.member.sessionId) !== sessionId || track.terminal.turn !== turn) return;
+    if (!record || record.conversationId !== sessionId || record.context.usedPct === null) return;
+    const window = record.context.windowSize;
+    const exact = fresh(record) && validWindow(window) ? { window, source: "statusline" as const, pct: record.context.usedPct } : null;
+    this.event(track, { type: "context_usage", memberId: track.member.id, sessionId, tokens: null, shownPct: record.context.usedPct, model: track.member.model ?? record.model.id, exact });
+  }
+  /**
+   * 이 터미널의 상태줄 명령이 쓴 기록(<contextHome>/context/gemini/<팀장>.json). 없거나, 깨졌거나, 다른 터미널의 기록이면 null.
+   * 기록 파일은 팀장마다 하나라, 방금 끝낸 예전 터미널의 래퍼가 늦게 쓴 기록이 새 터미널을 띄운 뒤에 놓일 수 있다('새 세션으로' 는 끝내자마자 띄운다).
+   * 그래서 띄울 때 정한 값으로 가른다: 기록의 launch 가 이 터미널의 라벨(track.launch)과 같아야 한다. 쓰인 시각(띄운 뒤)도 함께 본다.
+   * 라벨이 없는 터미널은 launch 를 적지 않은 기록만, 쓰인 시각으로 가른다(그 터미널의 상태줄 명령은 값을 받지 않았다).
+   */
+  private geminiStatus(track: Track): GeminiStatusRecord | null {
+    if (!this.options.contextHome) return null;
+    const record = readGeminiStatus(this.options.contextHome, track.member.id);
+    if (!record || record.launch !== track.launch) return null;
+    const since = Date.parse(track.bindingSince);
+    return Number.isFinite(since) && Date.parse(record.at) > since ? record : null;
+  }
+  /**
+   * Antigravity CLI 의 대화 id 를 알아낸다. agy 는 새 대화의 id 를 스스로 정하고, 없는 id 로 이어 열면 경고만 찍고 새 대화를
+   * 새 id 로 연다(터미널에서 대화를 새로 열어도 id 가 바뀐다). 근거는 둘이다:
+   * - 상태줄 기록의 conversationId(이 터미널의 기록만, geminiStatus).
+   * - 상태줄 기록이 id 를 주지 못하면 훅 기록(geminiHookConversation): 서버가 이 터미널에 넣은 전달 묶음의 표지가 든 PreInvocation 줄의 conversationId.
+   *   상태줄 입력의 conversation_id 는 아직 실제 agy 로 보지 못했고(대화형 화면이 있어야 한다), 훅 입력의 conversationId 는 확인했다.
+   * 찾은 id 가 지금 아는 id 와 다르면 그것이 이 터미널의 대화다: session 사건을 낸다(총괄이 팀장의 세션 id 를 바꾼다).
+   * 띄우는 중(start 가 아직 돌아오지 않음)에는 내지 않는다: 그 결과에 실린 id 가 뒤늦게 적용되어 방금 알린 새 id 를 덮지 않게 한다(다음 관측이 낸다).
+   */
+  private discoverGeminiSession(track: Track): void {
+    if (providerFor(track.member) !== "gemini" || this.starts.has(track.member.id)) return;
+    const watch = this.geminiWatch(track);
+    const record = this.geminiStatus(track);
+    let id = record?.conversationId ?? null, seenAt = id ? Date.parse(record!.at) : null;
+    if (!id) ({ conversationId: id, at: seenAt } = this.geminiHookConversation(track, watch));
+    if (!id) return;
+    if (seenAt !== null && Number.isFinite(seenAt)) watch.knownAt = Math.max(watch.knownAt, seenAt);
+    if (id === track.sessionId) return;
+    track.sessionId = id;
+    this.event(track, { type: "session", memberId: track.member.id, sessionId: id });
+  }
+  private geminiWatch(track: Track): GeminiSessionWatch {
+    let watch = this.geminiSessionWatch.get(track);
+    // 붙을 때 이미 아는 id(이어 연 세션, 명부의 id)는 지금 시각의 근거로 친다: 그 전의 훅 줄로는 바꾸지 않는다.
+    if (!watch) this.geminiSessionWatch.set(track, watch = { sent: new Set(), storeAsked: false, hook: null, knownAt: track.sessionId ? Date.now() : Number.NEGATIVE_INFINITY });
+    return watch;
+  }
+  /** 서버가 이 터미널에 넣으려는 전달 묶음의 표지를 적어 둔다(넣기 직전에 부른다: 결과를 모르게 끝나도 글은 들어갔을 수 있다). 최근 32개까지. */
+  private noteGeminiSent(track: Track, bundleMarker: string | undefined): void {
+    if (providerFor(track.member) !== "gemini" || !bundleMarker) return;
+    const { sent } = this.geminiWatch(track);
+    sent.delete(bundleMarker); sent.add(bundleMarker);
+    for (const oldest of sent) { if (sent.size <= 32) break; sent.delete(oldest); }
+  }
+  /**
+   * 훅 기록에서 찾은 이 터미널의 대화 id(없으면 null). 이 터미널을 띄운 뒤의 줄 가운데, 서버가 이 터미널에 넣은 전달 묶음의 표지가 글자까지 같게 든
+   * PreInvocation 줄만 본다(gemini-hooks.ts readGeminiHookConversation). 표지 없는 줄은 근거로 쓰지 않는다: 남의 대화·예전 터미널의 줄과 섞이지 않게.
+   * 넣은 표지는 이 실행기가 넣으며 적어 둔 것(noteGeminiSent), 결과를 모르는 봉투(track.dispatches), 그리고 서버를 다시 켠 뒤에는 저장소의
+   * 마지막 실행 봉투(한 번만 묻는다)에서 모은다. 모두 이 터미널·이 세대에 묶인 봉투만이다.
+   * 이미 아는 id 가 있으면 그 근거보다 나중에 적힌 줄만 본다(watch.knownAt): 터미널 안에서 대화를 새로 연 뒤 상태줄이 잠깐 id 를 비워도,
+   * 앞선 전달의 줄이 그 앞 대화의 id 로 되돌리지 않는다.
+   */
+  private geminiHookConversation(track: Track, watch: GeminiSessionWatch): { conversationId: string | null; at: number | null } {
+    const none = { conversationId: null, at: null };
+    if (!this.geminiHookEvents) return none;
+    const generation = track.member.sessionGeneration;
+    const here = (dispatch: DeliveryDispatch | null | undefined): dispatch is DeliveryDispatch => !!dispatch && dispatch.memberId === track.member.id && dispatch.cli === "gemini" && dispatch.backend === "core"
+      && dispatch.identity.terminalId === track.terminal.address && dispatch.identity.sessionGeneration === generation;
+    for (const dispatch of track.dispatches) if (here(dispatch)) this.noteGeminiSent(track, dispatch.bundleMarker);
+    if (!watch.storeAsked && generation !== undefined) {
+      try {
+        const run = this.deps.recoveryStore?.lastWrittenRun?.(track.member.id, generation);
+        if (here(run?.dispatch)) this.noteGeminiSent(track, run.dispatch.bundleMarker);
+        watch.storeAsked = true;
+      } catch { /* 저장소를 읽지 못했다. 다음 관측이 다시 묻는다 */ }
+    }
+    if (!watch.sent.size) return none;
+    const since = Math.max(Date.parse(track.bindingSince), track.sessionId ? watch.knownAt : Number.NEGATIVE_INFINITY);
+    const read = readGeminiHookConversation({ eventsDir: this.geminiHookEvents, memberId: track.member.id, since, bundleMarkers: watch.sent }, watch.hook);
+    watch.hook = read.watch;
+    return { conversationId: read.conversationId, at: read.at };
+  }
+  /**
+   * 서버를 다시 켠 뒤: 대화 id 를 모르는 채 사라진 Antigravity CLI 터미널(명부에 칸 번호만 남았다)에 잃을 대화가 있었을 수 있는가.
+   * 그 터미널을 이 서버가 지켜본 적이 없어 디스크에 남은 근거로만 가린다. agy 는 첫 글을 받을 때 대화를 만들고, 그때 상태가 바뀌어 상태줄을 다시 그리고
+   * (기록의 conversationId 가 채워진다) 훅 줄을 남긴다. 대화가 없었다고 볼 수 있는 것은 두 경우뿐이다:
+   * - 이 팀장의 마지막 상태줄 기록이 있고 그 대화 id 가 비었다(마지막으로 상태줄을 그린 agy 에 대화가 없었다). 그 기록 뒤에 덧붙은 훅 줄도 없어야 한다
+   *   (상태줄이 멈춘 뒤에 대화가 돌았으면 훅 줄이 남는다).
+   * - 상태줄 기록이 아예 없고(한 번도 그리지 못하고 끝났다) 훅 줄도 하나도 없다. 훅을 싣고 띄웠다는 것(주입 폴더의 hooks.json)이 확인될 때만이다:
+   *   훅을 싣지 않았으면 줄이 없다는 것은 근거가 아니다.
+   * 그 밖(기록에 대화 id 가 있다, 기록이 깨졌다, 훅 줄이 있다, 볼 수 없다, contextHome 이 없다)은 있었을 수 있다고 본다(막는 쪽이 안전하다).
+   * 읽기만 한다.
+   */
+  private geminiGoneMayHaveConversed(member: RunnerMember, opts: StartOpts): boolean {
+    const home = this.options.contextHome;
+    if (!home) return true;
+    try {
+      // 서버 자신의 기록이 먼저다: 이 세대에 입력이 들어간 실행이 있으면 대화가 있었다(상태줄·훅 기록의 순서와 상관없다).
+      // 저장소가 없거나 읽지 못하면 모르는 것이다(막는다).
+      const store = this.deps.recoveryStore;
+      if (member.sessionGeneration === undefined || !store?.lastWrittenRun) return true;
+      if (store.lastWrittenRun(member.id, member.sessionGeneration)) return true;
+      // 훅을 넣지 않는 환경(IAMCEO_HOOK_EVENTS=0)에서는 '훅 줄이 없다'가 근거가 아니다: 상태줄 기록의 id 가 비었다는 것만으로 풀지 않는다.
+      if (!this.geminiHookEvents) return true;
+      let recorded = true;
+      try { lstatSync(geminiStatusPath(home, member.id)); }
+      catch (error) { if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return true; recorded = false; }
+      const hookLines = this.geminiHookEvents ? geminiHookLastWrite(this.geminiHookEvents, member.id) : null;
+      if (hookLines === "unknown") return true;
+      if (recorded) {
+        const record = readGeminiStatus(home, member.id);
+        if (!record || record.conversationId !== null) return true;
+        return hookLines !== null && hookLines > Date.parse(record.at);
+      }
+      if (!this.geminiHookEvents || hookLines !== null) return true;
+      return !existsSync(join(geminiInjectDir(opts.systemPromptFile, member.id), ".agents", "hooks.json"));
+    } catch { return true; }
+  }
   private refresh(track: Track): Promise<CoreTerminal> {
     if (track.refresh) return track.refresh;
     const startedAt = this.pollNow();
@@ -764,8 +994,8 @@ export class CoreRunner implements FullRunner {
       try {
         const terminal = await this.call<CoreTerminal>("terminal.get", { terminal: track.terminal.address });
         this.validateTrack(track);
-        if (!this.owns(terminal, track.member) || !isProviderArgv(terminal.argv, providerFor(track.member), providerFor(track.member) === "claude" ? this.options.claudeBin : this.options.codexBin) || terminal.cwd !== track.member.cwd) throw new CoreError("conflict", "Core terminal ownership changed");
-        if (!this.manualLease(track.member.id)) this.discoverBinding(track);
+        if (!this.owns(terminal, track.member) || !isProviderArgv(terminal.argv, providerFor(track.member), this.configuredBin(providerFor(track.member))) || terminal.cwd !== track.member.cwd) throw new CoreError("conflict", "Core terminal ownership changed");
+        if (!this.manualLease(track.member.id)) { this.discoverBinding(track); this.discoverGeminiSession(track); }
         await this.observe(track, terminal);
         track.failures = 0; track.failure = null;
         // Lifted: tell the orchestrator to push the deliveries it had been holding back.
@@ -869,6 +1099,11 @@ export class CoreRunner implements FullRunner {
     const track = this.tracks.get(memberId);
     if (!track?.sessionId) return null;
     let path: string | null = null;
+    if (providerFor(track.member) === "gemini") {
+      // Antigravity CLI 의 기록(SQLite)은 읽지 않는다. agy 가 상태가 바뀔 때마다 다시 쓰게 하는 상태줄 기록의 시각이 '일하고 있다'는 근거다.
+      const record = this.geminiStatus(track);
+      return record && record.conversationId === track.sessionId ? record.at : null;
+    }
     if (providerFor(track.member) === "claude") path = transcriptPath(track.member.cwd, track.sessionId, this.providerHome(track.member));
     else if (track.logFile?.sessionId === track.sessionId) path = track.logFile.path;
     else {
@@ -915,7 +1150,7 @@ export class CoreRunner implements FullRunner {
       if (!["idle", "done", "error"].includes(state || "")) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: `No trustworthy idle OSC 7501 status; inspect CLI setup with iamceo attach ${member.id} (status=${JSON.stringify(terminal.status?.state ?? null)}, turn=${terminal.turn ?? null}, reported=${terminal.reported ?? null})` };
       let inputEpoch = track.epoch;
       let screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
-      const usage = usageLimitMenu(screen.text);
+      const usage = screenWordingKnown(providerFor(member)) ? usageLimitMenu(screen.text) : null;
       if (usage) {
         track.status = "blocked";
         track.statusKey = JSON.stringify(["blocked", "usage_limit", null, usage.fingerprint, false]);
@@ -926,7 +1161,7 @@ export class CoreRunner implements FullRunner {
       }
       // Never erase a person's draft or deliver through an unidentified dialog.
       // An empty composer never establishes readiness; only the OSC gate above can permit input.
-      let draft = providerFor(member) === "claude" ? inputText(screen.text) : codexDraft(screen.text);
+      let draft = composerDraft(providerFor(member), screen.text);
       // 0.2.7 배포 전 확인(real-cli P3): 멈춘 압축의 명령을 Claude 가 입력칸에 되돌렸으면(IAMCEO 가 넣은 글과 글자까지 같을 때만) 지우고 다시 읽는다.
       // 지운 뒤에는 화면이 빈 입력칸을 보일 때까지만(최대 열 번 읽기) 기다린다. 비지 않으면 지금처럼 넣지 않는다(다음 시도가 다시 본다. 키는 다시 누르지 않는다).
       if (draft && await this.clearCompactDraft(track, terminal, draft)) {
@@ -948,7 +1183,8 @@ export class CoreRunner implements FullRunner {
       const quietInput = this.claudeTakesInput(track, terminal);
       if (quietInput && !this.stillClaudeQuiet(track, screen.text)) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written", detail: "Claude started a turn of its own; waiting for it to end" };
       const preference = this.parallelPreferences.get(member.id) ?? member.parallel;
-      const prefix = providerFor(member) === "codex" && preference !== undefined ? codexExecutionPreference(member.kind, preference) : "";
+      // Antigravity CLI 도 자기 서브에이전트를 스스로 띄울 수 있다. Codex 와 같은 실행 선호 줄을 붙인다(끄고 켜는 명령은 없다).
+      const prefix = (providerFor(member) === "codex" || providerFor(member) === "gemini") && preference !== undefined ? codexExecutionPreference(member.kind, preference) : "";
       const binding = providerFor(member) === "codex" && !track.sessionId && track.nonce ? codexBindingMarker(track.nonce) + "\n\n" : "";
       const cleaned = cleanText(binding + prefix + text);
       if (!cleaned.trim()) return unsupported("Message is empty");
@@ -963,6 +1199,8 @@ export class CoreRunner implements FullRunner {
       if (current.state !== "live" || this.stateOf(track, current) !== state || track.epoch !== inputEpoch) return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" };
       track.pending = true; this.bump(track);
       deliveryAttempted = true;
+      // Antigravity CLI: 이 터미널에 넣는 전달 묶음의 표지를 적어 둔다. 훅 기록에서 이 터미널의 대화 id 를 가려내는 열쇠다(geminiHookConversation).
+      this.noteGeminiSent(track, opts.marker);
       // 그런 Claude 는 core 에게 working 이다. if:"working" 으로 그 사이 승인 창(blocked)·끝남(idle)으로 바뀌었으면 넣지 않게 한다.
       const result = await this.call<{ turn: number; started?: boolean | null }>("terminal.send", { terminal: terminal.address, text: cleaned, ...(state === "idle" ? { if: "idle" } : quietInput ? { if: "working" } : {}), force: false, wait: false }, this.sendTimeoutMs);
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Send reply has no valid turn counter", true);
@@ -989,13 +1227,26 @@ export class CoreRunner implements FullRunner {
       try { return readdirSync(projects).some(dir => existsSync(join(projects, dir, `${member.sessionId}.jsonl`))); }
       catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
     }
+    if (providerFor(member) === "gemini") {
+      // Antigravity CLI 는 대화를 <홈>/conversations/<id>.db 에 둔다. 있는지만 본다(읽지 않는다). 없는 것이 확실할 때만 false 다.
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(member.sessionId)) return false;
+      try { statSync(join(home, "conversations", `${member.sessionId}.db`)); return true; }
+      catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+    }
     try {
       for (const _ of new Bun.Glob(`**/rollout-*-${member.sessionId}.jsonl`).scanSync({ cwd: join(home, "sessions"), onlyFiles: true, followSymlinks: false })) return true;
       return false;
     } catch { return true; }
   }
   private providerHome(member: RunnerMember): string {
-    return providerFor(member) === "claude" ? this.options.claudeHome ?? defaultClaudeHome() : this.options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
+    const provider = providerFor(member);
+    switch (provider) {
+      case "claude": return this.options.claudeHome ?? defaultClaudeHome();
+      case "codex": return this.options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
+      case "gemini": return this.options.geminiHome ?? defaultGeminiHome();
+      // 타입 밖의 값은 지금까지처럼 Codex 자리다. CLI 를 더하면 아래 줄이 컴파일 오류가 되어 여기를 고치게 한다.
+      default: { const unlisted: never = provider; void unlisted; return this.options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex"); }
+    }
   }
   private discoverBinding(track: Track): void {
     if (providerFor(track.member) !== "codex" || track.sessionId || !track.nonce || track.member.sessionGeneration === undefined) return;
@@ -1152,6 +1403,14 @@ export class CoreRunner implements FullRunner {
     const unknown = (code: string): SubagentReading => ({ quality: "unknown", count: null, code });
     if (terminal.state !== "live") return unknown("terminal_gone");
     if (!track.sessionId) return unknown("session_unbound");
+    if (providerFor(track.member) === "gemini") {
+      // Antigravity CLI: 상태줄 기록의 도는 서브에이전트 수(status "running" 인 항목, gemini-status.ts).
+      const record = this.geminiStatus(track);
+      if (!record || record.conversationId !== track.sessionId) return unknown("status_missing");
+      // 도는 것도 끝난 것("completed")도 아닌 항목이 섞였으면(또는 그것을 세지 않던 래퍼의 기록이면) 도는 수를 정확히 모른다. 정확한 값인 것처럼 내지 않는다.
+      if (record.subagentsUnknown !== 0) return unknown("subagent_status_unknown");
+      return { quality: "exact", count: record.subagents, code: "gemini_status" };
+    }
     // 이 CLI 를 띄운 시각(터미널 라벨 iamceo.startedAt, 0.2.0 부터 모든 터미널에 있다). 앞 프로세스의 뒤 작업은 그 프로세스와 함께 끝났다.
     // 라벨이 없으면 붙은 시각(bindingSince)으로 대신하지 않는다: 그 앞의 띄움을 앞 프로세스의 것으로 버려 0 을 정확한 값처럼 낼 수 있다.
     const started = terminal.labels?.["iamceo.startedAt"];
@@ -1282,6 +1541,8 @@ export class CoreRunner implements FullRunner {
   }
   private logPath(track: Track): string | null {
     if (!track.sessionId) return null;
+    // Antigravity CLI 의 대화는 SQLite 다. 줄 단위 기록(JSONL)을 전제로 한 읽기(기준선·수신 표지·압축 경계·턴 끝)에 넘길 파일이 없다.
+    if (providerFor(track.member) === "gemini") return null;
     const home = this.providerHome(track.member);
     if (providerFor(track.member) === "claude") return findSessionFile(home, track.member.cwd, track.sessionId);
     if (track.binding) {
@@ -1304,6 +1565,8 @@ export class CoreRunner implements FullRunner {
   deliveryBaseline(member: RunnerMember): DeliveryLogBaseline[] {
     const track = this.tracks.get(member.id);
     if (!track || !track.sessionId) return [];
+    // Antigravity CLI: 기록 기준선이 없다. 수신 증거는 훅 사건 파일의 자리(deliveryHookMark)로 묶는다.
+    if (providerFor(member) === "gemini") return [];
     try {
       const path = this.logPath(track);
       const baseline = path ? eofLogBaseline(join(this.providerHome(member), providerFor(member) === "claude" ? "projects" : "sessions"), path) : null;
@@ -1312,11 +1575,17 @@ export class CoreRunner implements FullRunner {
   }
   /**
    * 11-16(Claude): 봉투를 쓰기 직전의 훅 사건 파일 자리(DeliveryBaseline.hookMark). 그 전달의 턴 끝 훅은 이 뒤에 덧붙은 줄에서만 찾는다.
-   * Claude 가 아니거나 훅을 넣지 않는 환경이면 undefined(칸을 두지 않는다).
+   * Antigravity CLI 는 자기 훅 사건 파일(run/gemini-events)의 자리다: 그 뒤에 덧붙은 PreInvocation 의 표지가 수신 증거다(inspectDelivery).
+   * Codex 이거나 훅을 넣지 않는 환경이면 undefined(칸을 두지 않는다).
    */
   deliveryHookMark(member: RunnerMember): HookEventsMark | null | undefined {
-    if (providerFor(member) !== "claude" || !this.hookEvents) return undefined;
-    return hookEventsMark(this.hookEvents, member.id);
+    const provider = providerFor(member);
+    switch (provider) {
+      case "claude": return this.hookEvents ? hookEventsMark(this.hookEvents, member.id) : undefined;
+      case "gemini": return this.geminiHookEvents ? hookEventsMark(this.geminiHookEvents, member.id) : undefined;
+      case "codex": return undefined;
+      default: { const unlisted: never = provider; void unlisted; return undefined; }
+    }
   }
   async inspectDelivery(member: RunnerMember, query: DeliveryProbe): Promise<DeliveryInspection> {
     const release = this.reserve(member.id);
@@ -1329,6 +1598,7 @@ export class CoreRunner implements FullRunner {
   }
   /** Session log of a session that has no attached terminal. Null when it cannot be told apart. */
   private sessionLogPath(member: RunnerMember, sessionId: string): string | null {
+    if (providerFor(member) === "gemini") return null; // 줄 단위 기록이 없다(logPath 와 같다).
     const home = this.providerHome(member);
     try {
       if (providerFor(member) === "claude") return findSessionFile(home, member.cwd, sessionId);
@@ -1347,8 +1617,16 @@ export class CoreRunner implements FullRunner {
    * holds none of them. Anything else (no log, a partial or unrecognized record, some markers only) is unknown.
    */
   inspectGoneDelivery(member: RunnerMember, query: DeliveryProbe): DeliveryInspection {
-    const source = providerFor(member) === "claude" ? "claude_log" as const : "codex_log" as const;
+    const source = logEvidenceSource(providerFor(member));
     const unknown = (code: string): DeliveryInspection => ({ evidence: [{ source, verdict: "unknown", location: "none", code, complete: false, checkedAt: new Date().toISOString() }], finding: "unknown", receivedDeliveryIds: [], snapshot: null, quiescence: "unresolved" });
+    if (providerFor(member) === "gemini") {
+      // Antigravity CLI: 세션 기록 대신 훅 사건 파일을 본다. 그 팀장의 파일에서 봉투를 쓰기 직전의 자리 뒤만 읽으므로 대화 id 는 묻지 않는다
+      // (첫 전달은 id 를 알기 전에 나간다). 표지가 있으면 받은 것이고, 없으면 모른다: '안 받았다'고 하지 않는다.
+      if (query.cli !== "gemini" || query.backend !== "core" || query.identity.sessionGeneration !== member.sessionGeneration) return unknown("identity_changed");
+      const read = readGeminiDeliveryEvidence({ eventsDir: this.geminiHookEvents, memberId: member.id, markers: query.markers, bundleMarker: query.bundleMarker, mark: query.baseline.hookMark });
+      const allReceived = query.markers.length > 0 && query.markers.every((marker) => read.receivedDeliveryIds.includes(marker.deliveryId));
+      return { evidence: [read.evidence], finding: allReceived ? "received" : "unknown", receivedDeliveryIds: read.receivedDeliveryIds, snapshot: null, quiescence: allReceived ? "settled" : "unresolved" };
+    }
     const sessionId = query.identity.sessionId;
     if (query.cli !== providerFor(member) || query.backend !== "core" || !sessionId || sessionId !== member.sessionId || query.identity.sessionGeneration !== member.sessionGeneration) return unknown("identity_changed");
     const path = this.sessionLogPath(member, sessionId);
@@ -1377,7 +1655,11 @@ export class CoreRunner implements FullRunner {
     this.assertMember(track, member);
     if (this.manualLease(member.id)) return unknown("manual_control", "wait"); // No provider record scan under lease.
     const terminal = await this.refresh(track);
-    if (query.cli !== providerFor(member) || query.backend !== "core" || (!this.sameIdentity(query.identity, this.identity(track)) && (!query.identity.sessionId || query.identity.sessionId !== track.sessionId))) return unknown("identity_changed");
+    // Antigravity CLI 의 대화 id 는 전달 뒤에야 알게 되거나 바뀐다(봉투에는 없거나 옛 id 다). 그 증거는 팀장의 훅 사건 파일을 자리로 묶어 읽으므로
+    // 터미널·대화 id 대신 같은 세션 세대인지만 본다. 받았다는 판정만 내므로 다른 터미널의 봉투여도 틀린 입력으로 이어지지 않는다.
+    const sameSource = providerFor(member) === "gemini" ? query.identity.sessionGeneration === this.identity(track).sessionGeneration
+      : this.sameIdentity(query.identity, this.identity(track)) || (!!query.identity.sessionId && query.identity.sessionId === track.sessionId);
+    if (query.cli !== providerFor(member) || query.backend !== "core" || !sameSource) return unknown("identity_changed");
     const stored = this.deps.recoveryStore?.inputState(member.id).unresolvedDispatches ?? track.dispatches;
     const settledBefore = this.deps.recoveryStore?.getDispatch?.(query.dispatchId);
     const dispatch = stored.find((item) => item.dispatchId === query.dispatchId && item.wireSha256 === query.wireSha256) ??
@@ -1389,13 +1671,21 @@ export class CoreRunner implements FullRunner {
     const screen = (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text;
     this.validateTrack(track);
     if (track.epoch !== inputEpoch) return unknown("input_epoch_changed");
-    const draft = providerFor(member) === "claude" ? inputText(screen) : codexDraft(screen);
+    const draft = composerDraft(providerFor(member), screen);
     const composer = draft === null ? "unknown" : draft === "" ? "empty" : dispatch && exactComposer(screen, providerFor(member)) === dispatch.wireText ? "matches" : "different";
     const state = this.stateOf(track, terminal);
     const status = terminal.state !== "live" ? "gone" : ["idle", "done", "working", "blocked"].includes(state || "") ? state as "idle" | "done" | "working" | "blocked" : "unknown";
     const snapshot: NonNullable<DeliveryInspection["snapshot"]> = { identity: this.identity(track), observedAt: track.observedAt, turn: terminal.turn ?? null, inputEpoch: track.epoch, ownership: "verified", status,
       blockedReason: status === "blocked" ? terminal.status?.kind === "permission" ? "permission" : "status_unknown" : null,
       leaseActive: false, mutation: "none", composer, originalWrite, externalInput };
+    if (providerFor(member) === "gemini") {
+      // Antigravity CLI: 수신 증거는 훅 사건 파일(봉투를 쓰기 직전의 자리 뒤의 PreInvocation 표지)뿐이다. 표지가 있으면 받은 것이다.
+      // 없다는 것은 '안 받았다'는 근거가 아니어서(훅이 돌지 않았을 수 있다) 다시 넣기·제출만 하기로 이어지는 판정(not_received·draft_only)은 내지 않는다.
+      const read = readGeminiDeliveryEvidence({ eventsDir: this.geminiHookEvents, memberId: member.id, markers: query.markers, bundleMarker: query.bundleMarker, mark: query.baseline.hookMark });
+      const allReceived = query.markers.length > 0 && query.markers.every((marker) => read.receivedDeliveryIds.includes(marker.deliveryId));
+      const screenEvidence: DeliveryEvidence = { source: "core_screen", verdict: composer === "unknown" ? "unknown" : "present", location: "composer", code: composer, complete: composer !== "unknown", checkedAt: new Date().toISOString() };
+      return { evidence: [read.evidence, screenEvidence], finding: allReceived ? "received" : ["working", "blocked"].includes(status) ? "wait" : "unknown", receivedDeliveryIds: read.receivedDeliveryIds, snapshot, quiescence: originalWrite !== "unresolved" ? "settled" : "unresolved" };
+    }
     const path = this.logPath(track);
     if (!path || !track.sessionId) return { ...unknown("session_unbound"), snapshot };
     const baseline = query.baseline.logs.find((log) => log.path === path);
@@ -1438,7 +1728,9 @@ export class CoreRunner implements FullRunner {
       if (!dispatch || dispatch.memberId !== member.id || dispatch.projectId !== member.projectId || dispatch.dispatchId !== request.dispatchId || createHash("sha256").update(dispatch.wireText).digest("hex") !== dispatch.wireSha256 || cleanText(dispatch.wireText) !== dispatch.wireText) return { ...unsupported("Stored delivery or reviewed recovery version changed"), deliveryEffect: "not_written" };
       const inspected = await this.inspectLocked(member, dispatch);
       const snapshot = inspected.snapshot;
-      if (!snapshot || request.expectedSessionGeneration !== snapshot.identity.sessionGeneration || request.expectedSessionId !== snapshot.identity.sessionId || request.expectedTerminalId !== snapshot.identity.terminalId || request.expectedInputEpoch !== snapshot.inputEpoch || snapshot.externalInput !== false || snapshot.leaseActive || !["idle", "done"].includes(snapshot.status)) return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: "Delivery identity, epoch or safe idle state changed" };
+      // Antigravity CLI 의 대화 id 는 첫 글이 들어간 뒤에야 알게 되고 터미널 안에서 바뀔 수도 있다(첫 전달의 봉투에는 id 가 없다). 복구 요청을 만든 뒤에
+      // id 를 알아냈다는 것만으로 '세션이 바뀜'이라 하지 않는다: 세대와 터미널만 견준다(inspectLocked 의 sameSource 와 같다). Claude·Codex 는 그대로 세션 id 까지 견준다.
+      if (!snapshot || request.expectedSessionGeneration !== snapshot.identity.sessionGeneration || (providerFor(member) !== "gemini" && request.expectedSessionId !== snapshot.identity.sessionId) || request.expectedTerminalId !== snapshot.identity.terminalId || request.expectedInputEpoch !== snapshot.inputEpoch || snapshot.externalInput !== false || snapshot.leaseActive || !["idle", "done"].includes(snapshot.status)) return { ok: false, reason: "input_busy", retryable: false, deliveryEffect: "not_written", detail: "Delivery identity, epoch or safe idle state changed" };
       if (inspected.receivedDeliveryIds.length) return { ...unsupported("User receipt already exists; reconcile delivery without input"), deliveryEffect: "not_written" };
       // The owner's explicit consent replaces the proof of absence, never the idle state or the empty composer.
       const consented = this.deps.quiescence?.(member.id, dispatch)?.riskApproved === true && inspected.finding === "unknown" && snapshot.composer === "empty";
@@ -1454,6 +1746,7 @@ export class CoreRunner implements FullRunner {
         await this.call("terminal.keys", { terminal: latest.address, keys: ["enter"] }, this.sendTimeoutMs);
         return { ...unsupported("Submit key was sent once; await user-record evidence before further input"), deliveryEffect: "unknown" };
       }
+      this.noteGeminiSent(track, dispatch.bundleMarker);
       // Same rule as send(): after any turn the CLI reports done until its next input, and core has no conditional for it.
       const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: latest.address, text: dispatch.wireText, ...(final.snapshot.status === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Invalid repair send receipt", true);
@@ -1473,6 +1766,8 @@ export class CoreRunner implements FullRunner {
     this.deps.compactStore.save(track.member.id, state); track.compact = state;
   }
   async compact(member: RunnerMember, focus: string, _opts: StartOpts): Promise<SendResult> {
+    // Antigravity CLI 는 문맥을 스스로 압축한다. 서버가 넣을 압축 명령과 끝을 확인할 근거가 없어 넣지 않고 거절한다(아무것도 쓰지 않는다).
+    if (providerFor(member) === "gemini") return unsupported("Antigravity CLI compacts its own context; IAMCEO does not send a compact command to it");
     let release: () => void;
     try { release = this.reserve(member.id); } catch { return { ok: false, reason: "busy", retryable: true, deliveryEffect: "not_written" }; }
     let attempted = false;
@@ -1490,7 +1785,7 @@ export class CoreRunner implements FullRunner {
       if (terminal.state !== "live" || !["idle", "done"].includes(this.stateOf(track, terminal) || "")) return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: "Compact requires an idle or finished CLI" };
       const epoch = track.epoch;
       const screen = await this.screen(member);
-      if ((providerFor(member) === "claude" ? inputText(screen) : codexDraft(screen)) !== "") return { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written" };
+      if (composerDraft(providerFor(member), screen) !== "") return { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written" };
       const path = this.logPath(track), home = this.providerHome(member);
       if (!path) return { ...unsupported("Native session log is unavailable"), deliveryEffect: "not_written" };
       const root = join(home, providerFor(member) === "claude" ? "projects" : "sessions");
@@ -1604,6 +1899,11 @@ export class CoreRunner implements FullRunner {
       this.parallelPreferences.set(member.id, on);
       return { ok: true };
     }
+    if (providerFor(member) === "gemini") {
+      // Antigravity CLI 도 Codex 처럼 다룬다: Claude 의 `/effort ultracode` 를 치지 않고, 선호만 적어 두었다가 다음 입력 앞에 붙인다.
+      this.parallelPreferences.set(member.id, on);
+      return { ok: true };
+    }
     const command = `/effort ultracode ${on ? "on" : "off"}`;
     const sent = await this.send(member, command, opts);
     if (!sent.ok) return sent;
@@ -1629,7 +1929,7 @@ export class CoreRunner implements FullRunner {
     // 뒤 작업만 남은 Claude 를 다시 열면 그 작업이 끝난다. 그 작업이 끝난 뒤에 맞춘다.
     if (this.isBusy(member.id) || this.claudeLingers(track) || this.sending.has(member.id) || this.configuring.has(member.id)) return { ok: false, reason: "busy", retryable: true };
     const sessionId = track.sessionId || member.sessionId;
-    if (!sessionId) return unsupported("Native Codex session id is unknown; use the CLI /model menu or explicitly start a fresh session");
+    if (!sessionId) return unsupported(providerFor(member) === "gemini" ? "Antigravity conversation id is unknown; explicitly start a fresh session" : "Native Codex session id is unknown; use the CLI /model menu or explicitly start a fresh session");
     const release = this.reserve(member.id);
     this.configuring.add(member.id);
     try {
@@ -1637,7 +1937,7 @@ export class CoreRunner implements FullRunner {
       if (this.claudeLingers(track, terminal)) return { ok: false, reason: "busy", retryable: true };
       if (!["idle", "done"].includes(this.stateOf(track, terminal) || "")) return { ok: false, reason: "blocked", retryable: true };
       const screen = await this.screen(member);
-      const draft = providerFor(member) === "claude" ? inputText(screen) : codexDraft(screen);
+      const draft = composerDraft(providerFor(member), screen);
       if (draft !== "") return { ok: false, reason: "input_busy", retryable: false, detail: "Configuration reload requires an identifiable empty composer; the user draft is preserved" };
       const resumed = { ...member, sessionId, paneId: null };
       providerLaunch(resumed, { ...opts, resume: true }, this.options); // Validate before stopping.
@@ -1672,6 +1972,12 @@ export class CoreRunner implements FullRunner {
         }
         throw new CoreError("no_turn", "No turn to stop: the CLI is idle", false, "not_written");
       }
+      // Antigravity CLI 가 로그인·첫 설정(약관·데이터 수집 동의)에서 기다리는 중이면 멈출 턴이 없다. 멈춤 키(Esc)는 그 동의 창에 대한 답이 될 수 있다:
+      // 이 화면에는 서버가 어떤 키도 보내지 않는다(사람이 이 Mac 의 터미널에서 끝낸다).
+      if (providerFor(member) === "gemini" && terminal.state === "live" && geminiSetupBlocked(terminal.status)) throw new CoreError("no_turn", "No turn to stop: Antigravity CLI is waiting for sign-in or first-run setup in its own terminal", false, "not_written");
+      // 그 밖에도 멈출 턴이 확실할 때만 보낸다(gemini-screen.ts geminiTurnToStop): 상태 보고가 아직 없거나 무엇을 묻는지 모르는 막힘이면
+      // 그 화면이 동의 창일 수 있다(agy 가 문구를 바꾸거나 보고가 늦어도 키가 가지 않게).
+      if (providerFor(member) === "gemini" && terminal.state === "live" && !geminiTurnToStop(terminal.status, !!track?.pending)) throw new CoreError("no_turn", "No turn to stop: Antigravity CLI is not in a turn that an interrupt key can stop", false, "not_written");
       if (track) this.bump(track);
       const result = await this.call<{ outcome: string }>("terminal.interrupt", { terminal: terminal.address, timeout: 3 }, 6000);
       if (!["stopped", "exited"].includes(result.outcome)) throw new CoreError("not_stopped", `CLI interrupt outcome: ${result.outcome}`);
@@ -1742,7 +2048,7 @@ export class CoreRunner implements FullRunner {
     if (!opts.whileWorking && !quiet) throw new CoreError("busy", "Resolve the current CLI turn/dialog before changing its provider or configuration");
     if (quiet) {
       const screen = await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 });
-      const draft = providerFor(member) === "claude" ? inputText(screen.text) : codexDraft(screen.text);
+      const draft = composerDraft(providerFor(member), screen.text);
       // 닫기·강제 재우기(whileWorking)는 마지막 탈출구다. 오류로 끝난 CLI 는 예전에 초안 확인 없이 끝냈다: 오류 배너가 입력칸을 가려
       // 알아보지 못하는(null) 화면은 막지 않는다. 쓰던 글이 보이면 지금처럼 지킨다.
       const unreadableAfterError = draft === null && !!opts.whileWorking && this.stateOf(track, terminal) === "error";
@@ -1803,6 +2109,8 @@ export class CoreRunner implements FullRunner {
     this.leases.delete(member.id); this.parallelPreferences.delete(member.id);
     const track = this.tracks.get(member.id);
     if (track && providerFor(member) === "codex" && !track.sessionId) this.lostCodex.set(member.id, member.sessionGeneration);
+    if (track && providerFor(member) === "gemini" && !track.sessionId && geminiMayHaveConversed(track.terminal, track.pending || track.uncertain || track.dispatches.length > 0)) this.lostCodex.set(member.id, member.sessionGeneration);
+    else if (track && providerFor(member) === "gemini" && !track.sessionId) this.geminiCleared.set(member.id, track.terminal.address);
     this.tracks.delete(member.id);
     if (track) this.event(track, { type: "status", memberId: member.id, status: "gone" });
   }
@@ -1869,7 +2177,7 @@ export class CoreRunner implements FullRunner {
     const epoch = track.epoch;
     const screen = await this.call<{ text: string }>("terminal.read", { terminal: track.terminal.address, lines: 0 });
     this.validateTrack(track);
-    return epoch === track.epoch ? (providerFor(track.member) === "claude" ? claudeFolderTrust : codexFolderTrust)(screen.text, track.member.cwd) : null;
+    return epoch === track.epoch ? folderTrust(providerFor(track.member), screen.text, track.member.cwd) : null;
   }
   async usageLimitSnapshot(member: RunnerMember): Promise<{ menu: ReturnType<typeof usageLimitMenu>; state: string | null }> {
     const track = this.tracks.get(member.id);
@@ -1881,7 +2189,7 @@ export class CoreRunner implements FullRunner {
     this.validateTrack(track);
     if (track.terminal.state !== "live" || epoch !== track.epoch || !this.sameIdentity(identity, this.identity(track))) throw new CoreError("conflict", "Terminal changed while reading usage menu");
     const state = track.terminal.status?.state ?? null;
-    return { menu: state === "working" ? null : usageLimitMenu(screen.text), state };
+    return { menu: state === "working" || !screenWordingKnown(providerFor(member)) ? null : usageLimitMenu(screen.text), state };
   }
   async dismissUsageLimit(member: RunnerMember, fingerprint: string): Promise<{ ok: boolean; note?: string }> {
     let release: () => void;
@@ -2049,8 +2357,10 @@ export class CoreRunner implements FullRunner {
 }
 
 /** No trimming or whitespace normalization for a submit-only full-wire comparison. */
-function exactComposer(screen: string, provider: "claude" | "codex"): string | null {
+function exactComposer(screen: string, provider: CoreProvider): string | null {
   if (/\x1b/.test(screen)) return null;
+  // Antigravity CLI: 여러 줄 글이 입력칸에 어떻게 그려지는지 본 적이 없다. 글자까지 견줄 수 없으니 모른다고 한다('제출만 하기' 복구를 하지 않는다).
+  if (provider === "gemini") return null;
   const lines = screen.split("\n");
   if (provider === "codex") {
     if (codexDraft(screen) === null) return null;
@@ -2090,8 +2400,58 @@ export function screenTurnError(screen: string): string | null {
  * CLI's input box is not one (a real folder-trust dialog has no input box), whatever its banner path or its
  * conversation says about trust.
  */
-export function trustDialogLike(screen: string, provider: "claude" | "codex"): boolean {
-  return (provider === "claude" ? inputText(screen) : codexDraft(screen)) === null && looksLikeFolderTrust(screen);
+export function trustDialogLike(screen: string, provider: CoreProvider): boolean {
+  if (composerDraft(provider, screen) !== null) return false;
+  // Antigravity CLI 의 창은 고른 줄을 `> 1. …` 로 그린다(문서 그림). 안내에만 쓴다.
+  return provider === "gemini" ? looksLikeFolderTrust(screen, GEMINI_SELECTED_OPTION) : looksLikeFolderTrust(screen);
+}
+
+/**
+ * CLI 마다의 입력칸 판독(입력 안전에만 쓴다). "" 는 빈 칸, 글이 있으면 그 글, null 은 입력칸을 알아보지 못했다(넣지 않는다).
+ * CLI 를 더하면 여기서 컴파일 오류가 난다: 남의 판독기로 읽으면 빈 칸을 못 알아보거나(전달이 영영 안 들어감) 남의 글을 빈 칸으로 읽는다.
+ */
+export function composerDraft(provider: CoreProvider, screen: string): string | null {
+  switch (provider) {
+    case "claude": return inputText(screen);
+    case "codex": return codexDraft(screen);
+    case "gemini": return geminiDraft(screen);
+    default: { const unlisted: never = provider; void unlisted; return null; }
+  }
+}
+
+/**
+ * 폴더 신뢰 창의 정확한 파서. 이 결과만이 키를 보낼 근거다(answerApproval).
+ * Antigravity CLI 의 폴더 신뢰 창은 견본이 없어 파서를 두지 않았다(띄울 때 trustedWorkspaces 로 미리 막는다). 남의 파서로 읽지 않는다: 늘 null.
+ */
+function folderTrust(provider: CoreProvider, screen: string, cwd: string): ReturnType<typeof claudeFolderTrust> {
+  switch (provider) {
+    case "claude": return claudeFolderTrust(screen, cwd);
+    case "codex": return codexFolderTrust(screen, cwd);
+    case "gemini": return null;
+    default: { const unlisted: never = provider; void unlisted; return null; }
+  }
+}
+
+/**
+ * 화면 문구로 하는 판정(사용 한도 메뉴, API 재시도 줄, 턴 끝의 오류 줄)을 이 CLI 에 대도 되는가. 그 문구들은 Claude·Codex 화면에서 본 것이다.
+ * Antigravity CLI 의 한도·오류 화면은 아직 본 적이 없어 대지 않는다(OSC 의 error·blocked 보고만 따른다).
+ */
+function screenWordingKnown(provider: CoreProvider): boolean {
+  switch (provider) {
+    case "claude": case "codex": return true;
+    case "gemini": return false;
+    default: { const unlisted: never = provider; void unlisted; return false; }
+  }
+}
+
+/** 세션 기록(또는 훅 기록)에서 읽은 전달 증거의 출처 이름. */
+function logEvidenceSource(provider: CoreProvider): "claude_log" | "codex_log" | "gemini_log" {
+  switch (provider) {
+    case "claude": return "claude_log";
+    case "codex": return "codex_log";
+    case "gemini": return "gemini_log";
+    default: { const unlisted: never = provider; void unlisted; return "codex_log"; }
+  }
 }
 
 /** Input safety only. Unknown composer layouts refuse delivery. */

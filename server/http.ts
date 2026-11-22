@@ -9,7 +9,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { z } from "zod";
 import { fileKindOf, memberRank, PERMISSION_MODES, type Bootstrap, type EngineStatus, type HerdrInfo, type TailnetStatus, type Member, type MessagePageOptions, type SyncSnapshot, type SyncCursor, type FileDoc, type WorkItem, type WsEvent } from "../shared/types.ts";
-import { REPORT_LANGUAGES } from "../shared/types.ts";
+import { CLI_PROVIDERS, REPORT_LANGUAGES } from "../shared/types.ts";
 import type { OperationReceipt, ServerCapabilities } from "../shared/operations.ts";
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP, buildArtifactSrcdoc } from "../shared/artifact-kit.ts";
@@ -260,7 +260,8 @@ const GONE_ROUTES: [method: string, path: string, message: string][] = [
 // ---- 요청 검증 ----
 const nonEmpty = z.string().trim().min(1);
 const backend = z.enum(["core", "herdr", "headless"]);
-const cliProvider = z.enum(["claude", "codex"]);
+// 총괄(chiefCli)·팀장(cli)이 쓸 CLI. gemini 는 Antigravity CLI(agy)다. 로그인(/api/cli-login)이 받는 CLI 는 따로다(CLI_LOGIN_CLIS).
+const cliProvider = z.enum(CLI_PROVIDERS);
 const permissionMode = z.enum(PERMISSION_MODES);
 const effort = z.string().min(1); // Membership comes from the selected model's catalog, including new CLI names.
 // 그대로 --model 뒤에 들어간다. '--플래그' 나 공백이 들어오면 안 된다. 별칭(haiku)·전체 이름·[1m] 을 받는다.
@@ -269,6 +270,8 @@ const listedModel = z.string().trim(); // Membership validation supplies the sam
 const codexEffort = effort;
 const rankPatch = z.object({ model: listedModel.nullable(), effort: effort.nullable() }).partial().strict();
 const codexRankPatch = rankPatch.extend({ effort: codexEffort.nullable().optional() });
+// Gemini 직급표. 모델·effort 가 목록에 있는지는 Claude·Codex 와 같이 모델 목록(ModelCatalog.gemini)으로 본다.
+const geminiRankPatch = rankPatch;
 const handle = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
 
 // 실행 방식·권한·모델은 전체 설정 하나다. 옛 화면이 보낸 값을 조용히 버리지 않고 거부한다.
@@ -331,6 +334,7 @@ const SettingsSchema = z
     permissionMode,
     ranks: z.object({ manager: rankPatch, lead: rankPatch, staff: rankPatch }).partial().strict(),
     codexRanks: z.object({ manager: codexRankPatch, lead: codexRankPatch, staff: codexRankPatch }).partial().strict(),
+    geminiRanks: z.object({ manager: geminiRankPatch, lead: geminiRankPatch, staff: geminiRankPatch }).partial().strict(),
     maxConcurrentTurns: z.number().int().min(1).max(64),
     compactAtPct: z.number().int().min(1).max(100),
     // 창 크기(토큰)를 모를 때의 값. 1k~10M.
@@ -431,7 +435,7 @@ function operationResponse(receipt: OperationReceipt): Response {
       const { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt } = receipt.result;
       result = { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt }; break;
     }
-    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged", "reportLanguage"]), revision: receipt.result.revision }; break;
+    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "geminiRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged", "reportLanguage"]), revision: receipt.result.revision }; break;
     case "member_config": result = { member: receiptMember(receipt.result.member), configRevision: receipt.result.configRevision, sessionGeneration: receipt.result.sessionGeneration }; break;
     case "todo_done": result = { todo: publicFields(receipt.result.todo, ["id", "projectId", "memberId", "who", "title", "detail", "done", "doneAt", "createdAt", "outcome", "closeReason", "closedBy"]), revision: receipt.result.revision }; break;
   }
@@ -1593,7 +1597,10 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   // D9: 시작할 때 CLI 버전을 한 번 읽어 기록하고(처음 본 버전은 로그 한 줄), 실행 파일이 바뀌면 다시 읽는다. 바뀌면 앱이 스냅샷을 다시 읽게 한다.
   // 문맥은 복사하지 않고 그 자리에 붙인다: 경로들은 같은 문맥 객체를 읽는다(시험이 뒤에 포트를 바꾼다).
   if (!ctx.cliVersions && process.env.IAMCEO_TEST !== "1") {
-    const watcher = new CliVersionMonitor({ home: config.home, claudeBin: config.claudeBin, codexBin: config.codexBin, onUpdate: () => store.touchSnapshot() });
+    // bun test 는 NODE_ENV=test 로 돈다. 격리 환경(IAMCEO_TEST=1) 없이 시험 파일을 직접 돌렸을 때, 시험이 실행 파일을 정해 주지 않은
+    // Antigravity CLI 는 설정이 이 Mac 에 깔린 진짜 agy 로 풀린다. 그것을 실행하지 않도록 시험 프로세스에서는 Gemini 버전을 읽지 않는다.
+    const geminiBin = process.env.NODE_ENV === "test" ? null : config.geminiBin;
+    const watcher = new CliVersionMonitor({ home: config.home, claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin, onUpdate: () => store.touchSnapshot() });
     ctx.cliVersions = watcher;
     void watcher.refresh().catch(() => undefined);
   }
@@ -1810,6 +1817,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       tailnetSeen: store.tailnetSeen() !== null,
       detectedTailnet: (() => { try { return detect(); } catch { return []; } })(),
       codexInUse: store.listAllMembers().some(member => activeProjects.has(member.projectId) && member.cli === "codex"),
+      geminiMemberIds: store.listAllMembers().filter(member => activeProjects.has(member.projectId) && member.cli === "gemini").map(member => member.id),
       // D9 의 CLI 버전 캐시를 쓴다(실행 파일이 그대로면 --version 을 다시 부르지 않는다). 없으면(시험) 모른다.
       probes: { cliVersions: async () => (cliVersions ? await cliVersions.refresh() : null), ...ctx.doctorProbes },
     });

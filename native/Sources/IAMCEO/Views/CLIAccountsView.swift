@@ -79,7 +79,16 @@ extension APIClient {
 // MARK: - Text
 
 enum CLIAccountText {
-    static func name(_ cli: String) -> String { cli == "codex" ? "Codex" : "Claude Code" }
+    /// 계정 줄·로그인 시트에 적는 CLI 이름. 이 앱이 모르는 값은 '알 수 없는 CLI'다(Claude Code 로 적지 않는다).
+    /// 서버는 지금 Claude Code·Codex 줄만 보낸다(Gemini 는 로그인을 다루지 않는다). 이름은 표로 둔다.
+    static func name(_ cli: String) -> String {
+        switch RankSettingsCLI(cli: cli) {
+        case .claude: "Claude Code"
+        case .codex: "Codex"
+        case .gemini: "Antigravity CLI"
+        case nil: unknownCLIName
+        }
+    }
 
     /// CLI 가 준 요금제 이름을 읽기 좋게(모르는 값은 그대로).
     static func plan(_ raw: String?) -> String? {

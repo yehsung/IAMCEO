@@ -46,7 +46,7 @@ describe("옛 서비스 설정 알아보기 (D4-6)", () => {
     const out = openSync(join(home, "logs", "server.log"), "a"), err = openSync(join(home, "logs", "server.err.log"), "a");
     const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "en_US.UTF-8", IAMCEO_LANG: "ko", IAMCEO_HOME: home, IAMCEO_PORT: "0", IAMCEO_TEST: "1",
       IAMCEO_HERDR_SOCKET: join(home, "no-herdr.sock"), IAMCEO_CORE_SOCKET: join(home, "no-core.sock"), IAMCEO_CORE_BIN: "/usr/bin/false",
-      IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", CLAUDE_CONFIG_DIR: join(home, "claude"), CODEX_HOME: join(home, "codex"),
+      IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_GEMINI_BIN: "/usr/bin/false", CLAUDE_CONFIG_DIR: join(home, "claude"), CODEX_HOME: join(home, "codex"),
       XPC_SERVICE_NAME: "com.iamceo.server" };
     const p = Bun.spawn([process.execPath, CLI, "serve"], { stdin: "ignore", stdout: out, stderr: err, env });
     closeSync(out); closeSync(err);

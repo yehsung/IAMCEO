@@ -1102,13 +1102,23 @@ struct SettingsView: View {
         let scope: String
         let cli: RankSettingsCLI
         var id: String { "\(cli.rawValue).\(key)" }
-        var showsEffort: Bool { cli != .codex || key != "staff" }
+        /// Codex 서브에이전트는 effort 를 따로 받지 않는다. Gemini 는 서브에이전트 줄 자체가 없다(RankSettingsCLI.editableRanks).
+        var showsEffort: Bool {
+            switch cli {
+            case .claude, .gemini: true
+            case .codex: key != "staff"
+            }
+        }
     }
     private static let rankRows = RankSettingsCLI.allCases.flatMap { cli in [
         RankRow(key: "manager", title: String(localized: "총괄"), scope: String(localized: "본사 AI도 같음"), cli: cli),
         RankRow(key: "lead", title: String(localized: "팀장"), scope: String(localized: "총괄이 일을 맡기는 팀원"), cli: cli),
         RankRow(key: "staff", title: String(localized: "서브에이전트"), scope: String(localized: "팀장이 나눠 맡기는 일"), cli: cli)
-    ] }
+    ].filter { cli.editableRanks.contains($0.key) } }
+    /// 직급 설정을 보일 CLI. Gemini 는 서버가 알고(모델 목록에 gemini) 설정에 그 직급표가 실려 올 때만 보인다(0.2.9 까지의 서버에는 없다).
+    private var rankCLIs: [RankSettingsCLI] { store.offeredCLIs.filter { $0 != .gemini || draft.geminiRanks != nil } }
+    /// 화면에 보이는 직급 줄. 보이지 않는 줄(이 서버가 모르는 CLI)은 저장을 막지 않는다.
+    private var shownRankRows: [RankRow] { let shown = rankCLIs; return Self.rankRows.filter { shown.contains($0.cli) } }
     private static let tidyChoices = [0, 3, 6, 12, 24]
     /// B1: languages the lead and staff can write to the owner in (server `Settings.reportLanguage`).
     static let reportLanguages = ["ko", "en"]
@@ -1135,9 +1145,9 @@ struct SettingsView: View {
     private var editable: Bool { store.canWrite && store.bootstrap != nil }
     private var saving: Bool { savingLocal || store.pendingActions.contains("settings") }
     /// A rank switched to "직접 입력" with nothing typed yet counts as an unsaved (and invalid) change, as on the web.
-    private var pendingEmptyCustom: Bool { Self.rankRows.contains { customRanks.contains($0.id) && model(of: $0).isEmpty } }
+    private var pendingEmptyCustom: Bool { shownRankRows.contains { customRanks.contains($0.id) && model(of: $0).isEmpty } }
     private var isDirty: Bool { loaded && (Self.signature(draft) != Self.signature(base) || pendingEmptyCustom || macAlerts != baseMacAlerts) }
-    private var firstModelError: String? { Self.rankRows.lazy.compactMap { modelError(for: $0) }.first }
+    private var firstModelError: String? { shownRankRows.lazy.compactMap { modelError(for: $0) }.first }
     private var canSave: Bool { editable && isDirty && firstModelError == nil && !saving && store.settingsConflict == nil }
     private var serverSignature: String { store.bootstrap.map { Self.signature($0.settings) } ?? "" }
 
@@ -1550,7 +1560,7 @@ struct SettingsView: View {
             runtimeGroup
                 .id("runtime")
                 .overlay { if highlightRuntime { RoundedRectangle(cornerRadius: CERadius.control).stroke(CE.accent, lineWidth: 2) } }
-            ForEach(RankSettingsCLI.allCases, id: \.self) { cli in
+            ForEach(rankCLIs, id: \.self) { cli in
                 rankGroup(cli).disabled(!editable || saving)
             }
             // T(F6): 팀원·프로젝트·날짜별 사용량(Views/UsageView.swift). 옛 서버면 그리지 않는다.
@@ -1563,7 +1573,8 @@ struct SettingsView: View {
     private var runtimeGroup: some View {
         let runtime = store.runtime
         let report = store.isDemo ? nil : doctor.report.flatMap { $0.checks.isEmpty ? nil : $0 }
-        let needsSetup = runtime != nil && (runtime?.core.available != true || runtime?.providers.values.contains { !$0.installed } == true)
+        // 각주가 'Claude Code를 설치하고…'라 Claude Code·Codex 줄만 본다. 다른 CLI(Gemini)는 깔려 있을 때만 줄이 오고, 없어도 준비가 덜 된 것이 아니다.
+        let needsSetup = runtime != nil && (runtime?.core.available != true || ["claude", "codex"].contains { runtime?.providers[$0]?.installed == false })
         let footnote: String = store.isDemo ? String(localized: "샘플에는 연결된 실행 환경이 없습니다.")
             : report != nil ? String(localized: "\(store.serverIsThisMac ? String(localized: "이 Mac") : String(localized: "연결된 Mac"))의 서버가 확인한 결과입니다. 로그인은 CLI가 남긴 기록으로 봅니다.")
             : needsSetup ? String(localized: "Claude Code를 설치하고 로그인한 뒤 다시 확인하세요. 실행 엔진이 없으면 IAMCEO 앱을 다시 설치하세요.")
@@ -1587,6 +1598,11 @@ struct SettingsView: View {
                     SettingsRow("Claude Code") { DotValue(tone: providerState(runtime, "claude").tone, text: providerState(runtime, "claude").text) }
                     RowDivider(inset: 0)
                     SettingsRow("Codex CLI") { DotValue(tone: providerState(runtime, "codex").tone, text: providerState(runtime, "codex").text) }
+                    // 서버는 Antigravity CLI 가 깔려 있을 때만 이 줄을 보낸다(점검표가 없는 화면: 샘플).
+                    if runtime?.providers["gemini"] != nil {
+                        RowDivider(inset: 0)
+                        SettingsRow(providerFullName("gemini")) { DotValue(tone: providerState(runtime, "gemini").tone, text: providerState(runtime, "gemini").text) }
+                    }
                 }
                 if showsDiagnostics {
                     RowDivider(inset: 0)
@@ -1679,7 +1695,7 @@ struct SettingsView: View {
 
     private func rankGroup(_ cli: RankSettingsCLI) -> some View {
         let rows = Self.rankRows.filter { $0.cli == cli }
-        let last = cli == RankSettingsCLI.allCases.last
+        let last = cli == rankCLIs.last
         return SettingsGroup(cli.title, footnote: last ? String(localized: "팀원별로 지정한 값이 먼저입니다. 바꾼 값은 세션을 다시 열 때 적용됩니다.") : nil, accessory: {
             // web .st-ranks thead th: 13/600 ink-2, over the value in each select.
             #if os(macOS)
@@ -1780,20 +1796,21 @@ struct SettingsView: View {
         let current = draft.rankConfig(rank.key, cli: rank.cli)?.effort
         let options = store.modelCatalog.list(for: rank.cli).efforts(for: model(of: rank), cli: rank.cli)
         let defaultLabel = String(localized: "기본값")
+        // 고를 값이 없을 때(모델을 정하지 않은 Gemini, effort 가 없는 모델)는 '기본값' 한 줄만 둔다: 아래가 빈 구분선을 그리지 않는다.
+        let stale = current.flatMap { options.contains($0) ? nil : $0 }
         return SetupMenu(current ?? defaultLabel, compact: true, label: String(localized: "\(rank.title) 생각 깊이")) {
             Toggle(defaultLabel, isOn: menuCheck(current == nil) { setEffort(nil, for: rank) })
-            Divider()
+            if !options.isEmpty || stale != nil { Divider() }
             ForEach(options, id: \.self) { effort in
                 Toggle(effort, isOn: menuCheck(current == effort) { setEffort(effort, for: rank) })
             }
-            if let current, !options.contains(current) { Text("현재: \(current)").disabled(true) }
+            if let stale { Text("현재: \(stale)").disabled(true) }
         }
     }
 
     private func setModel(_ value: String?, for rank: RankRow) {
-        var config = draft.rankConfig(rank.key, cli: rank.cli) ?? RankConfig()
-        config.model = value
-        draft[keyPath: rank.cli.ranksKeyPath][rank.key] = config
+        // Gemini 는 모델을 기본값으로 되돌리면 고른 effort 도 기본값으로 되돌린다(Settings.setRankModel). Claude·Codex 는 모델만 바뀐다.
+        draft.setRankModel(value, rank: rank.key, cli: rank.cli)
     }
 
     private func setEffort(_ value: String?, for rank: RankRow) {
@@ -2349,7 +2366,7 @@ struct PermissionChoiceSheet: View {
     var body: some View {
         CESheet(PermissionModeChoice.firstRunTitle, icon: "hand.raised", width: 520, onClose: { dismiss() }) {
             VStack(alignment: .leading, spacing: 16) {
-                Text(PermissionModeChoice.firstRunLead(onThisMac: store.serverIsThisMac)).font(CEFont.note).foregroundStyle(CE.ink2)
+                Text(PermissionModeChoice.firstRunLead(onThisMac: store.serverIsThisMac, gemini: GeminiText.usable(in: store))).font(CEFont.note).foregroundStyle(CE.ink2)
                     .lineSpacing(CELeading.note)
                     .fixedSize(horizontal: false, vertical: true)
                 SettingsChoiceTiles(options: PermissionModeChoice.firstRun.map {
@@ -2406,6 +2423,8 @@ struct NewProjectView: View {
     @State private var legacyFolderInput = false
     @State private var provider = "claude"
     @State private var providerDefaulted = false
+    /// 사용자가 CLI 칸을 직접 골랐다. 고르기 전에는 고르는 칸이 바뀔 때(모델 목록이 늦게 와 Gemini 칸이 생길 때) 처음 값을 다시 맞춘다.
+    @State private var providerPicked = false
     /// "이 폴더를 신뢰하고…": on to begin with. The server then answers the CLI's own folder-trust window itself.
     @State private var trustFolder = true
     @State private var working = false
@@ -2482,6 +2501,14 @@ struct NewProjectView: View {
             // 0.2.9: 처음 뜰 때 한 번만 지금 프로젝트의 총괄(본사는 본사 AI)이 쓰는 CLI 로 맞춘다.
             if !providerDefaulted { providerDefaulted = true; provider = DefaultProvider.choice(in: store) }
         }
+        .onChange(of: store.offeredCLIs) { _, _ in
+            // 만들기를 누른 뒤(칸이 잠긴 동안)에는 건드리지 않는다: 보낸 값과 화면의 값이 달라지지 않게.
+            let next = DefaultProvider.followed(current: provider, picked: providerPicked || working || partial != nil || createdID != nil,
+                                                choice: DefaultProvider.choice(in: store))
+            if next != provider { provider = next }
+        }
+        // 고르는 칸의 Gemini 는 모델 목록에서 온다. 연결 때의 첫 읽기가 실패했어도 이 시트를 열면 다시 읽는다(새 팀장 시트와 같다).
+        .task { await store.refreshModels() }
         .task {
             if let browser = try? await store.folderBrowser(), case .legacy = browser { legacyFolderInput = true }
             #if DEBUG
@@ -2530,9 +2557,17 @@ struct NewProjectView: View {
                     // One line for every way a folder gets here (picked, newly made, cloned from GitHub).
                     if showsFolderTrust { folderTrustRow }
                 }
-                SetupField(String(localized: "총괄이 쓸 AI")) {
-                    SettingsSegments(options: ["claude", "codex"].map { SettingsSegments.Option(id: $0, title: providerLabel($0)) },
-                                     selection: provider, label: String(localized: "총괄이 쓸 AI"), fill: true) { provider = $0 }
+                SetupField(String(localized: "총괄이 쓸 AI"), hint: store.missingCLINote(store.offeredCLIs.map(\.rawValue))) {
+                    // 칸에는 짧은 이름만 둔다(세 칸이 iPhone 폭에 들어가게). 깔려 있지 않은 CLI 는 칸 아래 줄에 적는다.
+                    SettingsSegments(options: store.offeredCLIs.map { SettingsSegments.Option(id: $0.rawValue, title: $0.title) },
+                                     selection: provider, label: String(localized: "총괄이 쓸 AI"), fill: true) { provider = $0; providerPicked = true }
+                }
+                // 새 팀장 시트와 같은 안내: 고른 CLI 가 깔려 있지 않으면 알리고, Gemini 면 첫 설정을 알린다.
+                if store.cliMissing(provider) {
+                    InlineNotice(tone: .attention, icon: "exclamationmark.triangle", title: String(localized: "\(providerFullName(provider))가 설치돼 있지 않습니다"),
+                                 detail: String(localized: "설정의 실행 환경을 확인하세요."))
+                } else if provider == RankSettingsCLI.gemini.rawValue {
+                    InlineNotice(tone: .accent, icon: "info.circle", title: GeminiText.firstUseTitle, detail: GeminiText.firstUseDetail)
                 }
             }
             .disabled(partial != nil || createdID != nil || working)
@@ -2612,10 +2647,6 @@ struct NewProjectView: View {
             if working { ProgressView().controlSize(.small).tint(.white) }
             Text(text)
         }
-    }
-
-    private func providerLabel(_ cli: String) -> String {
-        providerFullName(cli) + (store.runtime?.providers[cli]?.installed == false ? String(localized: " · 설치 필요") : "")
     }
 
     private func create() async {

@@ -116,7 +116,9 @@ private struct TeamStartPanel: View {
     private var message: String {
         if let runtimeBlock { return runtimeBlock }
         if !project.connection.ok, project.connection.reason != "runner_off", let detail = project.connection.ownerDetail, !detail.isEmpty { return detail }
-        return hasMembers ? String(localized: "총괄을 시작하면 팀이 다시 일을 이어갑니다.") : String(localized: "총괄이 일을 받아 Claude Code와 Codex 팀장을 꾸립니다.")
+        if hasMembers { return String(localized: "총괄을 시작하면 팀이 다시 일을 이어갑니다.") }
+        // Antigravity CLI 가 깔려 있고 서버가 Gemini 를 알 때만 함께 적는다. 그 밖에는 예전 문장 그대로다.
+        return GeminiText.usable(in: store) ? String(localized: "총괄이 일을 받아 Claude Code·Codex·Gemini 팀장을 꾸립니다.") : String(localized: "총괄이 일을 받아 Claude Code와 Codex 팀장을 꾸립니다.")
     }
 
     private var lockReason: String? {
@@ -511,6 +513,8 @@ struct MemberDetailView: View {
     private func compactBlock(_ m: Member) -> String? {
         if let reason = readOnlyReason { return reason }
         if m.origin == "manual" { return String(localized: "직접 띄운 세션은 원래 터미널에서 압축하세요.") }
+        // 서버가 이 CLI 의 압축 요청을 받지 않는다(Gemini). 눌러서 거절을 보게 하지 않고 까닭을 적어 잠근다.
+        if RankSettingsCLI(cli: m.cli)?.compacts == false { return GeminiText.compactsItself }
         if store.state?.project.runnerEnabled != true { return String(localized: "실행이 꺼져 있어 압축할 수 없습니다.") }
         if m.paneId == nil || ["asleep", "offline", "gone"].contains(m.status) { return String(localized: "열린 세션이 있어야 압축할 수 있습니다.") }
         if (m.backend ?? store.bootstrap?.settings.backend) == "core", m.contextState == nil || m.sessionId == nil {
@@ -533,7 +537,8 @@ struct MemberDetailView: View {
             TeamFactRow(label: String(localized: "문맥"), alignment: .center) {
                 Group {
                     if let pct {
-                        TeamContextBar(pct: pct, compactAt: compactAt)
+                        // IAMCEO 가 압축하지 않는 CLI(Gemini)에는 압축 기준을 표시하지 않는다.
+                        TeamContextBar(pct: pct, compactAt: RankSettingsCLI(cli: m.cli)?.compacts == false ? nil : compactAt)
                     } else {
                         Text("확인 중").foregroundStyle(CE.ink3)
                     }
@@ -562,7 +567,8 @@ struct MemberDetailView: View {
         var lines = [contextSource(m)]
         if let window = measurement?.window ?? m.contextWindow, window > 0 { lines.append(String(localized: "문맥 창 \(window.formatted()) 토큰")) }
         if let date = parseISODate(measurement?.measuredAt) { lines.append(String(localized: "측정 \(koDateTime(date))")) }
-        lines.append(String(localized: "압축 기준 \(compactAt)%"))
+        if RankSettingsCLI(cli: m.cli)?.compacts == false { lines.append(GeminiText.compactsItself) }
+        else { lines.append(String(localized: "압축 기준 \(compactAt)%")) }
         return lines.joined(separator: "\n")
     }
 
@@ -601,7 +607,7 @@ struct MemberDetailView: View {
         }
         guard measurement?.quality == "exact" else { return String(localized: "측정 정확도 확인 중") }
         switch measurement?.source {
-        case "statusline", "codex": return String(localized: "CLI 측정")
+        case "statusline", "codex", "gemini": return String(localized: "CLI 측정")
         case "stored": return String(localized: "이전 CLI 측정")
         default: return String(localized: "측정 출처 확인 중")
         }
@@ -1220,11 +1226,12 @@ struct MemberDetailView: View {
         let block = configBlock(m, target: target, reopens: reopens)
         let busy = running == "config"
         let rank = m.kind == "worker" ? "lead" : "manager"
-        let rankConfig = store.bootstrap?.settings.rankConfig(rank, cli: target == "codex" ? .codex : .claude)
-        let cli: RankSettingsCLI = target == "codex" ? .codex : .claude
-        let list = store.modelCatalog.list(for: cli)
+        // 이 앱이 모르는 CLI 면 nil 이다. 그때는 다른 CLI 의 모델 목록·직급 기본값을 대신 보이지 않는다(목록이 비고, 정해 둔 값은 '목록에 없음').
+        let cli = RankSettingsCLI(cli: target)
+        let rankConfig = cli.flatMap { store.bootstrap?.settings.rankConfig(rank, cli: $0) }
+        let list = cli.map { store.modelCatalog.list(for: $0) } ?? ModelList(models: [], source: "unknown")
         let selected = list.option(for: trimmed)
-        let efforts = list.efforts(for: trimmed.isEmpty ? (rankConfig?.model ?? "") : trimmed, cli: cli)
+        let efforts = cli.map { list.efforts(for: trimmed.isEmpty ? (rankConfig?.model ?? "") : trimmed, cli: $0) } ?? []
         let modelDefault = rankConfig?.model.map { String(localized: "직급 기본값 (\($0))") } ?? String(localized: "직급 기본값")
         let effortDefault = rankConfig?.effort.map { String(localized: "직급 기본값 (\($0))") } ?? String(localized: "직급 기본값")
         let modelShown = trimmed.isEmpty ? modelDefault : (selected?.label ?? list.unknownCurrent(trimmed) ?? trimmed)
@@ -1232,9 +1239,9 @@ struct MemberDetailView: View {
         return VStack(alignment: .leading, spacing: 10) {
             // Web .field__label 13/600 ink-2 next to .input-sized controls (the fact rows above keep 13 ink-3).
             TeamFactRow(label: "AI CLI", alignment: .center, strong: true) {
-                Picker("AI CLI", selection: Binding(get: { switchAllowed ? provider : m.cli }, set: { provider = $0 })) {
-                    Text(providerOption("claude")).tag("claude")
-                    Text(providerOption("codex")).tag("codex")
+                // 칸에는 짧은 이름만 둔다(세 칸이 iPhone 폭에 들어가게). 깔려 있지 않은 CLI 는 아래 줄에 적고, 고르면 까닭이 뜬다(configBlock).
+                Picker("AI CLI", selection: Binding(get: { switchAllowed ? provider : m.cli }, set: { provider = $0; settleEffort(m, target: switchAllowed ? $0 : m.cli, model: model) })) {
+                    ForEach(providerChoices(m), id: \.self) { Text(providerName($0)).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -1244,10 +1251,13 @@ struct MemberDetailView: View {
                 .fixedSize()
                 .disabled(!switchAllowed || !store.canWrite)
             }
+            if let missing = store.missingCLINote(providerChoices(m)) { teamNote(missing) }
             if let reason = switchBlockReason(m) { teamNote(reason) }
+            if cli == nil { teamNote(String(localized: "이 앱이 모르는 CLI(\(target))를 쓰는 세션입니다. 앱을 새 버전으로 올리면 모델을 고를 수 있습니다.")) }
+            if target != m.cli, cli == .gemini, !store.cliMissing(target) { teamNote(GeminiText.firstUse) }
             TeamFactRow(label: String(localized: "모델"), alignment: .center, strong: true) {
                 TeamSelect(value: modelShown, mono: !trimmed.isEmpty, accessibility: String(localized: "모델")) {
-                    Picker("모델", selection: $model) {
+                    Picker("모델", selection: Binding(get: { model }, set: { model = $0; settleEffort(m, target: target, model: $0) })) {
                         Text(modelDefault).tag("")
                         ForEach(list.models) { option in
                             Text(option.label).tag(selected?.value == option.value ? trimmed : option.value)
@@ -1410,9 +1420,9 @@ struct MemberDetailView: View {
         if m.backend == "core", let pane = m.paneId, !pane.isEmpty {
             return (TerminalCommand.attach(memberID: m.id, bootstrap: store.bootstrap), true)
         }
-        if let session = m.sessionId, !session.isEmpty {
-            let resume = m.cli == "codex" ? "codex resume" : "claude --resume"
-            return ("cd \(TerminalCommand.shellQuote(m.cwd)) && \(resume) \(TerminalCommand.shellQuote(session))", false)
+        // 이 앱이 모르는 CLI 는 다시 여는 명령을 모른다: 다른 CLI 의 명령을 내주지 않는다.
+        if let session = m.sessionId, !session.isEmpty, let cli = RankSettingsCLI(cli: m.cli) {
+            return ("cd \(TerminalCommand.shellQuote(m.cwd)) && \(cli.resumeCommand) \(TerminalCommand.shellQuote(session))", false)
         }
         return nil
     }
@@ -1423,9 +1433,10 @@ struct MemberDetailView: View {
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
-    private func providerOption(_ cli: String) -> String {
-        let name = providerFullName(cli)
-        return store.runtime?.providers[cli]?.installed == false ? String(localized: "\(name) · 설치 필요") : name
+    /// AI CLI 칸에 늘어놓을 값: 서버가 아는 CLI 들, 그리고 이 팀장이 지금 쓰는 CLI(목록을 받기 전이거나 이 앱이 모르는 값이어도 고른 칸이 비지 않게).
+    private func providerChoices(_ m: Member) -> [String] {
+        let offered = store.offeredCLIs.map(\.rawValue)
+        return offered.contains(m.cli) ? offered : offered + [m.cli]
     }
 
     private func canSwitchProvider(_ m: Member) -> Bool {
@@ -1442,6 +1453,16 @@ struct MemberDetailView: View {
 
     private func configTarget(_ m: Member) -> String { canSwitchProvider(m) ? provider : m.cli }
 
+    /// CLI 나 모델을 직접 고른 뒤에 부른다. 모델을 정해야 effort 를 고르는 CLI(Gemini)에서 쓸 모델이 없으면(팀장 모델도 직급 모델도 기본값)
+    /// 고른 effort 를 직급 기본값으로 되돌린다(RankSettingsEditing.memberEffort). Claude·Codex 에서는 아무것도 바꾸지 않는다.
+    /// 서버 값을 읽어 들일 때(loadConfig)는 부르지 않는다: 대표가 고치지 않은 것이 '바뀐 설정'으로 보이지 않게.
+    private func settleEffort(_ m: Member, target: String, model: String) {
+        let cli = RankSettingsCLI(cli: target)
+        let rankModel = cli.flatMap { store.bootstrap?.settings.rankConfig(m.kind == "worker" ? "lead" : "manager", cli: $0)?.model }
+        let kept = RankSettingsEditing.memberEffort(effort, model: model, rankModel: rankModel, cli: cli)
+        if kept != effort { effort = kept }
+    }
+
     /// Server: on a core member with a session, a model/effort change closes the CLI and opens it again (patchMemberConfig → switchProvider).
     private func hasLiveCoreSession(_ m: Member) -> Bool {
         m.backend == "core" && (!(m.sessionId ?? "").isEmpty || !(m.paneId ?? "").isEmpty)
@@ -1454,9 +1475,10 @@ struct MemberDetailView: View {
         return changed && hasLiveCoreSession(m)
     }
 
-    /// Server keeps the Claude session id (resume) only for a same-provider Claude change; everything else is a new session.
-    private func resumesClaude(_ m: Member, target: String) -> Bool {
-        target == m.cli && m.cli == "claude" && !(m.sessionId ?? "").isEmpty
+    /// 같은 CLI 에서 모델·effort 만 바꿀 때 같은 대화를 이어 연다고 안내하는가(RankSettingsCLI.resumesOnConfigChange: Claude, Gemini).
+    /// 그 밖(Codex, CLI 전환, 세션 기록 없음, 이 앱이 모르는 CLI)은 새 세션으로 안내한다.
+    private func resumesConversation(_ m: Member, target: String) -> Bool {
+        target == m.cli && RankSettingsCLI(cli: m.cli)?.resumesOnConfigChange == true && !(m.sessionId ?? "").isEmpty
     }
 
     private func reopenTitle(_ m: Member, target: String) -> String {
@@ -1465,8 +1487,10 @@ struct MemberDetailView: View {
 
     private func reopenDetail(_ m: Member, target: String) -> String {
         var parts: [String] = []
-        if resumesClaude(m, target: target) {
-            parts.append(String(localized: "같은 Claude 대화를 새 모델·effort로 이어 엽니다."))
+        if resumesConversation(m, target: target) {
+            // Claude 의 문장은 예전 그대로 둔다. 다른 CLI(Gemini)는 그 이름을 끼운다.
+            parts.append(m.cli == "claude" ? String(localized: "같은 Claude 대화를 새 모델·effort로 이어 엽니다.")
+                         : String(localized: "같은 \(providerName(m.cli)) 대화를 새 모델·effort로 이어 엽니다."))
         } else {
             parts.append(String(localized: "새 \(providerFullName(target)) 세션을 엽니다. 이전 대화는 이어지지 않고 역할·현재 일·다음만 인계합니다."))
         }
@@ -1482,8 +1506,9 @@ struct MemberDetailView: View {
     }
 
     private func configBlock(_ m: Member, target: String, reopens: Bool) -> String? {
-        if !effort.isEmpty && !(target == "codex" ? RankSettingsCLI.codex : .claude).efforts.contains(effort) { return String(localized: "선택한 CLI에서 지원하지 않는 effort입니다. 다른 값을 고르세요.") }
-        if target != m.cli, store.runtime?.providers[target]?.installed == false {
+        // 이 앱이 모르는 CLI 는 effort 목록을 몰라 여기서 가르지 않는다(서버가 검사한다).
+        if !effort.isEmpty, let cli = RankSettingsCLI(cli: target), !cli.efforts.contains(effort) { return String(localized: "선택한 CLI에서 지원하지 않는 effort입니다. 다른 값을 고르세요.") }
+        if target != m.cli, store.cliMissing(target) {
             return String(localized: "\(providerFullName(target))가 실행 호스트에 설치돼 있지 않습니다. 설정의 실행 환경을 확인하세요.")
         }
         // The server refuses to close a session mid-turn or at an approval window (409). A usage-limit menu is not one (memberReopenBlock).
@@ -1581,7 +1606,9 @@ struct MemberDetailView: View {
         configHandoff = true
         let opened = switching
             ? String(localized: "\(providerFullName(target)) 새 세션을 열었습니다.")
-            : (resumesClaude(m, target: target) ? String(localized: "같은 Claude 대화를 새 설정으로 다시 열었습니다.") : String(localized: "새 설정으로 \(providerFullName(target)) 새 세션을 열었습니다."))
+            : (resumesConversation(m, target: target)
+                ? (m.cli == "claude" ? String(localized: "같은 Claude 대화를 새 설정으로 다시 열었습니다.") : String(localized: "같은 \(providerName(m.cli)) 대화를 새 설정으로 다시 열었습니다."))
+                : String(localized: "새 설정으로 \(providerFullName(target)) 새 세션을 열었습니다."))
         configNote = Self.handoffQueuedNote(opened)
     }
 }
@@ -1661,11 +1688,12 @@ private struct TeamPushTitle: ViewModifier {
 /// Web .tm-ctx: 72×5 bar and the percentage; orange with a badge once the compact threshold is reached.
 private struct TeamContextBar: View {
     let pct: Double
-    let compactAt: Int
+    /// nil: 압축 기준이 없는 세션(IAMCEO 가 압축하지 않는 CLI). 그때는 기준 도달 표시를 하지 않는다.
+    let compactAt: Int?
 
     var body: some View {
         let value = Int(min(max(pct, 0), 100).rounded())
-        let due = value >= compactAt
+        let due = compactAt.map { value >= $0 } ?? false
         HStack(spacing: 8) {
             Capsule().fill(Color.white.opacity(0.12)).frame(width: 72, height: 5)
                 .overlay(alignment: .leading) {
@@ -1956,6 +1984,8 @@ struct NewMemberView: View {
     @State private var selection = NewMemberModelSelection()
     /// 처음 뜰 때 한 번만 총괄의 CLI 로 맞춘다. 그 뒤 고른 값은 건드리지 않는다.
     @State private var providerDefaulted = false
+    /// 사용자가 CLI 칸을 직접 골랐다. 고르기 전에는 고르는 칸이 바뀔 때(모델 목록이 늦게 와 Gemini 칸이 생길 때) 처음 값을 다시 맞춘다.
+    @State private var providerPicked = false
     @State private var failure: String?
     @State private var submitted = false
     @State private var presented = false
@@ -1992,6 +2022,12 @@ struct NewMemberView: View {
             presented = true
             if !providerDefaulted { providerDefaulted = true; selection.provider = DefaultProvider.choice(in: store) }
         }
+        .onChange(of: store.offeredCLIs) { _, _ in
+            // 모델을 골랐으면 CLI 도 고른 것으로 본다(칸이 바뀌면 고른 모델이 지워진다). 추가를 누른 뒤에도 건드리지 않는다.
+            let next = DefaultProvider.followed(current: selection.provider, picked: providerPicked || !selection.model.isEmpty || submitted,
+                                                choice: DefaultProvider.choice(in: store))
+            if next != selection.provider { selection.provider = next }
+        }
         .onDisappear {
             presented = false
             if submitted, busy, router.navigationNotice == nil,
@@ -2026,10 +2062,10 @@ struct NewMemberView: View {
             }
             field(String(localized: "이름"), text: $name, prompt: String(localized: "개발 담당"), plain: false, id: .name)
             field(String(localized: "역할 · 선택"), text: $role, prompt: String(localized: "결제 화면 구현"), plain: false, id: .role)
-            SetupField(String(localized: "팀장이 쓸 AI")) {
-                Picker("AI CLI", selection: $selection.provider) {
-                    Text(providerOption("claude")).tag("claude")
-                    Text(providerOption("codex")).tag("codex")
+            SetupField(String(localized: "팀장이 쓸 AI"), hint: store.missingCLINote(store.offeredCLIs.map(\.rawValue))) {
+                // 칸에는 짧은 이름만 둔다(세 칸이 iPhone 폭에 들어가게). 깔려 있지 않은 CLI 는 칸 아래 줄에 적는다.
+                Picker("AI CLI", selection: Binding(get: { selection.provider }, set: { selection.provider = $0; providerPicked = true })) {
+                    ForEach(store.offeredCLIs, id: \.self) { Text($0.title).tag($0.rawValue) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -2039,17 +2075,19 @@ struct NewMemberView: View {
                 .frame(maxWidth: .infinity)
             }
             SetupField(String(localized: "모델")) {
-                let cli: RankSettingsCLI = selection.provider == "codex" ? .codex : .claude
-                let list = store.modelCatalog.list(for: cli)
-                let defaultModel = store.bootstrap?.settings.rankConfig("lead", cli: cli)?.model
+                let cli = selection.cli
+                let models = cli.map { store.modelCatalog.list(for: $0).models } ?? []
+                let defaultModel = cli.flatMap { store.bootstrap?.settings.rankConfig("lead", cli: $0)?.model }
                 Picker("모델", selection: $selection.model) {
                     Text(defaultModel.map { "직급 기본값 (\($0))" } ?? "직급 기본값").tag("")
-                    ForEach(list.models) { option in Text(option.label).tag(option.id) }
+                    ForEach(models) { option in Text(option.label).tag(option.id) }
                 }.labelsHidden()
             }
-            if store.runtime?.providers[selection.provider]?.installed == false {
+            if store.cliMissing(selection.provider) {
                 InlineNotice(tone: .attention, icon: "exclamationmark.triangle", title: String(localized: "\(providerFullName(selection.provider))가 설치돼 있지 않습니다"),
                              detail: String(localized: "설정의 실행 환경을 확인하세요."))
+            } else if selection.cli == .gemini {
+                InlineNotice(tone: .accent, icon: "info.circle", title: GeminiText.firstUseTitle, detail: GeminiText.firstUseDetail)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2079,11 +2117,6 @@ struct NewMemberView: View {
     #else
     private static let codeFont: Font = .system(.subheadline, design: .monospaced)
     #endif
-
-    private func providerOption(_ cli: String) -> String {
-        let name = providerFullName(cli)
-        return store.runtime?.providers[cli]?.installed == false ? String(localized: "\(name) · 설치 필요") : name
-    }
 
     private func add() async {
         guard !trimmedName.isEmpty else { failure = String(localized: "팀장 이름을 넣어 주세요"); return }
@@ -2414,9 +2447,14 @@ enum UXTeamTerminal {
 
 /// 0.2.9: 새 팀장·새 프로젝트 화면이 처음 고르는 CLI. 지금 보는 프로젝트의 총괄(본사는 본사 AI)이 쓰는 CLI 를 따른다. 총괄이 없으면
 /// 설치된 쪽을 고른다(Codex 만 설치한 Mac 은 Codex). 둘 다 있거나 아직 모르면 Claude Code 다. 예전에는 늘 Claude Code 였다.
+/// Gemini 는 고를 수 있을 때만(`gemini`: 서버가 Gemini 를 안다) 고른다: 총괄이 Gemini 이고 Antigravity CLI 가 없다고 알려지지 않았으면
+/// 따르고, 총괄이 없는데 Claude Code·Codex 가 둘 다 없고 Antigravity CLI 만 있으면 Gemini 다. 그 밖에는 위 규칙 그대로다.
 enum DefaultProvider {
-    static func choice(lead: String?, installed: [String: Bool]) -> String {
+    /// installed: 아는 것만 넣는다(모르면 키가 없다).
+    static func choice(lead: String?, installed: [String: Bool], gemini: Bool = false) -> String {
         if let lead, lead == "claude" || lead == "codex" { return lead }
+        if gemini, lead == "gemini", installed["gemini"] != false { return "gemini" }
+        if gemini, installed["claude"] == false, installed["codex"] == false, installed["gemini"] == true { return "gemini" }
         if installed["claude"] == false, installed["codex"] == true { return "codex" }
         return "claude"
     }
@@ -2424,8 +2462,14 @@ enum DefaultProvider {
         let lead = store.members.first { $0.kind == "conductor" || $0.kind == "root" }?.cli
         var installed: [String: Bool] = [:]
         for cli in ["claude", "codex"] { if let known = store.runtime?.providers[cli]?.installed { installed[cli] = known } }
-        return choice(lead: lead, installed: installed)
+        // 서버는 Antigravity CLI 가 깔려 있을 때만 그 줄을 보낸다: 실행 환경을 읽었는데 줄이 없으면 깔려 있지 않은 것이다.
+        if store.runtime != nil { installed["gemini"] = !store.cliMissing("gemini") }
+        return choice(lead: lead, installed: installed, gemini: store.offeredCLIs.contains(.gemini))
     }
+    /// 열려 있는 시트의 CLI 칸을 다시 맞춘 값. 시트가 모델 목록(Gemini 포함)을 받기 전에 열리면 고르는 칸에 Gemini 가 없어, 총괄이 Gemini 여도
+    /// Claude 로 정해진다. 목록이 와서 고르는 칸이 바뀌면 그때의 처음 값(`choice`)으로 다시 맞춘다.
+    /// 사용자가 칸을 직접 고른 뒤(`picked`)에는 건드리지 않는다.
+    static func followed(current: String, picked: Bool, choice: String) -> String { picked ? current : choice }
 }
 
 struct NewMemberModelSelection {
@@ -2433,8 +2477,26 @@ struct NewMemberModelSelection {
         didSet { if provider != oldValue { model = "" } }
     }
     var model = ""
-    var cli: RankSettingsCLI { provider == "codex" ? .codex : .claude }
+    /// 이 앱이 모르는 값이면 nil(다른 CLI 의 목록으로 읽지 않는다).
+    var cli: RankSettingsCLI? { RankSettingsCLI(cli: provider) }
     func isValid(in catalog: ModelCatalog) -> Bool {
-        model.isEmpty || catalog.list(for: cli).models.contains { $0.value == model }
+        guard !model.isEmpty else { return true }
+        guard let cli else { return false }
+        return catalog.list(for: cli).models.contains { $0.value == model }
+    }
+}
+
+/// Gemini(Antigravity CLI) 팀장에만 있는 안내 글.
+enum GeminiText {
+    /// Gemini 를 고를 때의 안내: 로그인과 첫 설정은 그 Mac 의 터미널에서 대표가 직접 한다(IAMCEO 가 대신 하지 못한다).
+    static var firstUseTitle: String { String(localized: "Gemini는 Antigravity CLI(agy)로 일합니다") }
+    static var firstUseDetail: String { String(localized: "처음 쓴다면 서버 컴퓨터의 터미널에서 agy를 한 번 실행해 로그인과 첫 설정을 끝내 주세요.") }
+    /// 같은 안내를 한 줄 글로(팀장 실행 설정의 주석 줄).
+    static var firstUse: String { "\(firstUseTitle). \(firstUseDetail)" }
+    /// 문맥 압축을 요청할 수 없는 까닭.
+    static var compactsItself: String { String(localized: "Antigravity CLI는 문맥을 스스로 압축합니다. 여기서 압축을 요청하지 않습니다.") }
+    /// 서버가 Gemini 를 알고 Antigravity CLI 가 깔려 있다(Gemini 팀장을 바로 쓸 수 있다).
+    @MainActor static func usable(in store: AppStore) -> Bool {
+        store.offeredCLIs.contains(.gemini) && store.runtime?.providers["gemini"]?.installed == true
     }
 }

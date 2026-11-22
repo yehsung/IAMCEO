@@ -9,6 +9,7 @@ IAMCEO는 내 Mac에서 도는 서버와 Mac·iPhone 앱으로 이루어집니�
 - [ ] **Apple Silicon Mac, macOS 14(Sonoma) 이상.** Intel Mac은 지원하지 않습니다.
 - [ ] **Claude Code를 설치하고 로그인했습니다.** [claude.com/claude-code](https://claude.com/claude-code)에서 설치한 뒤, 터미널에서 `claude`를 한 번 실행해 로그인합니다. 로그인하지 않으면 팀장이 시작하자마자 멈춥니다.
 - [ ] **(선택) Codex CLI.** 팀장을 Codex로 돌리려면 설치하고 터미널에서 `codex`를 한 번 실행해 로그인합니다.
+- [ ] **(선택, 0.2.10부터) Antigravity CLI.** 총괄·팀장을 Gemini로 돌리려면 [Antigravity CLI](https://antigravity.google/docs/getting-started)를 설치하고 터미널에서 `agy`를 한 번 실행해 로그인과 첫 설정(약관 동의)을 끝냅니다. 로그인과 약관 동의는 직접 해야 합니다(IAMCEO가 대신 누르지 않습니다).
 - [ ] **(iPhone을 쓸 때) Tailscale.** Mac과 iPhone에 [Tailscale](https://tailscale.com)을 설치하고 같은 계정으로 켭니다. 자세한 것은 [iPhone 연결](iphone.md)에 있습니다.
 - [ ] **권한 방식을 이해했습니다.** 기본으로 총괄과 팀장은 승인 창에서 멈추지 않고 명령을 실행합니다(묻지 않기). 처음 시작할 때 세 가지 중에서 고릅니다. 무엇을 막고 무엇을 막지 못하는지는 [보안 설명서](../security.md)에 있습니다.
 
@@ -107,6 +108,7 @@ Mac 없이 화면을 먼저 보고 싶으면 iPhone 앱 첫 화면의 **샘플�
 - 숫자는 CLI가 보고한 값 그대로입니다. IAMCEO가 계산하거나 짐작하지 않습니다.
   - Claude Code는 비용(달러)과 토큰을 보고합니다. 구독 요금제라면 이 금액은 실제 청구액과 다를 수 있습니다.
   - Codex는 토큰만 보고하므로 비용 대신 토큰이 보입니다.
+  - Gemini(Antigravity CLI)는 CLI가 추정한 비용과 토큰을 보고합니다. 한도는 Antigravity가 알려 주는 묶음마다 한 줄로, 쓴 비율만 보입니다.
 - 서버가 1분마다 수치를 모으고, 날짜는 서버가 수치를 받은 때로 나눕니다(자정 무렵에 쓴 몫은 다음 날로 넘어갈 수 있습니다). 90일이 지난 사용량은 지웁니다.
 - 이 기능 전부터 쓰던 세션은 처음 모을 때 그때까지의 누적값이 그날로 한꺼번에 들어갑니다.
 - 이 묶음은 사용량을 모으는 서버에서만 보입니다. 옛 서버에 연결했을 때는 보이지 않습니다.

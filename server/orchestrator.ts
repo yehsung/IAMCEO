@@ -1,8 +1,8 @@
 import { configuredSecretRoots } from "./secret-paths.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { ModelCatalogReader } from "./models.ts";
+import { GeminiModelsRefresher, geminiModelsCachePath, ModelCatalogReader, type GeminiModelsRefresherOptions } from "./models.ts";
 import { CONTROL_UNKNOWN_NOTE, CORE_RECONNECT_HELD_NOTE, HOLD_NOTES, REOPEN_RETRY_NOTE, startingUnknownNote, stopCheckHeldNote } from "./hold-codes.ts";
-import { ApiRecovery, classifyTurnError, limitedModelName, LOGIN_RESUME_TEXT, modelCreditLimit, NoTerminalError, USAGE_ACCOUNT_RESUME_TEXT, USAGE_MODEL_PREFIX, usageModelResumeText, withRo, type ApiRecoveryOptions } from "./api-outage.ts";
+import { ApiRecovery, classifyTurnError, limitedModelName, LOGIN_RESUME_TEXT, modelCreditLimit, NoTerminalError, USAGE_ACCOUNT_RESUME_TEXT, USAGE_MODEL_PREFIX, usageModelResumeText, withRo, type ApiRecoveryOptions, type TurnErrorKind } from "./api-outage.ts";
 import { DeliveryRecovery, type RecoveryRunner } from "./delivery-recovery.ts";
 import { verdictRejudged, type PumpVerdictCode } from "./pump-verdict.ts";
 import { writeStatuslineWrapper } from "./runner/statusline.ts";
@@ -24,7 +24,7 @@ import { UsageLedger } from "./usage.ts";
 //   handleAgentTool(orch, member, name, args): Promise<AgentToolResult>
 //
 // 조립 순서: createOrchestrator(config, store) → startServer(ctx) → setServerUrl(url) → recover() · 끝낼 때 shutdown().
-import { chmodSync, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
@@ -33,6 +33,7 @@ import type {
   AnswerReq,
   Backend,
   BlockedCode,
+  CliAccountCli,
   CliProvider,
   ContextCompaction,
   CreateMemberReq,
@@ -57,7 +58,7 @@ import type {
   TodoOutcome,
   WorkItem,
 } from "../shared/types.ts";
-import { memberConfig } from "../shared/types.ts";
+import { CLI_INFO, CLI_PROVIDERS, memberConfig, staffConfig } from "../shared/types.ts";
 import type { Config } from "./config.ts";
 import { briefly, type AgentToolDef, type AgentToolResult, type AskWaitResult, type OrchestratorApi } from "./orchestrator-api.ts";
 import { josa, renderRole } from "./roles.ts";
@@ -189,7 +190,7 @@ const MAX_TURN_ERROR_ATTEMPTS = 3;
 
 export interface OrchestratorDeps {
   apiRecovery?: Pick<ApiRecoveryOptions, "probe" | "now" | "urls" | "intervalMs">;
-  config: Pick<Config, "home" | "rolesDir" | "port"> & Partial<Pick<Config, "claudeBin" | "codexBin" | "coreBin" | "coreSocket" | "claudeHome" | "codexHome">>;
+  config: Pick<Config, "home" | "rolesDir" | "port"> & Partial<Pick<Config, "claudeBin" | "codexBin" | "geminiBin" | "coreBin" | "coreSocket" | "claudeHome" | "codexHome" | "geminiHome">>;
   store: Store;
   runners: Map<Backend, Runner>;
   serverUrl?: string;
@@ -198,8 +199,13 @@ export interface OrchestratorDeps {
   /** 맥 알림. 시험에서는 넣지 않으면 아무것도 안 한다. */
   notifier?: (title: string, body: string) => void;
   deliveryRecovery?: DeliveryRecovery;
-  /** 주입한 CoreRunner와 같은 기록 루트. 시험은 임시 경로만 사용한다. */
+  /** 주입한 CoreRunner와 같은 기록 루트. 시험은 임시 경로만 사용한다. Gemini(Antigravity CLI)의 기록은 여기서 읽지 않아 칸이 없다. */
   providerHomes?: { claudeHome: string; codexHome: string };
+  /**
+   * Gemini 모델 목록 캐시(<home>/cache/gemini-models.json)를 뒤에서 갱신한다(`agy models`). 넣지 않으면 갱신하지 않는다:
+   * 운영 조립(createOrchestrator)만 만들고, 시험은 가짜 실행을 넣은 것을 넘긴다(실제 agy 를 띄우지 않는다).
+   */
+  geminiModels?: GeminiModelsRefresher | null;
 }
 
 export interface NewMemberInput {
@@ -253,7 +259,8 @@ interface ConfigOutcome { usage: boolean; continued: boolean; opened: "resumed" 
  * 쉬는 때에 같은 대화를 새 계정으로 다시 연다(설정 적용과 같은 길). identity: 마지막으로 본 계정의 지문(server/cli-login.ts).
  */
 interface CliAccountEpoch { epoch: number; identity: string | null }
-type CliAccountEpochs = Record<"claude" | "codex", CliAccountEpoch>;
+/** 로그인을 다루는 CLI(claude·codex)에만 세대가 있다. Gemini(Antigravity CLI)는 세대가 없다(accountEpoch 가 늘 0). */
+type CliAccountEpochs = Record<CliAccountCli, CliAccountEpoch>;
 /** 한도·로그인 오류로 멈춘 팀장을 새 계정으로 다시 여는 까닭. */
 type AccountReopen = "usage" | "login";
 /** 그 자리에서 다시 열기를 해 보는 횟수(간격 timings.accountReopenRetryMs, 기본 30초). */
@@ -318,6 +325,13 @@ interface Runtime {
    * 메모리에만 있다(재시작하면 평소대로 보낸다). timer 는 미룬 일을 until 에 다시 미는 것.
    */
   askHold: { ids: string[]; until: number; timer: ReturnType<typeof setTimeout> | null } | null;
+  /**
+   * Gemini(Antigravity CLI): 지금 터미널을 `--conversation <sessionId>` 로 이어 띄웠고, 그 뒤 첫 턴이 아직 끝나지 않았다. runIds 는 그 이어 열기를
+   * 믿고 '끊긴 곳부터 이어서'로 처리한 실행들(재시작 이어가기)이다. agy 는 그 대화를 열지 못하면 오류 없이 새 대화를 열고, 서버는 첫 글이
+   * 들어간 뒤에야 바뀐 id 로 그것을 안다(onGeminiConversationReplaced). 첫 턴이 같은 id 로 끝나면 이어 열린 것이라 지운다: 그 뒤에 대화가
+   * 바뀌는 것은 대표가 터미널에서 새 대화를 연 것이다. 메모리에만 있다: 그 사이 서버가 다시 뜨면 활동 한 줄만 남는다.
+   */
+  resumedConversation: { sessionId: string; runIds: string[] } | null;
 }
 
 /** 0.2.7 묶음 1: 결재 답을 기다리는 동안에도 미루지 않는 대표 쪽 전달. */
@@ -464,7 +478,7 @@ export interface AssemblyOverrides {
   runner?: Partial<CoreRunnerOptions>;
   /** CoreRunner 의 간격·제한 시간. 저장소 포트(recoveryStore·compactStore·repair·quiescence)는 덮어쓸 수 없다. */
   runnerDeps?: Omit<CoreRunnerDeps, "recoveryStore" | "compactStore" | "repair" | "quiescence">;
-  orchestrator?: Pick<OrchestratorDeps, "agentTools" | "timings" | "notifier" | "providerHomes" | "apiRecovery" | "serverUrl">;
+  orchestrator?: Pick<OrchestratorDeps, "agentTools" | "timings" | "notifier" | "providerHomes" | "apiRecovery" | "serverUrl" | "geminiModels">;
 }
 
 /**
@@ -482,7 +496,9 @@ export function createOrchestrator(config: Config, store: Store, overrides: Asse
   let orchestrator: Orchestrator | null = null;
   const deliveryRecovery = new OrchestratorDeliveryRecovery(store, member => orchestrator?.recoveryRunner(member) ?? null, dispatch => orchestrator?.writerDone(dispatch) ?? false, memberId => orchestrator?.repairAdmitted(memberId) ?? false, dispatch => orchestrator?.writing(dispatch) ?? false);
   // toolPermission(K, E2): 이 서버가 띄우는 Claude 팀장에게 도구 승인 훅을 넣는다(묻지 않기 팀장 제외, providers.ts).
-  runners.set("core", new CoreRunner({ contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin, toolPermission: true, ...overrides.runner }, {
+  // Gemini 팀장이 띄우는 Antigravity CLI(agy)와 그 자료 폴더도 넘긴다. geminiHome 은 설정에 적었을 때만 있다(없으면 실행기가 기본 자리를 쓴다).
+  const runnerOptions = { contextHome: config.home, coreBin: config.coreBin, socketPath: config.coreSocket, session: "iamceo", stateDir: join(config.home, "core-state"), configDir: join(config.home, "core-config"), claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin: config.geminiBin, geminiHome: config.geminiHome, toolPermission: true, ...overrides.runner };
+  runners.set("core", new CoreRunner(runnerOptions, {
     startQuietMs: CORE_START_QUIET_MS,
     ...overrides.runnerDeps,
     recoveryStore: store,
@@ -492,8 +508,27 @@ export function createOrchestrator(config: Config, store: Store, overrides: Asse
     // still be running; see Orchestrator.dispatchQuiescence for when it is over.
     quiescence: (memberId, dispatch) => orchestrator?.dispatchQuiescence(memberId, dispatch) ?? { originalWrite: dispatch.transportState === "rejected" ? "rejected" : dispatch.transportState === "accepted" ? "settled" : "unresolved", externalInput: null },
   }));
-  orchestrator = new Orchestrator({ providerHomes: { claudeHome: defaultClaudeHome(), codexHome: process.env.CODEX_HOME || join(homedir(), ".codex") }, notifier: macNotifier(), ...overrides.orchestrator, config, store, runners, deliveryRecovery });
+  orchestrator = new Orchestrator({ providerHomes: { claudeHome: defaultClaudeHome(), codexHome: process.env.CODEX_HOME || join(homedir(), ".codex") }, notifier: macNotifier(), geminiModels: geminiModelsRefresher(config, store), ...overrides.orchestrator, config, store, runners, deliveryRecovery });
   return orchestrator;
+}
+
+/**
+ * 운영 조립의 Gemini 모델 목록 갱신기 설정. 갱신은 Gemini 를 쓰는 근거가 있을 때만 돈다(Store.geminiInUse: Gemini 인 팀장·총괄이 있거나
+ * Gemini 직급표에 정한 값이 있다). agy 를 깔아만 둔 사람의 Mac 에서는 서버가 뜰 때도 6시간마다도 `agy models` 를 띄우지 않고,
+ * 근거가 생기면(Gemini 팀장을 만들었다) 다음 틱에서 띄운다.
+ */
+export function geminiModelsRefresherOptions(config: Pick<Config, "home" | "geminiBin">, store: Pick<Store, "geminiInUse">): GeminiModelsRefresherOptions {
+  return { bin: config.geminiBin, cachePath: geminiModelsCachePath(config.home), wanted: () => store.geminiInUse() };
+}
+
+/**
+ * Gemini 모델 목록 갱신기. 서버가 뜬 뒤 한 번, 6시간마다, 캐시가 없을 때 `agy models` 를 뒤에서 띄운다(agy 가 없거나 Gemini 를 쓰는
+ * 근거가 없으면 띄우지 않는다). 시험(IAMCEO_TEST=1, 또는 bun test 가 정하는 NODE_ENV=test)에서는 만들지 않는다: 이 Mac 에 깔린 실제 agy 를
+ * 시험이 띄우면 안 된다(시험은 가짜 실행을 넣은 갱신기를 넘긴다). 버전 확인(http.ts 의 CliVersionMonitor)과 같은 기준이다.
+ */
+function geminiModelsRefresher(config: Pick<Config, "home" | "geminiBin">, store: Pick<Store, "geminiInUse">): GeminiModelsRefresher | null {
+  if (process.env.IAMCEO_TEST === "1" || process.env.NODE_ENV === "test") return null;
+  return new GeminiModelsRefresher(geminiModelsRefresherOptions(config, store));
 }
 
 /** 인자로 넘기므로 글에 무엇이 있어도 AppleScript 로 해석되지 않는다. */
@@ -556,6 +591,8 @@ export class Orchestrator implements OrchestratorApi {
   private readonly providerHomes: OrchestratorDeps["providerHomes"];
 
   private readonly models: ModelCatalogReader;
+  /** Gemini 모델 목록 캐시의 뒤 갱신. 없으면 갱신하지 않는다(목록은 있는 캐시나 기본 목록). */
+  private readonly geminiModels: GeminiModelsRefresher | null;
   /** 판 정리·묵은 할 일 알림·직접 띄운 CLI 의 상태(board-hygiene.ts). */
   private readonly boardHygiene: BoardHygiene;
   /** 대표 쪽 업무 흐름: 메시지·결재 답·할 일, 받을 사람 없이 멈춘 대표의 글(flows/owner.ts). */
@@ -566,7 +603,9 @@ export class Orchestrator implements OrchestratorApi {
   private readonly terminal: TerminalControl;
 
   constructor(deps: OrchestratorDeps) {
+    // config.home 으로 Gemini 모델 캐시의 자리(<home>/cache/gemini-models.json)가 정해진다.
     this.models = new ModelCatalogReader(deps.config);
+    this.geminiModels = deps.geminiModels ?? null;
     this.store = deps.store;
     this.providerHomes = deps.providerHomes;
     this.config = deps.config;
@@ -826,6 +865,7 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   get protectedFileRoots(): string[] {
+    // config 에는 따로 정한 Gemini(Antigravity CLI) 자료 폴더(geminiHome)도 있다. configuredSecretRoots 가 함께 막는다(기본 자리 ~/.gemini 는 늘 막혀 있다).
     return configuredSecretRoots(this.config).concat(configuredSecretRoots(this.providerHomes ?? {}));
   }
 
@@ -906,6 +946,8 @@ export class Orchestrator implements OrchestratorApi {
       this.requireActive(this.store.requireProject(project.id));
       this.absentCoreMembers.delete(member.id);
       const target = this.runnerMember(member, project), opts = { ...this.writeRunFiles(member, project, resume), operationId: entry.operationId };
+      // 앞 터미널을 이어 띄웠다는 표식은 그 터미널의 것이다. 띄우는 사이에 온 사건을 새 터미널의 것으로 읽지 않는다(applyStarted 가 다시 적는다).
+      this.runtime(member.id).resumedConversation = null;
       const started = await this.pumpWait(member.id, this.runtime(member.id).closing ? "sync_config.start" : ["offline", "asleep"].includes(member.status) ? "reopen" : "start_session", () => { launched = true; return runner.start(target, opts); }, runner);
       if (!this.store.getMember(member.id)) return started;
       const identity = started.identity ?? { ...entry.identity, sessionId: started.sessionId, terminalId: started.paneId };
@@ -1266,7 +1308,7 @@ export class Orchestrator implements OrchestratorApi {
         const outcome = result === "interrupted" && reported ? "success" : result;
         this.store.saveExecutionJournal({ ...run, turn: turn ?? run.turn, phase: outcome === "interrupted" ? "interrupted" : "ended", result: outcome, reason, exitCode, endedAt: at, updatedAt: at });
         this.store.finishDelegationAck(member.id, run.runId);
-        if (result === "error" && ["network", "usage_limit"].includes(classifyTurnError(reason ?? ""))) continue;
+        if (result === "error" && ["network", "usage_limit"].includes(this.turnErrorKind(member, reason ?? ""))) continue;
         if (outcome === "success") {
           this.completeExecutionReview(member, run);
           // 핫픽스 C: 뒤 작업을 남기고 끝난 Claude 턴은 결과가 그 작업 뒤에 온다. 결과 보고 확인은 그 작업이 끝난 뒤의 턴 끝으로 미룬다(requestDeferredReports).
@@ -1431,6 +1473,8 @@ export class Orchestrator implements OrchestratorApi {
             return;
           }
           resumeId ??= this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "system", text: RESTART_RESUME_TEXT, wake: true }).id;
+          // Gemini: 이어 연 대화가 실제로는 새 대화였던 것이 나중에 드러나면, 이 실행을 그때 중단으로 다시 알린다(onGeminiConversationReplaced).
+          this.runtimes.get(member.id)?.resumedConversation?.runIds.push(run.runId);
           this.systemMessage(member.projectId, textRef("chat.run_restart_resumed", { name: member.name, run: run.runId }));
           // 총괄이 같은 일을 또 맡겨 두 번 하게 되지 않도록, 깨우지 않는 소식으로만 알린다.
           if (lead) this.store.enqueue({ projectId: member.projectId, memberId: lead.id, kind: "system", wake: false,
@@ -1938,6 +1982,8 @@ export class Orchestrator implements OrchestratorApi {
   private startTick(): void {
     if (this.tick) return;
     this.apiRecovery.start();
+    // 서버가 뜬 뒤 한 번 Gemini 모델 목록을 뒤에서 갱신하고 6시간마다 다시 한다(기다리지 않는다). Gemini 를 쓰는 근거가 없으면 띄우지 않는다.
+    this.geminiModels?.start();
     this.tick = setInterval(() => this.onTick(), this.timings.tickMs);
     this.tick.unref?.();
     this.healthTimer = setInterval(() => void this.refreshConnection().catch((e) => console.warn("실행기 상태 확인 실패:", (e as Error).message)), this.timings.healthMs);
@@ -2047,6 +2093,9 @@ export class Orchestrator implements OrchestratorApi {
   private onTick(): void {
     this.tickStep("api_recovery", () => void this.apiRecovery.tick().catch(e => console.warn("API 복구 확인 실패:", e)));
     this.tickStep("delayed_notice", () => { if (Date.now() - this.lastDeliveryNoticeCheck >= 30_000) { this.lastDeliveryNoticeCheck = Date.now(); this.notifyDelayedDeliveries(); } });
+    // Gemini 모델 캐시가 없으면(agy 를 나중에 깔았거나 앞 갱신이 실패) 뒤에서 다시 건다. 파일은 10분에 한 번만 본다.
+    // 쓰는 근거가 없어 건너뛴 갱신도 여기서 한다(Gemini 팀장을 처음 만든 뒤의 첫 틱).
+    this.tickStep("gemini_models", () => this.geminiModels?.ensure());
     this.tickStep("stalls", () => this.detectStallsSoon());
     let members: Member[] = [];
     this.tickStep("members", () => { members = this.store.listAllMembers(); });
@@ -2118,6 +2167,7 @@ export class Orchestrator implements OrchestratorApi {
     await Promise.all([...this.eventQueues.values()]);
     if (this.tick) clearInterval(this.tick);
     if (this.healthTimer) clearInterval(this.healthTimer);
+    this.geminiModels?.stop();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
     for (const memberId of [...this.blockedNoticeTimers.keys()]) this.cancelBlockedNotices(memberId);
@@ -2223,14 +2273,22 @@ export class Orchestrator implements OrchestratorApi {
       await Promise.all([...this.eventQueues.values()]);
       member = this.store.requireMember(member.id);
     }
+    // Gemini(Antigravity CLI)는 첫 글을 받을 때 대화를 만든다. 한 번도 말을 걸지 않은 총괄·팀장은 대화 id 가 영영 없어, 아래 줄에서
+    // '확인하는 중'으로 막으면 기다려도 풀리지 않는다. 잃을 대화가 없으니 보관을 막지 않는다(꺼내서 깨우면 새 세션으로 열린다).
+    if (this.geminiNeverConversed(member, runner)) return;
+    // Gemini 의 대화 id 는 기다린다고 생기지 않는다(첫 설정·로그인 화면에 걸려 있거나, 대화가 돌았는데 끝내 알아내지 못했다). '확인하는 중'이 아니라 할 일을 알린다.
+    if (!member.sessionId && member.cli === "gemini") throw new ApiError(409, ERROR_CODES.archive_gemini_session_unknown.ko, "archive_gemini_session_unknown");
     if (!member.sessionId) throw new ApiError(409, "이어갈 native 세션 기록을 확인하는 중입니다", "resume_record_checking");
     // 한 번도 턴을 돌지 않은 세션은 이어갈 기록이 없는 것이 정상이다. 잃을 대화가 없으니 보관을 막지 않는다(꺼내서 깨우면 새 세션으로 열린다).
     if (this.neverRan(member, runner)) return;
     if ((runner as Runner).sessionExists?.(this.runnerMember(member, this.store.requireProject(member.projectId))) === false) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다", "resume_record_missing");
     if (runner instanceof CoreRunner) {
+      // Gemini(Antigravity CLI)의 대화는 CLI 의 SQLite 파일에 있고 IAMCEO 는 그 파일을 읽지 않는다. 아래의 JSONL 기록 대조는 건너뛴다:
+      // 이어 열 수 있는지는 위의 sessionExists(실행기)가 '없다'고 확정했을 때만 막는다(모르면 막지 않는다).
+      if (member.cli === "gemini") return;
       const log = this.contextLog(member);
       if (!log) throw new ApiError(409, "이어갈 native 세션 기록을 확인할 수 없습니다", "resume_record_missing");
-      const records = readJsonlRange(join(log.home, member.cli === "codex" ? "sessions" : "projects"), log.path).records;
+      const records = readJsonlRange(log.root, log.path).records;
       // Claude 줄의 cwd 는 Bash 의 cd 를 따라 바뀌는 지금 폴더라 보지 않는다. 기록 파일은 세션 ID 로 찾았고 줄의 sessionId 로 확인한다.
       if (member.cli !== "codex" && !records.some(record => {
         const entry = jsonObject(record.value);
@@ -2243,13 +2301,40 @@ export class Orchestrator implements OrchestratorApi {
    * 띄우기만 하고 한 번도 턴을 돌지 않은 세션인가(총괄만 시작한 프로젝트, 첫 지시 없이 추가한 팀장).
    * 기록 파일이 없고, 이 세대에 받아들여진 전달이 없고, 관측된 턴도 0 일 때만 그렇다. 대표가 터미널에 직접 쳐서 턴을 돌렸으면 기록이 생겨 해당하지 않는다.
    * Codex 는 세션 ID 를 스스로 정하고 모르는 채로는 다시 띄울 수 없어(session_unknown) 여기서 다루지 않는다.
+   * Gemini(Antigravity CLI)도 대화 ID 를 스스로 정한다(첫 대화 뒤에야 알 수 있다). ID 를 아는 Gemini 세션은 여기서 다루지 않고,
+   * ID 를 아직 모르는(대화한 적 없는) Gemini 세션은 geminiNeverConversed 가 따로 본다.
    */
   private neverRan(member: Member, runner: Runner): boolean {
-    if (!(runner instanceof CoreRunner) || member.cli === "codex" || !member.sessionId) return false;
+    if (!(runner instanceof CoreRunner) || member.cli === "codex" || member.cli === "gemini" || !member.sessionId) return false;
     if (runner.sessionExists(this.runnerMember(member, this.store.requireProject(member.projectId))) !== false) return false;
     const generation = this.store.memberRevisions(member.id).sessionGeneration;
     if (this.store.listDispatches(member.id).some(dispatch => dispatch.identity.sessionGeneration === generation && dispatch.transportState !== "rejected")) return false;
     return !runner.observationState(member.id)?.turn;
+  }
+
+  /**
+   * 대화 ID 를 모르는 Gemini(Antigravity CLI) 세션이 한 번도 대화한 적이 없는가. agy 는 첫 글을 받을 때 대화를 만들므로(그 전에는 ID 가 없다),
+   * 서버가 이 세대에 넣은 것이 없고 턴이 돈 흔적도 없으면 잃을 대화가 없다. neverRan(Claude)과 같은 근거다:
+   * - 이 세대에 이 팀장에게 나간 봉투(거절된 것 제외)가 없고, 입력이 들어간 실행 기록·끝나지 않은 실행 기록도 없다.
+   * - 쉬는 중이다. 일하는 중·넣는 중이 아니다.
+   * - 실행기가 본 턴이 0 이고 CLI 도 쉬는 중이다(대표가 터미널에 직접 쳐서 돌렸거나 돌리는 턴이 있으면 해당하지 않는다).
+   * 하나라도 채우지 못하거나 모르면 false 다(부른 쪽이 지금처럼 막는다).
+   */
+  private geminiNeverConversed(member: Member, runner: Runner): boolean {
+    if (member.cli !== "gemini" || member.sessionId || member.status !== "idle") return false;
+    const generation = this.store.memberRevisions(member.id).sessionGeneration;
+    if (this.store.listDispatches(member.id).some(dispatch => dispatch.identity.sessionGeneration === generation && dispatch.transportState !== "rejected")) return false;
+    if (this.store.lastWrittenExecution(member.id, generation)) return false;
+    if (this.store.listPendingExecutions().some(run => run.memberId === member.id && run.identity.sessionGeneration === generation)) return false;
+    if (this.runtime(member.id).turn || this.isBusy(member) || this.store.listDelivering().some(delivery => delivery.memberId === member.id)) return false;
+    if (runner instanceof CoreRunner) {
+      const seen = runner.observationState(member.id);
+      // 관측이 없으면(이 터미널을 아직 못 봤다) 턴이 돌았는지 모른다. 턴 번호는 실행기와 같게 센다(없으면 0, geminiMayHaveConversed).
+      if (!seen || (seen.turn ?? 0) > 0) return false;
+      // 보고가 없거나 쉬는 중(idle·done)일 때만 대화가 없다고 본다. 그 밖(일하는 중·승인 창·오류)은 턴이 돌았거나 도는 중일 수 있다.
+      if (seen.state !== null && seen.state !== "idle" && seen.state !== "done") return false;
+    }
+    return true;
   }
 
   /** 안 보이는 직원의 칸은 소켓이 안 닿아도 보관을 막지 않는다. 쓰던 글이 있다는 거절은 언제나 막는다. */
@@ -2302,6 +2387,9 @@ export class Orchestrator implements OrchestratorApi {
     if (this.store.listDelivering().some((d) => d.memberId === member.id) || this.store.listPending(member.id).some((d) => d.holdReason === "delivery_unknown")) {
       throw new ApiError(409, "전달 여부가 확인되지 않은 입력이 있어 CLI를 바꿀 수 없습니다", "cli_switch_delivery_unknown");
     }
+    // 대화가 없던 Gemini 세션(첫 글 전)을 같은 CLI 의 새 설정으로 다시 띄우는 것인가. 이어 열 대화도 인계할 맥락도 없다(끝내기 전에 가린다).
+    const pristineRunner = this.runners.get(this.backendOf(member));
+    const pristine = !freshSession && patch.cli === member.cli && !!pristineRunner && this.geminiNeverConversed(member, pristineRunner);
     rt.closing = true;
     let changedSession = false;
     let sessionReady = false;
@@ -2316,7 +2404,12 @@ export class Orchestrator implements OrchestratorApi {
       if (targetRunner instanceof CoreRunner) {
         const model = this.desiredConfig(target).model;
         if (target.cli === "codex" && model && /^(?:claude[-:]|opus(?:-|$)|sonnet(?:-|$)|haiku(?:-|$))/i.test(model)) throw new ApiError(400, "Codex용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요", "cli_switch_model_mismatch");
-        try { providerLaunch(this.runnerMember(target, project), this.writeRunFiles(target, project, !!target.sessionId), this.config); }
+        // Gemini(Antigravity CLI)는 목록에 없는 모델을 시작 전에 오류로 끝낸다. 다른 CLI 의 모델 이름(opus·gpt-…)이 남아 있으면 지금 세션을 끝내기 전에 거절한다.
+        if (target.cli === "gemini" && model && !this.models.listed("gemini", model)) throw new ApiError(400, "Gemini용 모델을 고르거나 팀원 모델 지정을 기본값으로 되돌리세요", "cli_switch_model_mismatch_gemini");
+        // Gemini(Antigravity CLI)는 띄우기 인자를 만들면서 주입 폴더(규칙·MCP·훅 파일)를 고쳐 쓴다(runner/providers.ts). 실행기와 같은 기록 폴더를 줘야
+        // 미리 해 보는 이 검사가, 아직 떠 있는 같은 팀장 세션의 훅 파일을 지우지 않는다(운영 조립의 contextHome 은 데이터 홈이다).
+        const bins = target.cli === "gemini" ? { ...this.config, contextHome: this.config.home } : this.config;
+        try { providerLaunch(this.runnerMember(target, project), this.writeRunFiles(target, project, !!target.sessionId), bins); }
         catch (e) { throw new ApiError(400, `CLI 설정을 적용할 수 없습니다: ${(e as Error).message}`, "cli_config_failed"); }
       }
       // 사용 한도 메뉴가 떠 있으면 Esc 로만 닫는다. 끝내는 동안(closing) 온 턴 끝 이벤트는 버려지므로, 닫으며 끝난 턴이 한도 보류를 다시 걸지 않는다.
@@ -2346,10 +2439,13 @@ export class Orchestrator implements OrchestratorApi {
         this.store.archiveAndRotateSession(member.id, patch.cli!, freshSession ? "fresh_session" : sameProvider ? "settings_change" : "provider_switch");
         carryStop();
         // 옛 터미널은 끝났다. 새 터미널을 띄우기 전에 보류를 풀고 이어가기 글을 줄에 세운다: 띄우기가 실패해도 다음 기동이 그 글부터 넣는다.
-        if (usage) continued = this.resumeAfterUsageStop(member, usage, resumable, account === "usage" ? { kind: "account", label: "" } : sameProvider ? { kind: "model", label: this.modelLabel(target) } : { kind: "cli", label: patch.cli === "codex" ? "Codex" : "Claude" });
+        if (usage) continued = this.resumeAfterUsageStop(member, usage, resumable, account === "usage" ? { kind: "account", label: "" } : sameProvider ? { kind: "model", label: this.modelLabel(target) } : { kind: "cli", label: cliShortName(patch.cli) });
         if (loginStopped) this.resumeAfterLoginStop(member, loginRunId, resumable && sameProvider);
       });
       if (usage) { usageReleased = true; if (outcome) { outcome.usage = true; outcome.continued = continued; } }
+      // Gemini 에서 다른 CLI 로 바꿨다. Gemini 팀장만의 실행 폴더(규칙·MCP 설정·실행기의 주입 폴더)는 더 쓰이지 않는다: 옛 터미널은 위에서 끝났고
+      // 그 안의 토큰은 방금 바뀌어 쓸 수 없지만, 지침과 옛 토큰을 디스크에 남겨 두지 않는다.
+      if (member.cli === "gemini" && !sameProvider) this.removeGeminiRunDir(member.id);
       if (resumable) this.store.patchMember(member.id, { sessionId: member.sessionId });
       this.store.patchMember(member.id, { ...patch, ...(freshSession ? { origin: "runner" as const } : {}), backend: this.store.effectiveBackend(), status: "idle", lastError: null });
       if (member.kind !== "worker") this.store.setChiefCli(project.id, patch.cli!);
@@ -2360,18 +2456,23 @@ export class Orchestrator implements OrchestratorApi {
       ].join("\n");
       // 사용 한도로 멈춘 팀장의 모델만 바꿔 같은 대화를 이어 열었다: 이어가기 글(하던 일이 없었으면 활동 한 줄)이 모델을 바꿨다고 이미 알린다.
       // 같은 대화라 역할·상황도 그대로다. 인계 글을 다음 턴에 붙이지 않는다(일반 설정 변경과 새 세션·다른 CLI 는 지금처럼 넣는다).
-      const handoffNeeded = !((usage || loginStopped || accountOnly) && sameProvider && resumable);
+      const handoffNeeded = !((usage || loginStopped || accountOnly) && sameProvider && resumable) && !pristine;
       if (accountOnly && resumable) this.store.appendActivity(member.id, "system", textRef("activity.account_reopen"));
       if (handoffNeeded) this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: formatSystem(handoff), wake: false });
       const fresh = this.store.requireMember(member.id);
       this.openRunner(fresh);
       const started = await this.startManaged(fresh, project, !!fresh.sessionId);
-      this.applyStarted(member.id, started, this.desiredConfig(fresh));
+      this.applyStarted(member.id, started, this.desiredConfig(fresh), fresh.sessionId);
+      // Gemini: 같은 대화를 이어 띄웠는데 띄운 결과가 다른 대화였다. 이어 연 것으로 답하지 않는다.
+      const lostAtLaunch = this.geminiResumeLostAtLaunch(fresh, fresh.sessionId, started);
       sessionReady = true;
       if (handoffNeeded) this.store.appendActivity(member.id, "system", handoff);
-      if (outcome) outcome.opened = resumable ? "resumed" : "fresh";
+      if (outcome) outcome.opened = resumable && !lostAtLaunch ? "resumed" : "fresh";
       return this.store.requireMember(member.id);
     } catch (e) {
+      // Gemini 로 바꾸려다 아무것도 바꾸지 못하고 그만뒀다(옛 세션을 끝내지 못함 등). 미리 해 본 검사가 만든 Gemini 실행 폴더에는 지금도 쓰이는
+      // 이 팀장의 토큰이 들어 있다. 이 팀장은 Gemini 가 아니므로 남기지 않는다.
+      if (!changedSession && patch.cli === "gemini" && member.cli !== "gemini") this.removeGeminiRunDir(member.id);
       if (changedSession) {
         if (!freshSession && patch.cli === member.cli) {
           this.store.deferMemberConfig(member.id, JSON.stringify(this.desiredConfig(this.store.requireMember(member.id))), true);
@@ -2454,7 +2555,10 @@ export class Orchestrator implements OrchestratorApi {
         ((patch.modelOverride !== undefined && patch.modelOverride !== member.modelOverride) || (patch.effortOverride !== undefined && patch.effortOverride !== member.effortOverride))) {
       // 사용 한도로 멈춘 팀장이면 모델을 바꿔 같은 세션을 이어 연다. 한도 보류·한도 메뉴의 막힘 때문에 미루지 않는다.
       const usage = member.sessionId ? this.usageStop(member) : null;
-      if (!member.sessionId || ["asleep", "offline"].includes(member.status)) {
+      // 말을 걸지 않은 Gemini 세션(대화 id 가 아직 없다)은 미루지 않고 새 설정으로 다시 띄운다(syncConfig 와 같은 까닭).
+      const memberRunner = this.runners.get(this.backendOf(member));
+      const pristineGemini = !!memberRunner && this.geminiNeverConversed(member, memberRunner);
+      if ((!member.sessionId && !pristineGemini) || ["asleep", "offline"].includes(member.status)) {
         const saved = this.store.patchMember(memberId, patch);
         if (outcome) outcome.opened = "later";
         if (!member.sessionId && member.paneId && !["asleep", "offline"].includes(member.status)) {
@@ -2502,7 +2606,7 @@ export class Orchestrator implements OrchestratorApi {
   private usageStop(member: Member): UsageStop | null {
     if (!this.apiRecovery.usageLimited(member.id)) return null;
     const run = this.store.lastWrittenExecution(member.id, this.store.memberRevisions(member.id).sessionGeneration);
-    const stopped = !!run && run.phase === "ended" && run.result === "error" && classifyTurnError(run.reason ?? "") === "usage_limit" && !run.interruptionNotifiedAt;
+    const stopped = !!run && run.phase === "ended" && run.result === "error" && this.turnErrorKind(member, run.reason ?? "") === "usage_limit" && !run.interruptionNotifiedAt;
     return { runId: stopped ? run!.runId : null };
   }
 
@@ -3207,8 +3311,20 @@ export class Orchestrator implements OrchestratorApi {
     let cli = input.cli ?? assignedBy?.cli ?? this.store.chiefCli(projectId);
     // CLI 없이 모델만 정했고 그 모델이 다른 CLI 의 것이면 그 CLI 로 띄운다(Codex 총괄에게 "Sonnet 으로 띄워"라고 한 경우. 예전 기본값 claude 에서는 됐다).
     if (!input.cli && input.modelOverride != null && !this.models.listed(cli, input.modelOverride)) {
-      const other: CliProvider = cli === "codex" ? "claude" : "codex";
-      if (this.models.listed(other, input.modelOverride)) cli = other;
+      const model = input.modelOverride;
+      const elsewhere = CLI_PROVIDERS.filter(other => other !== cli && this.models.listed(other, model));
+      const paired: CliProvider | null = cli === "codex" ? "claude" : cli === "claude" ? "codex" : null;
+      if (paired) {
+        // Claude↔Codex 사이는 예전 그대로다(그쪽 목록에 있으면 그쪽).
+        if (elsewhere.includes(paired)) cli = paired;
+        // Gemini 로는 이름이 Gemini 계열(gemini-…)일 때만 보낸다. Antigravity CLI 의 목록에는 Claude·GPT 계열 모델(claude-opus-…, gpt-oss-…)도
+        // 있다: 그런 이름이 agy 목록에만 있다고 Gemini 로 띄우면, Claude·Codex 총괄이 예전에는 '목록에 없는 모델'로 거절받던 이름으로
+        // 다른 계정·한도·권한 방식의 팀장이 뜬다. 그 모델을 agy 로 쓰려면 총괄이 cli: "gemini" 를 명시한다.
+        else if (GEMINI_FAMILY_MODEL.test(model) && elsewhere.includes("gemini")) cli = "gemini";
+      } else if (elsewhere.length === 1) {
+        // Gemini 총괄이 다른 CLI 의 모델 이름을 줬다: 그 이름이 한 CLI 에만 있을 때만 그 CLI 로 정한다(둘 다에 있으면 정하지 못해 거절).
+        cli = elsewhere[0]!;
+      }
     }
     this.models.requireModel(cli, input.modelOverride);
     const project = this.store.requireProject(projectId);
@@ -3309,7 +3425,14 @@ export class Orchestrator implements OrchestratorApi {
       for (const suffix of ["rules.md", "mcp.json", "settings.json"]) {
         try { unlinkSync(join(this.config.home, "run", `${memberId}.${suffix}`)); } catch { /* 만든 적이 없거나 이미 없다 */ }
       }
+      // Gemini 팀장의 실행 폴더(규칙·MCP 설정, 실행기가 그 옆에 만든 주입 폴더). 여기에도 토큰이 있다.
+      this.removeGeminiRunDir(memberId);
     });
+  }
+
+  /** 그 팀장의 Gemini 실행 폴더(<home>/run/<id>.gemini)를 폴더째 지운다. 만든 적이 없으면 아무 일도 없다. */
+  private removeGeminiRunDir(memberId: string): void {
+    try { rmSync(geminiRunDir(this.config.home, memberId), { recursive: true, force: true }); } catch { /* 만든 적이 없거나 이미 없다 */ }
   }
 
   private usageLedger: UsageLedger | null = null;
@@ -3319,12 +3442,17 @@ export class Orchestrator implements OrchestratorApi {
    */
   private registerUsageSession(member: Member, sessionId: string): void {
     try {
-      (this.usageLedger ??= new UsageLedger(this.store.db)).registerFreshSession(member.cli === "codex" ? "codex" : "claude", sessionId, { id: member.id, projectId: member.projectId, name: member.name, kind: member.kind });
+      // 장부의 칸은 그 CLI 의 것이다. Gemini 세션을 Claude 장부에 적지 않는다(타입 밖의 옛 값만 지금까지처럼 claude).
+      const provider: CliProvider = member.cli === "codex" ? "codex" : member.cli === "gemini" ? "gemini" : "claude";
+      (this.usageLedger ??= new UsageLedger(this.store.db)).registerFreshSession(provider, sessionId, { id: member.id, projectId: member.projectId, name: member.name, kind: member.kind });
     } catch (e) { console.warn("사용량 세션 기록 실패:", (e as Error).message); }
   }
 
-  /** sent 는 start 에 실제로 넘긴 설정이다. 띄우는 동안 바뀐 값을 적으면 옛 값으로 돌면서 맞춘 것으로 기록된다. */
-  private applyStarted(memberId: string, started: { sessionId: string | null; paneId: string | null; rejoined?: boolean }, sent?: AppliedConfig): void {
+  /**
+   * sent 는 start 에 실제로 넘긴 설정이다. 띄우는 동안 바뀐 값을 적으면 옛 값으로 돌면서 맞춘 것으로 기록된다.
+   * resumedFrom: Gemini(Antigravity CLI)를 이어 띄울 때(`--conversation`) 넘긴 대화 id. 새 세션으로 띄웠으면 주지 않는다.
+   */
+  private applyStarted(memberId: string, started: { sessionId: string | null; paneId: string | null; rejoined?: boolean }, sent?: AppliedConfig, resumedFrom: string | null = null): void {
     const runner = this.runnerOf(this.store.requireMember(memberId));
     const currentError = runner instanceof CoreRunner ? runner.observationState(memberId)?.lastError : null;
     const stored = this.store.requireMember(memberId);
@@ -3335,6 +3463,9 @@ export class Orchestrator implements OrchestratorApi {
     // D4-9: 새로 띄운 세션(이어 연 것·이미 떠 있던 칸에 붙은 것이 아니다)의 사용량은 0 부터 센다.
     if (!started.rejoined && started.sessionId && started.sessionId !== stored.sessionId) this.registerUsageSession(stored, started.sessionId);
     if (!started.rejoined) this.runtime(memberId).launchedAt = Date.now();
+    // Gemini(Antigravity CLI)를 그 대화로 이어 띄웠다(--conversation). agy 는 그 대화를 열지 못해도 오류 없이 새 대화를 연다: 뒤에 온 session
+    // 사건의 id 가 이것과 다르면 그런 것이다(onGeminiConversationReplaced). 띄운 결과에 이미 다른 id 가 실려 왔으면 부른 쪽이 다룬다(geminiResumeLostAtLaunch).
+    if (!started.rejoined) this.runtime(memberId).resumedConversation = stored.cli === "gemini" && resumedFrom && started.sessionId === resumedFrom ? { sessionId: resumedFrom, runIds: [] } : null;
     // 이미 떠 있던 칸에 붙었으면 이번 인자가 들어간 것이 아니다.
     if (!started.rejoined && sent) {
       this.store.setAppliedConfig(memberId, sent);
@@ -3370,6 +3501,8 @@ export class Orchestrator implements OrchestratorApi {
     if (member.origin === "manual") throw new ApiError(400, "직접 띄운 세션은 압축할 수 없습니다", "manual_session_unsupported");
     const project = this.store.requireProject(member.projectId);
     this.requireActive(project);
+    // Gemini(Antigravity CLI)는 문맥을 스스로 압축한다. IAMCEO 가 넣을 압축 명령도, 압축이 끝났는지 볼 기록도 없어 깨끗이 거절한다.
+    if (member.cli === "gemini") throw new ApiError(400, `${josa(member.name, "은")} Gemini(Antigravity CLI) 팀원이라 압축할 수 없습니다. 이 CLI는 문맥을 스스로 정리합니다`, "compact_unsupported_gemini");
     if (!project.runnerEnabled || ["asleep", "offline"].includes(member.status)) throw new ApiError(409, "깨어 있고 실행이 켜진 팀원만 압축할 수 있습니다", "compact_not_awake");
     if (!member.sessionId) throw new ApiError(this.backendOf(member) === "core" ? 409 : 400, "아직 native 세션을 확인하지 못했습니다", "session_id_unknown");
     const normalized = (focus ? normalizeSpace(focus) : "") || this.compactFocus(member);
@@ -3402,17 +3535,23 @@ export class Orchestrator implements OrchestratorApi {
     this.runtime(member.id).compactBusySince = null;
   }
 
-  private contextLog(member: Member): { path: string; home: string } | null {
+  /**
+   * 그 세션의 CLI 기록(JSONL). root 는 그 기록이 들어 있어야 하는 폴더다(Claude <home>/projects, Codex <home>/sessions).
+   * Gemini(Antigravity CLI)는 null 이다: 대화는 CLI 의 SQLite 파일에 있고 IAMCEO 는 읽지 않는다. 기록의 위치(offset)를 근거로 삼는
+   * 압축 경계·보관 대조는 Gemini 에 없다(부르는 쪽이 null 을 '근거 없음'으로 건너뛴다).
+   */
+  private contextLog(member: Member): { path: string; home: string; root: string } | null {
     if (!this.providerHomes || !member.sessionId) return null;
+    if (member.cli === "gemini") return null;
     const home = member.cli === "codex" ? this.providerHomes.codexHome : this.providerHomes.claudeHome;
     if (member.cli !== "codex") {
       const path = findSessionFile(home, member.cwd, member.sessionId);
-      return path ? { path, home } : null;
+      return path ? { path, home, root: join(home, "projects") } : null;
     }
     const root = join(home, "sessions");
     // 턴이 끝날 때마다 부른다. 찾은 경로는 기억하고, 못 찾았을 때만 다시 훑는다.
     const known = this.codexLogs.get(member.id);
-    if (known && known.sessionId === member.sessionId && known.cwd === member.cwd && existsSync(known.path)) return { path: known.path, home };
+    if (known && known.sessionId === member.sessionId && known.cwd === member.cwd && existsSync(known.path)) return { path: known.path, home, root };
     try {
       const matching = (pattern: string) => [...new Bun.Glob(pattern).scanSync({ cwd: root, absolute: true, onlyFiles: true, followSymlinks: false })].filter(path => {
         const meta = parseCodexSessionMeta(readJsonlRange(root, path, null, { maxBytes: 1024 * 1024 }).records[0]?.value);
@@ -3423,7 +3562,7 @@ export class Orchestrator implements OrchestratorApi {
       if (!paths.length) paths = matching("**/rollout-*.jsonl");
       if (paths.length !== 1) return null;
       this.codexLogs.set(member.id, { sessionId: member.sessionId, cwd: member.cwd, path: paths[0]! });
-      return { path: paths[0]!, home };
+      return { path: paths[0]!, home, root };
     } catch { return null; }
   }
   private readonly codexLogs = new Map<string, { sessionId: string; cwd: string; path: string }>();
@@ -3701,7 +3840,9 @@ export class Orchestrator implements OrchestratorApi {
       const sent = this.desiredConfig(member);
       const started = await this.startManaged(launch, project, !!member.sessionId);
       if (await this.dropIfClosed(launch, project, runner, started)) return null;
-      this.applyStarted(member.id, started, sent);
+      this.applyStarted(member.id, started, sent, member.sessionId);
+      // Gemini: 이어 띄운 결과가 다른 대화였다(agy 가 그 대화를 열지 못했다). 세션 기록이 없어 새 세션으로 연 때(아래 catch)와 같이 다룬다.
+      if (this.geminiResumeLostAtLaunch(member, member.sessionId, started)) continued = false;
       // 넘겨받은 세션도 서버가 다시 띄우면 도구와 규칙을 갖고 뜬다. 이제 서버가 띄운 세션과 같다.
       // 대표가 칸에서 그 세션을 다시 열어 거기 붙었으면(rejoined) 도구가 없는 그대로다.
       // 세션 없이 서버가 띄운 자리(claimed)는 다시 붙은 터미널도 서버가 띄운 것이다(이 팀장의 소유 라벨로만 붙는다).
@@ -3760,6 +3901,62 @@ export class Orchestrator implements OrchestratorApi {
     return formatSystem(`이전 세션을 찾지 못해 새 세션으로 시작합니다. ${last ? `마지막 일 — ${last}` : "이전 기록은 없습니다."}`);
   }
 
+  /**
+   * Gemini(Antigravity CLI) 팀장의 대화 id 가 아는 값에서 다른 값으로 바뀌었다(session 사건). before 는 바뀌기 전의 명부 값이다.
+   * agy 는 `--conversation <id>` 의 대화를 열지 못하면 오류 없이 경고만 찍고 새 대화를 연다. 실행기는 그 새 id 를 첫 글이 들어간 뒤에야
+   * 알아내므로, 서버는 그 전에 이미 같은 대화를 이어 연 것으로 처리했다(재시작 이어가기 글, 총괄에게 '같은 일을 다시 지시하지 마세요').
+   * - 늘: 활동에 한 줄 남기고, 앞 대화의 문맥 % 는 지운다(새 대화의 값은 다음 턴 끝에 온다).
+   * - 이 터미널을 그 옛 id 로 이어 띄웠고 그 뒤 첫 턴이 끝나기 전이면(resumedConversation): 세션 기록이 없어 새 세션으로 연 때
+   *   (reopenOnce 의 MissingSessionError)와 같은 것을 넣는다. 팀장에게는 마지막 일을 적은 글(newSessionNote)을, 이어가기로 처리했던 끊긴 실행은
+   *   총괄을 깨워 중단으로 알린다(noticeInterrupted. 그 실행의 알림 칸은 이어가기 때 이미 썼으므로 여기서는 표식으로 한 번만 부른다).
+   * 이어 띄운 표식이 없으면(대표가 터미널에서 새 대화를 열었거나, 그 사이 서버가 다시 떴다) 활동 한 줄뿐이다.
+   */
+  private onGeminiConversationReplaced(before: Member): void {
+    const rt = this.runtime(before.id);
+    const resumed = rt.resumedConversation?.sessionId === before.sessionId ? rt.resumedConversation : null;
+    rt.resumedConversation = null;
+    const wakeConductor = this.store.transaction((): string | null => {
+      if (!resumed) {
+        this.store.patchMember(before.id, { contextPct: null });
+        this.store.appendActivity(before.id, "system", textRef("activity.gemini_conversation_changed"));
+        return null;
+      }
+      this.noteGeminiResumeLost(before);
+      const conductor = this.store.getConductor(before.projectId);
+      let noticed = false;
+      for (const runId of resumed.runIds) {
+        const run = this.store.getExecutionJournal(runId);
+        if (!run || run.memberId !== before.id) continue;
+        this.noticeInterrupted(before, run, textRef("why.gemini_resume_lost"));
+        noticed = true;
+      }
+      return noticed && conductor && conductor.id !== before.id ? conductor.id : null;
+    });
+    // 총괄의 전달은 트랜잭션이 끝난 뒤에 민다(settleRestartWake 와 같다).
+    if (wakeConductor && !this.closed && !this.recovering) void this.pump(wakeConductor);
+  }
+
+  /**
+   * 이어 연 줄 알았던 Gemini 대화가 새 대화였다. 팀장 쪽에 남길 것: 활동 한 줄, 앞 대화의 문맥 % 지우기, 그리고 세션 기록이 없어 새 세션으로
+   * 연 때와 같은 글(마지막 일·다음을 적은 newSessionNote. 깨우지 않는 글이라 다음 전달과 함께 들어간다). before 는 이어 열려던 때의 명부 값이다.
+   */
+  private noteGeminiResumeLost(before: Member): void {
+    this.store.patchMember(before.id, { contextPct: null });
+    this.store.appendActivity(before.id, "system", textRef("activity.gemini_resume_lost"));
+    this.store.enqueue({ projectId: before.projectId, memberId: before.id, kind: "system", text: this.newSessionNote(before), wake: false });
+  }
+
+  /**
+   * Gemini 를 이어 띄웠는데(`--conversation <asked>`) 띄운 결과에 다른 대화 id 가 실려 왔는가: 실행기가 붙는 사이에 agy 가 연 새 대화를 이미
+   * 알아냈다(runner/core.ts 의 start). 그러면 팀장 쪽에 남길 것을 남기고 true 를 돌려준다. 부른 쪽은 '같은 대화를 이어 열었다'로 처리하지 않는다
+   * (재시작 이어가기 글 대신 중단 알림, 설정 변경의 답은 새 세션).
+   */
+  private geminiResumeLostAtLaunch(before: Member, asked: string | null, started: { sessionId: string | null; rejoined?: boolean }): boolean {
+    if (before.cli !== "gemini" || !asked || started.rejoined || !started.sessionId || started.sessionId === asked) return false;
+    this.store.transaction(() => this.noteGeminiResumeLost({ ...before, sessionId: asked }));
+    return true;
+  }
+
   /** 세션을 끝내고 명부에서 뺀다. 대화·결재 기록은 남는다. 나가지 않고 사라진 입력의 요약을 돌려준다. */
   async closeMember(memberId: string): Promise<string[]> {
     const member = this.store.requireMember(memberId);
@@ -3810,7 +4007,8 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   roster(projectId: string): RosterEntry[] {
-    const { ranks, codexRanks } = this.store.getSettings();
+    const settings = this.store.getSettings();
+    const { ranks, codexRanks, geminiRanks } = settings;
     return this.store.listMembers(projectId).map((m) => ({
       handle: m.handle,
       name: m.name,
@@ -3825,9 +4023,9 @@ export class Orchestrator implements OrchestratorApi {
       subagents: m.subagents,
       parallel: m.parallel,
       updatedAt: m.updatedAt,
-      ...memberConfig(m, ranks, codexRanks),
-      subagentModel: (m.cli === "codex" ? codexRanks : ranks).staff.model,
-      subagentEffort: m.cli === "codex" ? null : ranks.staff.effort,
+      ...this.memberRun(m, settings),
+      subagentModel: staffConfig(m.cli, settings).model,
+      subagentEffort: staffConfig(m.cli, settings).effort,
     }));
   }
 
@@ -4419,7 +4617,8 @@ export class Orchestrator implements OrchestratorApi {
       measurement.sessionGeneration === this.store.memberRevisions(memberId).sessionGeneration && measurement.turn !== null &&
       state?.baseline?.completedTurn === measurement.turn && state.baseline.autoTurn !== measurement.turn &&
       state.baseline.configRevision === this.store.memberRevisions(memberId).configRevision;
-    const autoCompact = hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt && !!exact && !lingering;
+    // Gemini(Antigravity CLI)는 스스로 압축한다. 서버의 자동 압축 대상에서 뺀다(넣을 압축 명령이 없다).
+    const autoCompact = member.cli !== "gemini" && hasWake && !rt.skipCompact && member.contextPct !== null && member.contextPct >= compactAt && !!exact && !lingering;
     if (autoCompact) this.queueCoreCompact(member, "auto", this.compactFocus(member));
     if ((rt.compactRequest !== null && !lingering) || autoCompact) {
       rt.pumpStage = "compact";
@@ -4501,12 +4700,26 @@ export class Orchestrator implements OrchestratorApi {
   }
 
   /** 이 직원의 세션에 들어가 있어야 할 설정. */
+  /**
+   * 이 팀장에게 실제로 적용할 모델·effort(팀장 지정 → 직급 → CLI 기본값).
+   * Gemini(Antigravity CLI)는 모델마다 받는 effort 가 다르다. 팀장의 모델 지정과 직급에서 물려받은 effort 가 맞지 않거나(예: 직급 neon·xhigh 인데
+   * 팀장 모델은 flash) 모델이 없으면 effort 를 넘기지 않는다: 그대로 넘기면 agy 가 시작 전에 종료 코드 1 로 끝난다(1.5.14 실측).
+   * 띄우는 값·적용 기록·명부가 모두 이 값을 쓴다. Claude·Codex 는 memberConfig 그대로다.
+   */
+  private memberRun(member: Pick<Member, "kind" | "cli" | "modelOverride" | "effortOverride">, settings: Settings): ReturnType<typeof memberConfig> {
+    const config = memberConfig(member, settings.ranks, settings.codexRanks, settings.geminiRanks);
+    if (member.cli !== "gemini" || config.effort === null) return config;
+    return this.models.efforts("gemini", config.model).includes(config.effort) ? config : { ...config, effort: null };
+  }
+
   private desiredConfig(member: Member): AppliedConfig {
-    const { ranks, codexRanks } = this.store.getSettings();
-    const { model, effort } = memberConfig(member, ranks, codexRanks);
+    const settings = this.store.getSettings();
+    // 직급표는 그 팀장의 CLI 것이다(Gemini 팀장이 Claude 직급의 모델 이름을 받지 않는다).
+    const { model, effort } = this.memberRun(member, settings);
+    const staff = staffConfig(member.cli, settings);
     // 0.2.8: 앱에서 다른 계정으로 로그인한 뒤면 그 세대. 한 번도 없었으면 칸을 두지 않는다(예전 세션의 적용 기록과 글자까지 같다).
     const account = this.accountEpoch(member.cli);
-    return { model, effort, staffModel: (member.cli === "codex" ? codexRanks : ranks).staff.model, staffEffort: member.cli === "codex" ? null : ranks.staff.effort, ...(account ? { account } : {}) };
+    return { model, effort, staffModel: staff.model, staffEffort: staff.effort, ...(account ? { account } : {}) };
   }
 
   // ---- 0.2.8: AI 계정 로그인 뒤 새 계정 적용 ----
@@ -4522,7 +4735,11 @@ export class Orchestrator implements OrchestratorApi {
     }
     return this.accountEpochs;
   }
-  private accountEpoch(cli: Member["cli"]): number { return this.epochs()[cli === "codex" ? "codex" : "claude"].epoch; }
+  /** 그 CLI 의 계정 세대. Gemini(Antigravity CLI)는 세대가 없어 늘 0 이다: Claude·Codex 로 다시 로그인해도 Gemini 팀장의 설정이 달라지지 않는다(다시 열지 않는다). */
+  private accountEpoch(cli: Member["cli"]): number {
+    if (cli === "gemini") return 0;
+    return this.epochs()[cli === "codex" ? "codex" : "claude"].epoch;
+  }
   /** 이 세션이 지금 계정이 아닌 세대로 떠 있다(설정의 나머지는 같다). */
   private accountOnlyPending(member: Member): boolean {
     const want = this.desiredConfig(member), have = this.store.getAppliedConfig(member.id);
@@ -4536,7 +4753,7 @@ export class Orchestrator implements OrchestratorApi {
    * - 사용 한도로 멈춘 팀장(다른 계정일 때)과 로그인 오류로 멈춘 팀장(같은 계정이어도)은 지금 다시 열고 멈춘 일을 이어 가게 한다.
    * 다시 여는 일은 기다리지 않는다(accountReopening). 답은 그 수만 센다.
    */
-  async cliLoggedIn(cli: "claude" | "codex", after: string | null, before: string | null): Promise<{ changed: boolean | null; reopenedNow: number; atNextTurn: number }> {
+  async cliLoggedIn(cli: CliAccountCli, after: string | null, before: string | null): Promise<{ changed: boolean | null; reopenedNow: number; atNextTurn: number }> {
     const state = this.epochs()[cli];
     // 기준은 마지막으로 적용한 계정(팀장들이 그 세대로 맞춰진 계정)이 먼저다. 로그인 직전 계정만 보면, 앞 로그인의 적용이 빠졌을 때(B 로 바꿨는데
     // 세대를 못 올렸다) B 로 다시 로그인해도 B↔B 로 같다고 보아 팀장들이 영영 옛 계정 A 에 남는다(리뷰 지적). 처음이면 로그인 직전 계정.
@@ -4591,6 +4808,8 @@ export class Orchestrator implements OrchestratorApi {
    * 이어가기 글을 한 번 넣는다(사용 한도 이어가기와 같은 장치). 같은 대화를 이어 열지 못하면 총괄을 깨워 중단을 알린다.
    */
   private loginStopRun(member: Member): string | null {
+    // 아래의 로그인 사유는 Claude 의 것이다. Gemini(Antigravity CLI)의 로그인 오류에는 이 이어가기가 없다: 일반 오류의 길로 간다.
+    if (member.cli === "gemini") return null;
     const run = this.store.lastWrittenExecution(member.id, this.store.memberRevisions(member.id).sessionGeneration);
     // 실행의 사유는 오류 분류값과 글(`authentication_failed: Please run /login · …`) 또는 사유 코드(claude_login_required)다.
     const loginReason = (reason: string | null | undefined) => !!reason && (reason === CLAUDE_LOGIN_REASON || CLAUDE_LOGIN_ERRORS.has(reason.split(":")[0]!.trim()));
@@ -4640,7 +4859,10 @@ export class Orchestrator implements OrchestratorApi {
   /** 쉬는 세션을 새 설정으로 다시 연다(같은 대화를 이어 띄운다). 이번 전달을 그대로 이어가도 되면 true. */
   private async syncConfig(member: Member, rt: Runtime): Promise<boolean> {
     const want = this.desiredConfig(member);
-    if (!member.sessionId) {
+    // Gemini(Antigravity CLI)는 첫 글을 받을 때 대화를 만든다: 그 전에는 대화 id 가 없는 것이 정상이고 잃을 대화도 없다. 미뤄 두면 첫 지시가
+    // 옛 설정으로 돌고, id 를 안 뒤에도 재우고 깨우기 전까지 적용되지 않는다. 아래의 같은 길로 지금 다시 띄운다(이어 열 대화가 없어 새 세션이다).
+    const runner = this.runners.get(this.backendOf(member));
+    if (!member.sessionId && !(runner && this.geminiNeverConversed(member, runner))) {
       rt.configGaveUp = JSON.stringify(want);
       this.store.deferMemberConfig(member.id, JSON.stringify(want));
       this.store.appendActivity(member.id, "system", textRef("activity.settings_held_session"));
@@ -5299,6 +5521,9 @@ export class Orchestrator implements OrchestratorApi {
         }
         return this.onStatus(this.store.requireMember(member.id), e.status);
       case "turn_end":
+        // Gemini: 이어 띄운 뒤의 첫 턴이 같은 대화 id 로 끝났다. 그 대화가 이어 열린 것이다(새 대화였다면 첫 글을 받을 때 id 가 바뀌어 왔다).
+        // 오류로 끝난 턴은 근거가 아니다(대화가 만들어지기 전에 끝났을 수 있다): 표식을 남겨 다음 턴에서 가린다.
+        if (!e.isError) this.runtime(member.id).resumedConversation = null;
         if (this.backendOf(member) === "core" && e.isError && /quota|rate.?limit|usage.?limit|authentication|unauthorized|한도|인증/i.test(e.errorText ?? "")) {
           const reason = /auth|unauthorized|인증/i.test(e.errorText ?? "") ? "processing_auth" : "processing_quota";
           const due = new Date(Date.now() + this.timings.turnErrorRetryMs).toISOString();
@@ -5331,8 +5556,19 @@ export class Orchestrator implements OrchestratorApi {
       case "session":
         if (e.sessionId !== member.sessionId) {
           this.store.patchMember(member.id, { sessionId: e.sessionId });
+          // Gemini 는 첫 글을 받아야 대화 id 가 생긴다. 그 전에 '세션 확인 뒤로' 미뤄 둔 설정(실패가 아닌 보류)은 이제 같은 대화를 이어 열어 적용할 수 있다:
+          // 보류를 풀어 다음에 쉴 때 syncConfig 가 다시 열게 한다. 풀지 않으면 재우고 깨우기 전까지 옛 설정으로 돈다.
+          if (member.cli === "gemini" && !member.sessionId && e.sessionId) {
+            const deferred = this.store.deferredMemberConfig(member.id);
+            if (deferred && !deferred.failed) { this.store.clearDeferredMemberConfig(member.id); this.runtime(member.id).configGaveUp = null; }
+          }
           // D4-9: 서버가 띄운 세션이 새 ID 를 얻었다(새로 띄운 Claude, Codex 세션을 알아냄). 사용량은 0 부터 센다.
-          if (e.sessionId) this.registerUsageSession(member, e.sessionId);
+          // Gemini(Antigravity CLI)는 떠 있는 터미널에서 대화가 바뀔 수 있다(터미널에서 새 대화를 열었다). 그때 agy 가 비용·토큰을 이어 세는지
+          // 0 부터 다시 세는지 확인하지 못했다: 이어 센다면 '0 부터'로 적는 순간 앞 대화의 누적값이 새 대화의 첫 몫으로 한 번 더 들어간다.
+          // 그래서 띄운 뒤 처음 알아낸 id 만 0 부터로 적고, 바뀐 id 는 처음 보는 세션으로 둔다(첫 값은 기준값일 뿐, 늘어난 몫부터 센다).
+          if (e.sessionId && !(member.cli === "gemini" && member.sessionId)) this.registerUsageSession(member, e.sessionId);
+          // Gemini: 알던 대화 id 가 다른 값으로 바뀌었다. 앞 대화는 이어지지 않았다.
+          if (member.cli === "gemini" && member.sessionId && e.sessionId) this.onGeminiConversationReplaced(member);
         }
         return;
       case "subagents": {
@@ -5486,6 +5722,8 @@ export class Orchestrator implements OrchestratorApi {
     // 승인 창이 아닌 막힘은 승인 대기라고 알리지 않는다.
     if (member.blockedCode === "start_not_ready") return this.notifyInbox(textRef("notice.start_slow.title", { name: member.name }), textRef("notice.start_slow"));
     if (member.blockedCode === "trust_dialog_unrecognized") return this.notifyInbox(textRef("notice.check_needed.title", { name: member.name }), textRef("notice.trust_unreadable"));
+    // 0.2.10: Antigravity CLI 의 로그인·첫 설정(약관·데이터 수집 동의)은 승인 창이 아니다. 사람이 터미널에서 직접 끝낸다(서버는 그 화면에 키를 보내지 않는다).
+    if (member.blockedCode === "gemini_setup") return this.notifyInbox(textRef("notice.check_needed.title", { name: member.name }), textRef("notice.gemini_setup"));
     // 핫픽스 C: 로그인(계정) 오류로 막힌 팀장은 승인 창이 아니다. 오류 턴 끝이 이미 기존 오류 알림(대화의 오류 글, 오류 푸시)으로 알렸다.
     if (member.blockedCode === "login_required") return;
     // K(E2): 이 승인 창은 도구 승인 카드로 이미 알렸다(또는 방금 답했다). 같은 일을 두 번 알리지 않는다.
@@ -5599,8 +5837,17 @@ export class Orchestrator implements OrchestratorApi {
     this.releaseSlots();
   }
 
+  /**
+   * 턴 오류의 갈래(연결 문제·사용 한도·그 밖). 오류 글로 가르는 규칙(classifyTurnError)은 Claude·Codex 가 내는 문구로 만든 것이다.
+   * Gemini(Antigravity CLI)의 오류 문구는 아직 본 적이 없어 그 규칙을 대지 않는다: 늘 일반 오류다. 한도·장애의 보류와 이어가기 없이,
+   * CLI 가 알린 글 그대로 오류로 알린다(실행기도 Gemini 화면에는 문구 판정을 대지 않는다).
+   */
+  private turnErrorKind(member: Pick<Member, "cli">, errorText: string): TurnErrorKind {
+    return member.cli === "gemini" ? "error" : classifyTurnError(errorText);
+  }
+
   private async onTurnError(member: Member, errorText: string, errorKey?: string): Promise<void> {
-    const kind = classifyTurnError(errorText);
+    const kind = this.turnErrorKind(member, errorText);
     if (kind === "network") { this.apiRecovery.networkFailure(member, true, errorKey); return; }
     this.apiRecovery.finishNetwork(member.id);
     if (kind === "usage_limit") { this.apiRecovery.usageFailure(member, errorText, null, errorKey); return; }
@@ -5675,7 +5922,8 @@ export class Orchestrator implements OrchestratorApi {
       let builtin = false;
       if (log && old) builtin = observeCompactBoundary({ cli: member.cli, home: log.home, cwd: member.cwd, baseline: old, current: identity, settled: true, providerError: false }).outcome === "succeeded";
       // 지금 기록의 끝 위치만 적는다. 처음부터 4MB 를 읽으면 큰 기록(수십~수백 MB)에서는 끝에 닿지 못해 읽은 것을 버렸다.
-      const end = log ? eofLogBaseline(join(log.home, member.cli === "codex" ? "sessions" : "projects"), log.path) : null;
+      // Gemini 는 log 가 null 이다(contextLog). 기록 위치를 기준선으로 남기지 않고 문맥 % 만 적는다.
+      const end = log ? eofLogBaseline(log.root, log.path) : null;
       const baseline = end?.fileIdentity && log ? { ...identity, path: log.path, fileIdentity: end.fileIdentity, offset: end.offset } : null;
       this.store.saveContextState({ ...state, measurement, baseline: { ...state.baseline, configRevision: this.store.memberRevisions(member.id).configRevision,
         measurementLog: baseline, ...(builtin ? { autoTurn: measurement.turn } : {}) } },
@@ -5741,7 +5989,7 @@ export class Orchestrator implements OrchestratorApi {
   private runtime(memberId: string): Runtime {
     let rt = this.runtimes.get(memberId);
     if (!rt) {
-      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, readySince: null, composerWaitSince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, holdUntil: 0, configGaveUp: null, launchedAt: null, quickExits: 0, quickExitAt: 0, quickExitNotified: false, askHold: null };
+      rt = { contextCandidate: null, turn: null, pumping: null, pumpStage: null, pumpSince: null, pumpReported: false, again: false, posted: false, delegated: false, direct: false, skipCompact: false, compactRequest: null, compactTimer: null, retryTimer: null, inputBusySince: null, readySince: null, composerWaitSince: null, compactBusySince: null, wantParallel: null, starting: null, reopening: null, closing: false, parallelFails: 0, holdUntil: 0, configGaveUp: null, launchedAt: null, quickExits: 0, quickExitAt: 0, quickExitNotified: false, askHold: null, resumedConversation: null };
       this.runtimes.set(memberId, rt);
     }
     return rt;
@@ -5797,8 +6045,8 @@ export class Orchestrator implements OrchestratorApi {
       cwd: member.cwd,
       sessionId: member.sessionId,
       paneId: member.paneId,
-      ...memberConfig(member, settings.ranks, settings.codexRanks),
-      subagentModel: (member.cli === "codex" ? settings.codexRanks : settings.ranks).staff.model,
+      ...this.memberRun(member, settings),
+      subagentModel: staffConfig(member.cli, settings).model,
       permissionMode: settings.permissionMode,
       kind: member.kind,
       origin: member.origin,
@@ -5809,7 +6057,7 @@ export class Orchestrator implements OrchestratorApi {
   private rulesFor(member: Member, project: Project): string {
     const conductor = this.store.getConductor(project.id);
     const settings = this.store.getSettings();
-    const staffEffort = member.cli === "codex" ? null : settings.ranks.staff.effort;
+    const staffEffort = staffConfig(member.cli, settings).effort;
     // B1: 보고 언어가 en 이면 지침 끝에 영어 보고 줄이 붙는다. 세션을 띄울 때마다(깨우기·재시작·압축 뒤 규칙) 지금 설정을 읽는다.
     // 0.2.7 묶음 5(D5-5): 이 프로젝트의 대표 상시 규칙을 지침 끝에 싣는다. 띄울 때마다 지금 것을 읽는다.
     return renderRole(member.kind, { PROJECT: project.name, NAME: member.name, ROLE: member.role, CONDUCTOR: conductor?.name ?? "총괄", SUBAGENT_EFFORT: staffEffort ? `- 서브에이전트·워크플로를 부를 때 effort=${staffEffort} 을 넘긴다.` : "", REPORT_LANGUAGE: settings.reportLanguage, OWNER_RULES: projectRules(this.store).list(project.id) }, this.config.rolesDir);
@@ -5819,15 +6067,27 @@ export class Orchestrator implements OrchestratorApi {
   private writeRunFiles(member: Member, project: Project, resume: boolean = !!member.sessionId): StartOpts {
     const dir = join(this.config.home, "run");
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const systemPromptFile = join(dir, `${member.id}.rules.md`);
-    const mcpConfigFile = join(dir, `${member.id}.mcp.json`);
+    let systemPromptFile = join(dir, `${member.id}.rules.md`);
+    let mcpConfigFile = join(dir, `${member.id}.mcp.json`);
+    if (member.cli === "gemini") {
+      // Antigravity CLI 에는 지침·MCP 를 파일 인자로 넘길 수 없다. 실행기가 이 파일들이 있는 폴더 아래(agy/…)에 세션 한정 주입 폴더를 만들어 --add-dir 로 넘긴다
+      // (runner/gemini-inject.ts). 그 주입 폴더에는 토큰이 든 MCP 설정 사본이 있다. 이 팀장의 것이 한 폴더에 모이도록 팀장만의 폴더에 쓴다:
+      // 다른 팀장의 것과 섞이지 않고, 팀장을 지울 때 폴더째 지운다(forgetMember, lifecycle/project-data.ts).
+      const own = geminiRunDir(this.config.home, member.id);
+      mkdirSync(own, { recursive: true, mode: 0o700 });
+      chmodSync(own, 0o700);
+      systemPromptFile = join(own, "rules.md");
+      mcpConfigFile = join(own, "mcp.json");
+    }
     writeFileSync(systemPromptFile, this.rulesFor(member, project));
     const env = { IAMCEO_URL: this.serverUrl, IAMCEO_TOKEN: this.store.getMemberToken(member.id) };
     writeFileSync(mcpConfigFile, `${JSON.stringify({ mcpServers: { iamceo: { ...mcpBridgeCommand(dir), env } } }, null, 2)}\n`, { mode: 0o600 });
     chmodSync(mcpConfigFile, 0o600);
     // 바이패스는 대표가 확인한 모드일 때만 경고 창을 끈다. 그래야 첫 경고 창이 아무도 안 보는 칸에서 일을 막지 않는다.
+    // 이 설정 파일은 Claude 형식이다(statusLine, skipDangerousModePermissionPrompt). Codex 는 받지 않고, Gemini(Antigravity CLI)의 --settings 는
+    // 키가 달라 실행기가 그 JSON 을 직접 만든다(providerLaunch). 둘에게는 넘기지 않는다.
     let settingsFile: string | undefined;
-    if (member.cli !== "codex") {
+    if (member.cli !== "codex" && member.cli !== "gemini") {
       settingsFile = join(dir, `${member.id}.settings.json`);
       const settings = { statusLine: writeStatuslineWrapper(this.config.home),
         // 대표가 권한 방식을 확인하기 전에는 CLI 의 위험 모드 경고를 대신 꺼 주지 않는다.
@@ -5845,6 +6105,23 @@ export class Orchestrator implements OrchestratorApi {
 function orderForBundle(pending: Delivery[]): Delivery[] {
   const wake = pending.filter((d) => d.wake);
   return [...pending.filter((d) => !d.wake), ...wake.filter((d) => d.urgent), ...wake.filter((d) => !d.urgent && d.kind === "answer"), ...wake.filter((d) => !d.urgent && d.kind !== "answer")];
+}
+
+/** CLI 없이 모델 이름만 받았을 때 Gemini(Antigravity CLI)로 띄워도 되는 이름: Gemini 계열뿐이다(addMember). */
+const GEMINI_FAMILY_MODEL = /^gemini-/i;
+
+/** 화면·글에 쓰는 CLI 의 짧은 이름(Claude·Codex·Gemini). 타입 밖의 값(저장된 옛 행)은 지금까지처럼 Claude 다. */
+function cliShortName(cli: CliProvider | undefined): string {
+  return cli !== undefined && Object.hasOwn(CLI_INFO, cli) ? CLI_INFO[cli].short : CLI_INFO.claude.short;
+}
+
+/**
+ * Gemini 팀장의 실행 파일(규칙 rules.md·MCP 설정 mcp.json)을 두는 그 팀장만의 폴더: <home>/run/<팀장 id>.gemini.
+ * 실행기는 이 폴더 안(agy/…)에 세션 한정 주입 폴더를 만든다. MCP 설정에 그 팀장의 토큰이 있어 팀장을 지우면 폴더째 지운다.
+ * 이름이 `<팀장 id>.` 로 시작해 run 폴더의 다른 실행 파일(<id>.rules.md 등)과 같은 규칙으로 찾을 수 있다.
+ */
+export function geminiRunDir(home: string, memberId: string): string {
+  return join(home, "run", `${memberId}.gemini`);
 }
 
 function shellQuote(value: string): string {

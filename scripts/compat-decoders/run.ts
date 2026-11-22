@@ -24,7 +24,11 @@
 // iPhone 과 Mac 이 같은 태그로 나가면 해석 코드가 같다(플랫폼 조건은 AppVersion.platform 한 줄). 그래서 태그마다 한 항목이고,
 // appHeaders.platform 은 그 판에서 서버가 다른 기기로 보는 쪽(QR 로 붙은 iPhone)을 적는다. 서버가 도는 Mac 의 앱이 받는 응답은
 // tests/compat-dump.test.ts 가 macos 머리글로 따로 받는다(연결된 기기).
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+//
+// 본 덤프와 따로, samples/<이름>/ 의 응답 견본도 태그마다 그 해석기에 먹인다(sampleFolders). 덤프를 만드는 서버 상태에 아직 없는 모양을
+// 실제 응답에 손으로 넣어 둔 것이다(samples/gemini: cli 가 gemini 인 팀장, geminiRanks, 모델 목록의 gemini 등). 견본의 manifest.json 은
+// 덤프와 같은 entries 에, 게이트 자체 검사용 teeth(그 파일에서 그 칸을 지운 사본은 실패해야 한다)를 둔다.
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 /** 태그 파일에서 해석부만 꺼내는 조각. */
@@ -207,7 +211,67 @@ function checkRelease(release: Release, dump: string, work: string): boolean {
   process.stdout.write(run.stdout.toString());
   if (run.stderr.length) process.stderr.write(run.stderr.toString());
   const teeth = checkTeeth(binary, dump, join(packageDir, "teeth"), release);
-  return run.exitCode === 0 && teeth;
+  const samples = checkSamples(binary, join(packageDir, "sample-teeth"), release.tag);
+  return run.exitCode === 0 && teeth && samples;
+}
+
+/** 견본 폴더의 자체 검사 하나: file 의 delete 경로(객체 열쇠나 배열 번호)에 있는 칸을 지운 사본은 해석기가 실패로 알려야 한다. */
+export interface SampleTooth { name: string; file: string; delete: (string | number)[] }
+/** 본 덤프와 따로 먹이는 응답 견본 폴더들(manifest.json 이 있는 samples/<이름>/). 이름 순. */
+export function sampleFolders(base = join(here, "samples")): string[] {
+  if (!existsSync(base)) return [];
+  return readdirSync(base, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && existsSync(join(base, entry.name, "manifest.json")))
+    .map(entry => join(base, entry.name)).sort();
+}
+/** 경로 끝의 칸을 지운다. 그 칸이 없으면 false(견본과 teeth 가 어긋났다). */
+export function deleteAt(body: unknown, path: (string | number)[]): boolean {
+  if (!path.length) return false;
+  let node = body as any;
+  for (const key of path.slice(0, -1)) {
+    if (node === null || typeof node !== "object" || !(key in node)) return false;
+    node = node[key];
+  }
+  const last = path.at(-1)!;
+  if (node === null || typeof node !== "object" || !(last in node)) return false;
+  if (Array.isArray(node) && typeof last === "number") node.splice(last, 1); else delete node[last];
+  return true;
+}
+
+/** 견본 폴더마다: 그대로는 통과해야 하고, teeth 로 망가뜨린 사본은 실패해야 한다. */
+function checkSamples(binary: string, work: string, tag: string): boolean {
+  let ok = true;
+  for (const folder of sampleFolders()) {
+    const name = basename(folder);
+    const manifest = JSON.parse(readFileSync(join(folder, "manifest.json"), "utf8")) as { entries: { file: string }[]; teeth?: SampleTooth[] };
+    const run = Bun.spawnSync([binary, folder, join(here, "allow.json"), tag], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    process.stdout.write(run.stdout.toString().replaceAll(`[${tag}]`, `[${tag}] 견본 ${name}:`));
+    if (run.stderr.length) process.stderr.write(run.stderr.toString());
+    if (run.exitCode !== 0) { console.log(`실패 [${tag}] 견본 ${name}: 이 앱이 견본 응답을 그대로 읽지 못합니다(종료 코드 ${run.exitCode})`); ok = false; }
+    const teeth = manifest.teeth ?? [];
+    if (!teeth.length) { console.log(`실패 [${tag}] 견본 ${name}: manifest.json 에 teeth 가 없습니다(견본이 실제로 해석되는지 확인할 수 없다)`); ok = false; continue; }
+    let caught = 0;
+    for (const [index, tooth] of teeth.entries()) {
+      const entry = manifest.entries.find(item => item.file === tooth.file);
+      const body = entry ? JSON.parse(readFileSync(join(folder, tooth.file), "utf8")) as unknown : null;
+      if (!entry || body === null || !deleteAt(body, tooth.delete)) {
+        console.log(`실패 [${tag}] 견본 ${name} 자체 검사 '${tooth.name}': 견본에 지울 자리가 없습니다(${tooth.file} ${tooth.delete.join(".")})`);
+        ok = false; continue;
+      }
+      const dir = join(work, name, String(index));
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, tooth.file), JSON.stringify(body));
+      writeFileSync(join(dir, "manifest.json"), JSON.stringify({ entries: [entry] }));
+      const broken = Bun.spawnSync([binary, dir, join(here, "allow.json"), tag], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      if (broken.exitCode !== 1) {
+        console.log(`실패 [${tag}] 견본 ${name} 자체 검사 '${tooth.name}': 망가뜨린 견본을 잡지 못했습니다(종료 코드 ${broken.exitCode}).\n${broken.stdout.toString()}`);
+        ok = false; continue;
+      }
+      caught++;
+    }
+    if (caught === teeth.length) console.log(`[${tag}] 견본 ${name} 자체 검사 ${teeth.length}건: 망가뜨린 견본을 모두 잡았습니다`);
+  }
+  return ok;
 }
 
 /**

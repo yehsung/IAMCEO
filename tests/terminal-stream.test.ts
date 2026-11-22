@@ -100,7 +100,7 @@ exec ${quote(process.execPath)} ${quote(script)} "$@"
     });
   });
   await new Promise<void>(resolve => rpc.listen(socketPath, resolve));
-  const config = loadConfig({ IAMCEO_HOME: join(dir, "home"), IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: socketPath, IAMCEO_CORE_BIN: binary, IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false" });
+  const config = loadConfig({ IAMCEO_HOME: join(dir, "home"), IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: socketPath, IAMCEO_CORE_BIN: binary, IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_GEMINI_BIN: "/usr/bin/false" });
   config.hosts = ["127.0.0.1"];
   config.claudeHome = join(dir, "claude"); config.codexHome = join(dir, "codex");
   const bus = new Bus(); const db = openDb(config.dbPath); const store = new Store(db, bus);

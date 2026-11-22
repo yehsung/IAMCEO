@@ -141,6 +141,8 @@ export function observeCompactBoundary(options: { cli: CliProvider; home: string
   // 옛 규칙의 커서는 그 위치까지 읽은 줄을 지금 규칙으로 다시 보지 못하게 한다. 버리고 기준선(baseline.offset)부터 읽는다.
   const cursor = options.cursor?.rules === COMPACT_BOUNDARY_RULES ? options.cursor : null;
   const unknown = (code: string): CompactBoundaryResult => ({ outcome: "unknown", code, cursor });
+  // Antigravity CLI 는 스스로 압축하고 그 경계를 읽을 줄 단위 기록이 없다. Claude 기록 자리(projects)에서 찾지 않는다.
+  if (options.cli === "gemini") return unknown("unsupported_provider");
   if (baseline.sessionId !== current.sessionId || baseline.generation !== current.generation || baseline.terminalId !== current.terminalId || baseline.model !== current.model ||
     (baseline.turn !== null && (current.turn === null || current.turn < baseline.turn)) || !baseline.fileIdentity ||
     (cursor && cursor.queryKey !== queryKey)) return unknown("session_changed");

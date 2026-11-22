@@ -9,7 +9,7 @@ IAMCEO가 무엇을 믿고, 무엇을 막고, 무엇을 막지 못하는지 적�
 ## 구조부터
 
 - IAMCEO 서버는 내 Mac에서 내 macOS 사용자로 돕니다. 개발자가 운영하는 서버는 iPhone 알림 중계 하나이며(내 Mac에 알림 키가 없을 때만 씁니다), 중계는 내 Mac에 접속할 수 없습니다.
-- 총괄·팀장·본사 AI는 공식 Claude Code·Codex CLI이고, 서버와 **같은 macOS 사용자**로 돕니다.
+- 총괄·팀장·본사 AI는 공식 Claude Code·Codex·Antigravity CLI(Gemini)이고, 서버와 **같은 macOS 사용자**로 돕니다.
 - 이 Mac의 앱과 손으로 연결한 기기는 공용 접속 코드로, QR로 연결한 기기는 그 기기만의 열쇠로 서버에 붙습니다. iPhone은 Tailscale을 거쳐 붙습니다.
 
 ## 믿는 것

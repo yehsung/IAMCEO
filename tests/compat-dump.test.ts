@@ -27,7 +27,8 @@ import { Store } from "../server/store.ts";
 import { LAST_ERROR_CODES } from "../server/text-refs.ts";
 import { TOOL_PERMISSION_OPTIONS, toolActionRef, toolPermissionCard, toolPermissionCardTexts } from "../server/tool-permission.ts";
 import { appHeadersDumpDir, loadReleases, type AppHeaders } from "../scripts/compat-decoders/run.ts";
-import { API_LEVEL, APP_HEADERS, type DeviceAccessList } from "../shared/types.ts";
+import { API_LEVEL, APP_HEADERS, DEFAULT_GEMINI_RANKS, type DeviceAccessList } from "../shared/types.ts";
+import { ERROR_CODES } from "../shared/error-codes.ts";
 import { sinceParam, textRef } from "../shared/server-text.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
 
@@ -87,7 +88,7 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
   const isolated = createIsolatedRuntime();
   const env = { IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0",
     IAMCEO_CORE_SOCKET: isolated.socketPath, IAMCEO_HERDR_SOCKET: isolated.herdrSocketPath,
-    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin };
+    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin, IAMCEO_GEMINI_BIN: isolated.bins.geminiBin };
   updateConfigFile({ accessCode: "compat-dump", hosts: ["127.0.0.1"] }, env);
   const config = loadConfig(env);
   const bus = new Bus();
@@ -145,6 +146,13 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
       identity: { terminalId: "fake:notes", sessionId: notes.sessionId, sessionGeneration: notesGeneration, process: null }, runId: null, deliveryIds: [], baseline: null, reason: null, exitCode: null, createdAt: at, updatedAt: at });
     const notesContext = store.ensureContextState(notes.id);
     store.saveContextState({ ...notesContext, compaction: { id: randomUUID(), trigger: "manual", phase: "failed", reason: "nothing_to_compact", requestedAt: at, startedAt: at, finishedAt: at } });
+    // 0.2.10: Gemini(Antigravity CLI) 팀장. 출시 앱은 cli 를 글자로 읽는다: 모르는 값이어도 풀린다(화면은 Claude 모양으로 그린다 — 디코딩만 본다).
+    // 새 막힘 코드(gemini_setup)와 설정의 새 칸(geminiRanks)도 모른 채 넘기는지 함께 본다.
+    const gem = store.createMember({ projectId: project.id, handle: "gem", name: "자료 검색", kind: "worker", cli: "gemini", modelOverride: "gemini-4-neon",
+      backend: "core", status: "blocked", sessionId: randomUUID(), paneId: "fake:gem", cwd: isolated.paths.work });
+    store.patchMember(gem.id, { effortOverride: "high", statusObservation: { source: "core", observedAt: at, freshness: "fresh", ownership: "verified", consecutiveFailures: 0,
+      error: { code: "gemini_setup", note: ERROR_CODES.observation_gemini_setup.ko } } });
+    store.patchSettings({ geminiRanks: { ...DEFAULT_GEMINI_RANKS, lead: { model: "gemini-4-neon", effort: "high" } } });
     const request = (path: string, method = "GET", body?: unknown, headers: Record<string, string> = {}) => fetch(base + path, {
       method, headers: { ...auth, "Content-Type": "application/json", ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });

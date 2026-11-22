@@ -15,8 +15,8 @@ export type ApprovalAnswer =
   | { ok: false; reason: "not_blocked" | "unrecognized" | "changed" | "no_option" | "no_effect" | "gone" | "input_busy"; current?: ApprovalPrompt | null };
 
 export interface RunnerMember {
-  /** Official interactive provider; absent means Claude. */
-  cli?: "claude" | "codex";
+  /** Official interactive provider; absent means Claude. "gemini" 는 Antigravity CLI(`agy`)다. */
+  cli?: CliProvider;
   /** Native subagent preference, retained across core reconnects. */
   parallel?: boolean;
   id: string;
@@ -144,7 +144,8 @@ export type DeliveryEffect = "not_written" | "rejected" | "unknown";
 export interface DeliveryReceipt {
   dispatchId: string;
   receivedAt: string;
-  source: "transport" | "claude_log" | "codex_log";
+  /** gemini_log: Antigravity CLI 훅 기록(PreInvocation 의 lastUserInput)에서 전달 표지를 찾았다. */
+  source: "transport" | "claude_log" | "codex_log" | "gemini_log";
 }
 
 /**

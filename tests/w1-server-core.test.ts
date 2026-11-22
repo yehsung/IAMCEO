@@ -39,7 +39,7 @@ interface Options { screen?: string; reported?: boolean; version?: string; timin
 async function fixture(options: Options = {}) {
   const isolated = createIsolatedRuntime();
   const config = loadConfig({ IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_CORE_SOCKET: isolated.socketPath,
-    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin });
+    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin, IAMCEO_GEMINI_BIN: isolated.bins.geminiBin });
   const db = openDb(config.dbPath), bus = new Bus(), store = new Store(db, bus);
   store.patchSettings({ boardTidyHours: 0, notifyMac: true });
   const state = { screen: options.screen ?? composer, reported: options.reported ?? false, version: options.version ?? CORE_VERSION, helloFails: false };

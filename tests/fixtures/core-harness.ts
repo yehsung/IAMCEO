@@ -6,8 +6,14 @@
 // terminal.send 로 글이 들어오면 세션 기록(JSONL)에 받은 글을 적고, 글 안의 @fake: 지시대로 도구를 부르고(/agent/tool),
 // 답을 적은 뒤 상태 보고를 끝남(done)으로 바꾸고 턴 번호를 올린다. 쓰는 법은 .pumasi/completeness/runner-removal/HARNESS.md.
 //
+// Gemini 팀장(라벨 iamceo.cli=gemini)이면 Antigravity CLI(agy)를 흉내 낸다: 인자의 --conversation·--add-dir·--settings 를 읽고,
+// 도구는 주입 폴더(--add-dir)의 .agents/mcp_config.json 이 가리키는 환경 파일의 주소·토큰으로 부르고, 상태 보고의 app 은 "antigravity" 다.
+// 대화 id 는 agy 처럼 스스로 정한다: 첫 글을 받을 때 새 id 를 만들고, 상태줄 명령이 설정돼 있으면 상태줄 기록(<contextHome>/context/gemini/<팀장>.json)에
+// 적어 서버가 알아내게 한다. 없는 id 로 이어 열면 경고 한 줄을 남기고 새 대화가 된다. 세션 기록(JSONL)은 쓰지 않는다.
+// 상태줄 기록에는 실제 래퍼처럼 상태줄 명령의 인자에 실린 띄우기 값(launch)을 적는다(터미널 라벨을 읽지 않는다. agy 는 라벨을 모른다).
+//
 // 불러오기만으로는 아무것도 하지 않는다(환경 읽기·소켓 열기·파일 쓰기 없음).
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,6 +25,10 @@ import { createOrchestrator, type AgentToolsImpl, type AssemblyOverrides, type O
 import type { CoreRunner, CoreRunnerDeps } from "../../server/runner/core.ts";
 import type { CoreTerminal } from "../../server/runner/core-client.ts";
 import { transcriptPath } from "../../server/runner/transcript.ts";
+import { geminiStatusFromPayload, geminiStatusPath } from "../../server/runner/gemini-status.ts";
+import { geminiStatusLineLaunch } from "../../server/runner/gemini-statusline.ts";
+import { geminiHookEventsDir } from "../../server/runner/gemini-hooks.ts";
+import { parseGeminiMcpEnv } from "../../server/runner/gemini-inject.ts";
 import type { Runner } from "../../server/runner/types.ts";
 import { Store } from "../../server/store.ts";
 import { PushEventRecorder } from "../../server/push/events.ts";
@@ -29,6 +39,11 @@ const METHODS = ["terminal.run", "terminal.list", "terminal.get", "terminal.read
 const RULE = "─".repeat(40);
 /** Claude 의 빈 입력칸이 보이는 화면. 위에 대화가 쌓이고 아래에 입력칸이 있다. */
 export const composerScreen = (history = "", draft = "") => `${history}\n${RULE}\n❯ ${draft}\n${RULE}\n  ? for shortcuts\n`;
+/**
+ * Antigravity CLI(agy)의 입력칸이 보이는 화면: 가로줄 사이의 `> ` 줄과 그 아래 IAMCEO 상태줄.
+ * 실제 화면을 옮긴 것이 아니라 문서 그림의 모양이다(server/runner/gemini-screen.ts 가 읽는 모양과 같다).
+ */
+export const geminiComposerScreen = (history = "", draft = "", status = "IAMCEO · fake-model") => `${history}\n${RULE}\n> ${draft}\n${RULE}\n${status}\n`;
 
 /**
  * core 에서만 생기는 턴: 깨우는 지시를 받고도 보고(완료·막힘·질문 post, 열린 결재) 없이 끝난 실행에 서버가 한 번 보내는 '보고 보완' 요청.
@@ -54,6 +69,13 @@ export interface FakeRun {
   sessionFlag: string | null;
   /** `--resume` 으로 이어 연 세션이면 그 값. 새로 연 것이면 null. */
   resumeFlag: string | null;
+  /** Gemini(agy): `--conversation` 으로 이어 열라고 넘긴 대화 id. 없으면 null. */
+  conversationFlag: string | null;
+  /** Gemini(agy): `--add-dir` 로 넘긴 주입 폴더. 없으면 null. */
+  addDir: string | null;
+  /** Gemini(agy): `--settings` 로 넘긴 한 줄 JSON 을 푼 값. 없거나 풀지 못하면 null. */
+  settings: Record<string, unknown> | null;
+  /** Claude 는 띄울 때 정해진다. Gemini 는 대화가 열릴 때(이어 연 대화면 띄울 때, 새 대화면 첫 글을 받을 때) 채워진다. */
   sessionId: string | null;
 }
 /** terminal.send 한 번 = 턴 하나. 옛 틀의 "가짜 CLI 프로세스 시작"에서 받은 글(prompt)을 보던 자리다. */
@@ -90,6 +112,8 @@ export interface FakeCoreOptions {
   claudeHome: string;
   /** 가짜 CLI 가 상태줄 문맥 기록을 쓰는 곳(<contextHome>/context/<세션>.json). CoreRunner 의 contextHome 과 같아야 한다. */
   contextHome?: string;
+  /** 가짜 agy 가 대화를 두는 곳(<geminiHome>/conversations/<id>.db, 빈 파일). CoreRunner 의 geminiHome 과 같아야 이어 열기 판단이 맞는다. */
+  geminiHome?: string;
   /** 모든 턴에 붙는 기본 지시(옛 FAKE_CLAUDE_DIRECTIVES). 글 안의 @fake: 가 같은 이름이면 그쪽이 이긴다. */
   directives?: string;
   /** 글에 when 이 든 첫 규칙의 도구를 차례로 부른다(옛 FAKE_CLAUDE_SCRIPT). 인자의 $last 는 앞 도구 답의 마지막 #id 다. */
@@ -102,6 +126,12 @@ export interface FakeCoreOptions {
   endState?: "done" | "idle";
   /** 새로 띄운 CLI 의 첫 상태 보고. null 이면 준비를 알리지 않은 CLI(폴더 신뢰 창 등)다. */
   startState?: "idle" | null;
+  /**
+   * 가짜 agy 의 상태줄이 무엇을 남기는가. 실제 agy 의 상태줄 입력은 아직 본 적이 없다(대화형 화면이 있어야 한다): 설계와 다르게 오는 경우를 시험한다.
+   * "full"(기본): 대화 id 를 실어 그린다. "no_conversation": 그리되 대화 id 는 늘 빈 글이다(서버는 훅 기록으로만 id 를 알 수 있다).
+   * "none": 상태줄 명령이 한 번도 돌지 않는다(기록이 없다). 훅 기록은 어느 경우에나 그대로 남는다.
+   */
+  geminiStatus?: "full" | "no_conversation" | "none";
 }
 interface Holder {
   terminal: CoreTerminal; run: FakeRun; history: string; screen: string | null; draft: string;
@@ -131,7 +161,34 @@ export async function startFakeCore(options: FakeCoreOptions) {
   let counter = 0, stopping = false;
 
   const flagOf = (argv: string[], name: string) => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] ?? null : null; };
-  const render = (holder: Holder) => holder.screen ?? composerScreen(holder.history, holder.draft);
+  const render = (holder: Holder) => holder.screen ?? (holder.run.cli === "gemini" ? geminiComposerScreen(holder.history, holder.draft) : composerScreen(holder.history, holder.draft));
+  const conversationFile = (id: string) => options.geminiHome ? join(options.geminiHome, "conversations", `${id}.db`) : null;
+  /**
+   * 가짜 agy 의 상태줄: 실제 agy 가 상태줄 명령에 주는 JSON 을 서버와 같은 규칙(geminiStatusFromPayload)으로 기록 파일에 쓴다.
+   * 띄울 때 --settings 에 상태줄 명령이 있었을 때만 쓴다(없으면 실제 agy 도 그 명령을 돌리지 않는다).
+   * 띄우기 값은 실제 래퍼가 하듯 그 명령의 인자에서 얻는다: 서버가 명령에 싣지 않았으면 기록에도 없다(null).
+   */
+  function geminiStatus(holder: Holder, extra: Record<string, unknown> = {}) {
+    const member = holder.run.memberId;
+    const statusLine = holder.run.settings?.statusLine as { command?: unknown } | undefined;
+    if (!options.contextHome || !member || !statusLine || options.geminiStatus === "none") return;
+    const path = geminiStatusPath(options.contextHome, member);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const conversation = options.geminiStatus === "no_conversation" ? "" : holder.run.sessionId ?? "";
+    const payload = { session_id: conversation, conversation_id: conversation, model: { id: "fake-model", display_name: "fake-model" }, agent_state: holder.turn ? "working" : "idle", ...extra };
+    const launch = typeof statusLine.command === "string" ? geminiStatusLineLaunch(statusLine.command) : null;
+    const tmp = `${path}.${crypto.randomUUID()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(geminiStatusFromPayload(member, payload, new Date(), launch)), { mode: 0o600 });
+    renameSync(tmp, path);
+  }
+  /** 가짜 agy 의 훅: 주입 폴더에 hooks.json 이 있으면 서버의 기록 스크립트가 남길 줄을 같은 모양으로 사건 파일에 덧붙인다(본문 없이 표지만). */
+  function geminiHook(holder: Holder, entry: Record<string, unknown>) {
+    const member = holder.run.memberId;
+    if (!options.contextHome || !member || !holder.run.addDir || !existsSync(join(holder.run.addDir, ".agents", "hooks.json"))) return;
+    const dir = geminiHookEventsDir(options.contextHome);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    appendFileSync(join(dir, `${member}.jsonl`), `${JSON.stringify({ v: 1, cli: "gemini", at: Date.now(), conversationId: holder.run.sessionId, ...entry })}\n`, { mode: 0o600 });
+  }
   function record(holder: Holder, entry: Record<string, unknown>) {
     const session = holder.run.sessionId;
     if (!session || holder.run.cli !== "claude") return;
@@ -140,9 +197,12 @@ export async function startFakeCore(options: FakeCoreOptions) {
     appendFileSync(path, `${JSON.stringify({ uuid: crypto.randomUUID(), timestamp: new Date().toISOString(), sessionId: session, cwd: holder.terminal.cwd, ...entry })}\n`);
   }
   function bridge(holder: Holder): { url: string; token: string } {
-    const file = flagOf(holder.run.argv, "--mcp-config");
-    if (!file) throw new Error("가짜 CLI 가 도구를 부르려면 --mcp-config 가 있어야 합니다");
-    const env = JSON.parse(readFileSync(file, "utf8")).mcpServers?.iamceo?.env;
+    // agy 는 MCP 설정을 인자로 받지 않는다. 주입 폴더(--add-dir)의 .agents/mcp_config.json 을 읽는다. 그 설정은 열쇠를 싣지 않고,
+    // 주입 폴더 밖의 환경 파일을 읽어 다리를 띄우는 sh 명령이다(gemini-inject.ts). 가짜 agy 도 그 파일에서 주소·열쇠를 읽는다.
+    const file = holder.run.cli === "gemini" ? (holder.run.addDir ? join(holder.run.addDir, ".agents", "mcp_config.json") : null) : flagOf(holder.run.argv, "--mcp-config");
+    if (!file) throw new Error(holder.run.cli === "gemini" ? "가짜 agy 가 도구를 부르려면 --add-dir 가 있어야 합니다" : "가짜 CLI 가 도구를 부르려면 --mcp-config 가 있어야 합니다");
+    const server = JSON.parse(readFileSync(file, "utf8")).mcpServers?.iamceo;
+    const env = holder.run.cli === "gemini" ? parseGeminiMcpEnv(readFileSync(String(server?.args?.[3]), "utf8")) : server?.env;
     if (!env?.IAMCEO_URL || !env.IAMCEO_TOKEN) throw new Error("MCP 설정에 IAMCEO_URL·IAMCEO_TOKEN 이 없습니다");
     const url = new URL(env.IAMCEO_URL);
     // 시험 서버만 부른다. 라이브 서버(7878)나 바깥 주소로는 나가지 않는다.
@@ -184,14 +244,28 @@ export async function startFakeCore(options: FakeCoreOptions) {
       record(holder, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: [{ type: "text", text }] }] } });
       return text;
     };
+    const gemini = holder.run.cli === "gemini";
+    if (gemini) {
+      // agy 는 새 대화의 id 를 스스로 정한다(첫 글을 받을 때). 대화 파일을 만들고 상태줄·훅으로 알린다.
+      if (!holder.run.sessionId) {
+        holder.run.sessionId = crypto.randomUUID();
+        const file = conversationFile(holder.run.sessionId);
+        if (file) { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, ""); }
+        geminiHook(holder, { event: "SessionStart" });
+      }
+      geminiStatus(holder);
+      // 모델을 부르기 직전의 훅: 마지막 사용자 글의 전달 표지만 남는다(서버의 기록 스크립트와 같은 규칙).
+      geminiHook(holder, { event: "PreInvocation", invocation: 0, markers: [...new Set(prompt.match(/#iamceo_(?:b_[A-Za-z0-9_-]{22}|[A-Za-z0-9_-]{22})(?![A-Za-z0-9_-])/g) ?? [])], chars: prompt.length });
+    }
     // 받은 글이 세션 기록에 남는다. CoreRunner 의 수신 확인(전달 표지 찾기)이 이 줄을 읽는다.
     record(holder, { type: "user", message: { role: "user", content: prompt } });
-    holder.history += `${holder.history ? "\n" : ""}❯ ${prompt}\n`;
-    if (prompt.startsWith("/compact")) {
+    holder.history += `${holder.history ? "\n" : ""}${gemini ? ">" : "❯"} ${prompt}\n`;
+    // 아래 두 명령은 Claude 의 것이다. agy 는 그런 명령을 모른다: 보통 글로 받는다(서버가 잘못 넣으면 시험에서 드러난다).
+    if (!gemini && prompt.startsWith("/compact")) {
       record(holder, { type: "system", subtype: "compact_boundary", content: "Conversation compacted", compactMetadata: { trigger: "manual", preTokens: 150_000 } });
       return;
     }
-    const effort = /^\/effort ultracode (on|off)$/.exec(prompt);
+    const effort = gemini ? null : /^\/effort ultracode (on|off)$/.exec(prompt);
     if (effort) { holder.history += `⎿ Ultracode ${effort[1]}\n`; return; }
     if (directives.has("crash")) {
       holder.history += `${directives.get("crash")}\n`;
@@ -227,6 +301,12 @@ export async function startFakeCore(options: FakeCoreOptions) {
       if (result.error) throw Object.assign(new Error(result.error), { fake: "error" });
     }
     if (directives.has("error")) throw Object.assign(new Error(directives.get("error")), { fake: "error" });
+    if (gemini) {
+      // agy 는 턴이 끝나면 상태줄을 다시 그리고(문맥 % 가 실린다) 턴 끝 훅을 돌린다.
+      geminiStatus(holder, { agent_state: "idle", context_window: { used_percentage: Math.min(100, Math.round(tokens / window * 1000) / 10), context_window_size: window, total_input_tokens: tokens, total_output_tokens: 5 } });
+      geminiHook(holder, { event: "Stop", reason: "NO_TOOL_CALL", fullyIdle: true, failed: false });
+      return;
+    }
     // 실제 CLI 는 상태줄 명령으로 창 크기를 알린다. 턴 끝 직전에 같은 자리에 같은 모양으로 적는다.
     if (options.contextHome && session) {
       const dir = join(options.contextHome, "context");
@@ -262,11 +342,23 @@ export async function startFakeCore(options: FakeCoreOptions) {
       const labels: Record<string, string> = p.labels ?? {};
       const cli = labels["iamceo.cli"] ?? "claude";
       const sessionFlag = flagOf(p.argv, "--session-id"), resumeFlag = flagOf(p.argv, "--resume");
+      const conversationFlag = cli === "gemini" ? flagOf(p.argv, "--conversation") : null;
+      let settings: Record<string, unknown> | null = null;
+      if (cli === "gemini") { try { settings = JSON.parse(flagOf(p.argv, "--settings") ?? "") as Record<string, unknown>; } catch { settings = null; } }
+      // agy: 넘겨받은 대화가 있으면 그것을 이어 열고, 없으면(또는 넘겨받지 않았으면) 첫 글에서 새 대화를 연다.
+      const resumed = conversationFlag && conversationFile(conversationFlag) && existsSync(conversationFile(conversationFlag)!) ? conversationFlag : null;
       const run: FakeRun = { terminal: `t${++counter}`, memberId: labels["iamceo.member"] ?? null, projectId: labels["iamceo.project"] ?? null, cli, at: Date.now(),
-        argv: p.argv, env: p.env ?? {}, cwd: p.cwd, labels, sessionFlag, resumeFlag, sessionId: cli === "claude" ? sessionFlag ?? resumeFlag : null };
+        argv: p.argv, env: p.env ?? {}, cwd: p.cwd, labels, sessionFlag, resumeFlag, conversationFlag, addDir: cli === "gemini" ? flagOf(p.argv, "--add-dir") : null, settings,
+        sessionId: cli === "claude" ? sessionFlag ?? resumeFlag : cli === "gemini" ? resumed : null };
       const terminal: CoreTerminal = { address: run.terminal, argv: p.argv, cwd: p.cwd, labels, state: "live", cols: p.size?.cols ?? 160, rows: p.size?.rows ?? 50, turn: 0,
-        status: options.startState === null ? null : { state: "idle", app: cli === "claude" ? "claude-code" : "codex" }, reported: options.startState !== null, pid: 40_000 + counter };
+        status: options.startState === null ? null : { state: "idle", app: cli === "claude" ? "claude-code" : cli === "gemini" ? "antigravity" : "codex" }, reported: options.startState !== null, pid: 40_000 + counter };
       const holder: Holder = { terminal, run, history: "", screen: null, draft: "", abort: null, turn: null, sent: 0, release: null };
+      if (cli === "gemini") {
+        // 실제 agy 는 없는 대화를 이어 열라고 해도 끝나지 않는다. 경고 한 줄을 찍고 새 대화를 연다.
+        if (conversationFlag && !resumed) holder.history = `warning: conversation "${conversationFlag}" not found\n`;
+        // 이어 연 대화의 id 는 뜨자마자 상태줄에 실린다.
+        if (resumed) geminiStatus(holder);
+      }
       // 실제 Claude 는 기록이 없는 세션을 이어 열라고 하면 한 줄 남기고 끝난다.
       if (cli === "claude" && resumeFlag && !existsSync(transcriptPath(p.cwd, resumeFlag, options.claudeHome))) {
         holder.history = `No conversation found with session ID: ${resumeFlag}\n`;
@@ -356,7 +448,7 @@ export async function startFakeCore(options: FakeCoreOptions) {
   const need = (memberId: string) => { const holder = holderOf(memberId); if (!holder) throw new Error(`이 직원의 터미널이 없습니다: ${memberId}`); return holder; };
   let stopped: Promise<void> | null = null;
   return {
-    socketPath, claudeHome: options.claudeHome, contextHome: options.contextHome ?? null,
+    socketPath, claudeHome: options.claudeHome, contextHome: options.contextHome ?? null, geminiHome: options.geminiHome ?? null,
     /** 받은 RPC 전부(가로챈 것 포함). */
     calls,
     count: (method: string) => calls.filter(c => c.method === method).length,
@@ -376,6 +468,11 @@ export async function startFakeCore(options: FakeCoreOptions) {
     /** 입력칸에 사람이 쳐 둔 글. 빈 글이 아니면 CoreRunner 는 넣지 않는다(input_busy). */
     setDraft(memberId: string, draft: string) { need(memberId).draft = draft; },
     screenOf: (memberId: string) => render(need(memberId)),
+    /**
+     * 가짜 agy 가 상태줄을 다시 그린다(실제 agy 는 뜰 때와 상태가 바뀔 때마다 상태줄 명령을 돌린다). extra 는 상태줄 입력에 덧붙이거나 바꿀 칸이다
+     * (예: { subagents: [...] }, { conversation_id: "" }). 띄울 때 상태줄 명령을 받지 않은 터미널이면 아무것도 쓰지 않는다.
+     */
+    drawGeminiStatus(memberId: string, extra: Record<string, unknown> = {}) { geminiStatus(need(memberId), extra); },
     /** CLI 가 스스로 알리는 상태 보고를 바꾼다. null 은 보고가 사라진 것. 예: { state: "blocked", kind: "permission" } */
     setStatus(memberId: string, status: CoreTerminal["status"]) { need(memberId).terminal.status = status; },
     /** CLI 가 죽었다(터미널이 끝남). */
@@ -450,7 +547,7 @@ export interface CoreSetupOptions {
   notifier?: (title: string, body: string) => void;
   /** CoreRunner 의 간격·제한 시간. 기본은 빠른 시험용 값(pollMs 20 등)이다. */
   runnerDeps?: AssemblyOverrides["runnerDeps"];
-  fake?: Pick<FakeCoreOptions, "version" | "endState" | "startState">;
+  fake?: Pick<FakeCoreOptions, "version" | "endState" | "startState" | "geminiStatus">;
   /**
    * 옛 herdr 소켓 설정 자리. 주면 환경 변수(IAMCEO_HERDR_SOCKET)와 설정 파일(herdrSocket) 양쪽에 적는다.
    * 서버는 이 값을 읽지 않는다: 적혀 있어도 그 소켓을 열지 않는다는 것을 시험할 때 쓴다.
@@ -491,9 +588,9 @@ export interface CoreEnv extends CoreEnvBase {
 }
 async function assemble(opts: CoreSetupOptions) {
   const home = opts.home ?? mkdtempSync(join(tmpdir(), "iamceo-core-"));
-  const claudeHome = join(home, "claude-home"), codexHome = join(home, "codex-home");
-  for (const dir of [claudeHome, codexHome]) mkdirSync(dir, { recursive: true });
-  const core = opts.core ?? await startFakeCore({ claudeHome, contextHome: home, directives: opts.directives, script: opts.script, onTurn: opts.onTurn, ...opts.fake });
+  const claudeHome = join(home, "claude-home"), codexHome = join(home, "codex-home"), geminiHome = join(home, "gemini-home");
+  for (const dir of [claudeHome, codexHome, geminiHome]) mkdirSync(dir, { recursive: true });
+  const core = opts.core ?? await startFakeCore({ claudeHome, contextHome: home, geminiHome, directives: opts.directives, script: opts.script, onTurn: opts.onTurn, ...opts.fake });
   if (opts.core) {
     if (core.claudeHome !== claudeHome) throw new Error("이어 쓰는 가짜 core 는 같은 home 으로 만든 것이어야 합니다");
     if (opts.directives !== undefined) core.setDirectives(opts.directives);
@@ -501,8 +598,10 @@ async function assemble(opts: CoreSetupOptions) {
     if (opts.onTurn) core.setOnTurn(opts.onTurn);
   }
   // 실제 실행 파일은 어느 것도 부르지 않는다. CLI 자리는 실행하면 실패하는 파일이고(가짜 core 는 argv 를 적기만 한다), core 는 이미 떠 있는 가짜 소켓이다.
+  // Gemini(agy)도 같다: 실행 파일 자리는 /usr/bin/false, 자료 폴더는 이 홈 안의 임시 폴더다(이 Mac 의 ~/.gemini 를 보지 않는다).
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0", IAMCEO_TEST: "1", IAMCEO_CORE_SOCKET: core.socketPath, IAMCEO_CORE_BIN: "/usr/bin/false",
-    IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_HERDR_SOCKET: opts.herdrSocket ?? join(home, "no-herdr.sock"), CLAUDE_CONFIG_DIR: claudeHome, CODEX_HOME: codexHome };
+    IAMCEO_CLAUDE_BIN: "/usr/bin/false", IAMCEO_CODEX_BIN: "/usr/bin/false", IAMCEO_GEMINI_BIN: "/usr/bin/false", IAMCEO_GEMINI_HOME: geminiHome,
+    IAMCEO_HERDR_SOCKET: opts.herdrSocket ?? join(home, "no-herdr.sock"), CLAUDE_CONFIG_DIR: claudeHome, CODEX_HOME: codexHome };
   updateConfigFile({ accessCode: "code", hosts: ["127.0.0.1"] }, env);
   if (opts.herdrSocket) {
     const path = join(home, "config.json");
@@ -514,7 +613,7 @@ async function assemble(opts: CoreSetupOptions) {
   const push = opts.push ? new PushStore(db) : null;
   const store = new Store(db, bus, push ? new PushEventRecorder(push) : undefined);
   const orch: Orchestrator = createOrchestrator(config, store, {
-    runner: { claudeHome, codexHome },
+    runner: { claudeHome, codexHome, geminiHome, geminiBin: "/usr/bin/false" },
     runnerDeps: { ...FAST_RUNNER, ...opts.runnerDeps },
     orchestrator: { providerHomes: { claudeHome, codexHome }, agentTools: opts.agentTools, timings: { ...FAST_RESTART_WAKE, ...opts.timings }, notifier: opts.notifier },
   });

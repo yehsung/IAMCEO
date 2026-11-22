@@ -60,7 +60,7 @@ async function fixture(push = false) {
   const isolated = createIsolatedRuntime();
   const env = { IAMCEO_HOME: isolated.paths.iamceoHome, IAMCEO_PORT: "0",
     IAMCEO_CORE_SOCKET: isolated.socketPath, IAMCEO_HERDR_SOCKET: isolated.herdrSocketPath,
-    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin };
+    IAMCEO_CORE_BIN: isolated.bins.coreBin, IAMCEO_CLAUDE_BIN: isolated.bins.claudeBin, IAMCEO_CODEX_BIN: isolated.bins.codexBin, IAMCEO_GEMINI_BIN: isolated.bins.geminiBin };
   updateConfigFile({ accessCode: "api-compatibility", hosts: ["127.0.0.1"] }, env);
   const config = loadConfig(env);
   const bus = new Bus();

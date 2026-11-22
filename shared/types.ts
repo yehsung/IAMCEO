@@ -7,12 +7,26 @@ import type { ServerTextParam, ServerTextRef, TextLang } from "./server-text.ts"
  * 저장된 팀장·설정 행과 출시된 앱(0.2.2)이 아는 값이라 목록에만 남긴다. 그 값이 남은 팀장은 legacy_session 으로 보류된다.
  */
 export type Backend = "core" | "herdr" | "headless";
-export type CliProvider = "claude" | "codex";
+export type CliProvider = "claude" | "codex" | "gemini";
+/** 지원하는 CLI 전부. 순서는 화면에 늘어놓는 순서다. */
+export const CLI_PROVIDERS = ["claude", "codex", "gemini"] as const satisfies readonly CliProvider[];
+/**
+ * CLI 마다의 이름. short: 화면의 짧은 이름 · name: 긴 이름(제품 이름) · program: 띄우는 실행 파일의 기본 이름.
+ * gemini 는 값과 실행 파일 이름이 다르다: 띄우는 것은 Google Antigravity CLI(`agy`)다.
+ * 명령 이름이 필요한 곳은 cli 값을 그대로 쓰지 않고 반드시 program 을 쓴다("gemini" 를 명령으로 쓰면 옛 Gemini CLI 가 불린다).
+ */
+export const CLI_INFO: Record<CliProvider, { short: string; name: string; program: string }> = {
+  claude: { short: "Claude", name: "Claude Code", program: "claude" },
+  codex: { short: "Codex", name: "Codex", program: "codex" },
+  gemini: { short: "Gemini", name: "Antigravity CLI", program: "agy" },
+};
 /** bypassPermissions 묻지 않음(기본) · auto 위험한 것만 멈춤 · default 전부 승인 필요(CLI 의 승인 창에서 멈춘다. 터미널에서 직접 답한다) */
 export type PermissionMode = "bypassPermissions" | "auto" | "default";
 export const PERMISSION_MODES = ["bypassPermissions", "auto", "default"] as const;
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+/** Antigravity CLI(`agy --effort`)가 받는 값. 모델마다 고를 수 있는 값은 더 적을 수 있다(모델 목록의 efforts 가 기준). */
+export const GEMINI_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 /** CLI catalogs may introduce new per-model effort names; writes validate catalog membership. */
 export type Effort = string;
 /** manager 부장(총괄·본사 AI) · lead 팀장(직원 세션) · staff 직원(서브에이전트) */
@@ -20,6 +34,8 @@ export type Rank = "manager" | "lead" | "staff";
 /** null 이면 CLI 기본값 */
 export interface RankConfig { model: string | null; effort: Effort | null }
 export type Ranks = Record<Rank, RankConfig>;
+/** CLI 마다의 직급표가 든 Settings 칸 이름(ranks 는 Claude). */
+export type RanksKey = "ranks" | "codexRanks" | "geminiRanks";
 export type MemberKind = "root" | "conductor" | "worker";
 export type MemberOrigin = "runner" | "adopted" | "manual";
 /** working 일하는 중 · waiting 내 답 기다림 · idle 대기 · blocked 승인·확인 창 앞 · asleep 잠듦 · offline 안 보임 · error 오류 */
@@ -79,10 +95,11 @@ export type BlockedReason = "permission" | "selection" | "setup" | "usage_limit"
  * 승인 창으로 확인하지 못한 막힘(status_unknown)의 까닭. 앱은 이 값이 있으면 '터미널 열어 직접 답하기'를 보인다.
  * trust_dialog_unrecognized: 폴더 신뢰 창으로 보이지만 정확히 읽지 못했다. start_not_ready: 띄운 뒤 60초 넘게 준비를 알리지 않았다.
  * login_required(11-16): Claude 의 턴이 로그인(계정) 오류로 끝났다(blockedReason setup). 터미널에서 /login 으로 다시 로그인해 다음 턴이 돌면 풀린다.
+ * gemini_setup(0.2.10): Antigravity CLI 가 로그인·첫 설정(약관·데이터 수집 동의)에서 막혀 있다고 알렸다(blockedReason setup). 사람만 끝낼 수 있다: 서버는 그 화면에 키를 보내지 않는다.
  * 이 값을 모르는 출시 앱은 막힘을 예전처럼 보이고 설명에 관측 메모(statusObservation.error.note)를 쓴다.
  */
-export type BlockedCode = "trust_dialog_unrecognized" | "start_not_ready" | "login_required";
-export const BLOCKED_CODES: readonly BlockedCode[] = ["trust_dialog_unrecognized", "start_not_ready", "login_required"];
+export type BlockedCode = "trust_dialog_unrecognized" | "start_not_ready" | "login_required" | "gemini_setup";
+export const BLOCKED_CODES: readonly BlockedCode[] = ["trust_dialog_unrecognized", "start_not_ready", "login_required", "gemini_setup"];
 export interface StatusObservation {
   source: Backend | "manual";
   observedAt: string | null;
@@ -491,7 +508,8 @@ export interface Delivery {
 export type EvidenceVerdict = "present" | "absent" | "unknown";
 /** 공개 증거 요약. 원시 화면/프롬프트/로그 경로/lease ID는 포함하지 않는다. */
 export interface DeliveryEvidence {
-  source: "claude_log" | "codex_log" | "core_screen" | "herdr_screen" | "transport";
+  /** gemini_log: Antigravity CLI 의 훅 기록(PreInvocation)에서 읽은 근거. 앱은 이 칸을 글로 풀고 모르는 값은 '전달 근거'로 보인다(0.2.2 부터). */
+  source: "claude_log" | "codex_log" | "gemini_log" | "core_screen" | "herdr_screen" | "transport";
   verdict: EvidenceVerdict;
   location: "received_input" | "composer" | "history" | "none";
   code: string;
@@ -619,12 +637,14 @@ export interface AnswerApprovalReq { fingerprint: string; option: number; /** �
 /** 전체 설정 하나가 전부다. 프로젝트마다 따로 두지 않는다. */
 export interface Settings {
   /** PUT response only: inherited efforts cleared by a rank model change. */
-  resetEfforts?: (`${"ranks" | "codexRanks"}.${Rank}.effort`)[];
+  resetEfforts?: (`${RanksKey}.${Rank}.effort`)[];
   /** null 이면 아직 첫 실행 선택 전 */
   backend: Backend | null;
   permissionMode: PermissionMode;
   ranks: Ranks;
   codexRanks: Ranks;
+  /** Gemini(Antigravity CLI)의 직급표. 기본은 전부 null(= CLI 기본 모델). 이 칸을 모르는 출시 앱은 무시한다. */
+  geminiRanks: Ranks;
   maxConcurrentTurns: number;
   compactAtPct: number; // 기본 70
   /**
@@ -704,7 +724,8 @@ export interface TailnetHttpsStatus {
   checkedAt: string;
 }
 
-export interface RuntimeInfo { backend: "core"; core: { installed: boolean; available: boolean; version: string | null; detail: string | null }; providers: Record<CliProvider, { installed: boolean }> }
+/** providers.gemini 는 Antigravity CLI(agy)가 깔려 있을 때만 싣는다. 없으면 미설치다(agy 가 없는 Mac 에서는 이미 나간 앱이 받는 응답이 그대로다). */
+export interface RuntimeInfo { backend: "core"; core: { installed: boolean; available: boolean; version: string | null; detail: string | null }; providers: Record<"claude" | "codex", { installed: boolean }> & Partial<Record<"gemini", { installed: boolean }>> }
 
 /** 옛 herdr 실행기의 상태 칸. 서버는 herdr 를 보지 않는다: 출시된 앱(0.2.2)이 풀어 읽는 칸이라 '쓰지 않음' 고정값으로만 내려간다. */
 export interface HerdrInfo { installed: boolean; running: boolean; version: string | null; protocol: number | null; compatible: boolean; warning: string | null }
@@ -836,10 +857,11 @@ export interface CreateProjectReq {
 }
 export interface CreateMemberReq { name: string; role?: string; cli?: CliProvider; modelOverride?: string | null }
 export interface PatchProjectReq { name?: string; cwd?: string; runnerEnabled?: boolean; now?: string; archived?: boolean }
-/** PUT /api/settings. ranks·codexRanks 는 고친 칸만 보내도 된다(나머지 유지). */
-export type SettingsPatch = Partial<Omit<Settings, "ranks" | "codexRanks" | "resetEfforts">> & {
+/** PUT /api/settings. ranks·codexRanks·geminiRanks 는 고친 칸만 보내도 된다(나머지 유지). */
+export type SettingsPatch = Partial<Omit<Settings, RanksKey | "resetEfforts">> & {
   ranks?: Partial<Record<Rank, Partial<RankConfig>>>;
   codexRanks?: Partial<Record<Rank, Partial<RankConfig>>>;
+  geminiRanks?: Partial<Record<Rank, Partial<RankConfig>>>;
 };
 /** PATCH /api/members/:id. null 이면 직급 기본으로 돌아간다. */
 export interface PatchMemberReq { cli?: CliProvider; modelOverride?: string | null; effortOverride?: Effort | null }
@@ -857,6 +879,23 @@ export interface TidyResult { already: boolean }
 // ---- 직급 ----
 export const DEFAULT_RANKS: Ranks = { manager: { model: null, effort: null }, lead: { model: null, effort: null }, staff: { model: null, effort: null } };
 export const DEFAULT_CODEX_RANKS: Ranks = { manager: { model: null, effort: null }, lead: { model: null, effort: null }, staff: { model: null, effort: null } };
+export const DEFAULT_GEMINI_RANKS: Ranks = { manager: { model: null, effort: null }, lead: { model: null, effort: null }, staff: { model: null, effort: null } };
+
+/** 이 CLI 의 직급표가 든 Settings 칸. cli 가 없으면 Claude 다. */
+export function ranksKey(cli: CliProvider | undefined): RanksKey {
+  switch (cli) {
+    case "codex": return "codexRanks";
+    case "gemini": return "geminiRanks";
+    case "claude": case undefined: return "ranks";
+    // 타입 밖의 값(저장된 옛 행)은 지금까지처럼 Claude 직급표다. CLI 를 더하면 아래 줄이 컴파일 오류가 되어 여기를 고치게 한다.
+    default: { const unlisted: never = cli; void unlisted; return "ranks"; }
+  }
+}
+
+/** 이 CLI 의 직급표. CLI 마다 모델 이름이 달라 다른 CLI 의 표를 쓰면 안 된다(Claude 모델 이름이 agy --model 로 넘어간다). */
+export function ranksFor(cli: CliProvider | undefined, s: Pick<Settings, RanksKey>): Ranks {
+  return s[ranksKey(cli)];
+}
 
 /** 세션의 직급. 총괄·본사 AI 는 부장, 직원 세션은 팀장. 서브에이전트(직원)는 세션이 없다. */
 export function memberRank(kind: MemberKind): Exclude<Rank, "staff"> {
@@ -864,9 +903,23 @@ export function memberRank(kind: MemberKind): Exclude<Rank, "staff"> {
 }
 
 /** 이 직원이 써야 할 값. 직원별 지정이 직급 기본을 이긴다. */
-export function memberConfig(m: Pick<Member, "kind" | "modelOverride" | "effortOverride"> & Partial<Pick<Member, "cli">>, ranks: Ranks, codexRanks: Ranks = DEFAULT_CODEX_RANKS): RankConfig {
-  const rank = (m.cli === "codex" ? codexRanks : ranks)[memberRank(m.kind)];
+export function memberConfig(m: Pick<Member, "kind" | "modelOverride" | "effortOverride"> & Partial<Pick<Member, "cli">>, ranks: Ranks, codexRanks: Ranks = DEFAULT_CODEX_RANKS, geminiRanks: Ranks = DEFAULT_GEMINI_RANKS): RankConfig {
+  const rank = ranksFor(m.cli, { ranks, codexRanks, geminiRanks })[memberRank(m.kind)];
   return { model: m.modelOverride ?? rank.model, effort: m.effortOverride ?? rank.effort };
+}
+
+/**
+ * 그 CLI 의 세션에 넣는 서브에이전트(직원 직급) 값. Claude 는 모델·effort 둘 다, Codex 는 모델만 넣는다(effort 를 넘길 길이 없다).
+ * Gemini(Antigravity CLI)는 서브에이전트의 모델도 effort 도 넘길 길이 없어 둘 다 null 이다: geminiRanks.staff 를 고쳐도 세션을 다시 열지 않는다.
+ */
+export function staffConfig(cli: CliProvider | undefined, s: Pick<Settings, RanksKey>): RankConfig {
+  switch (cli) {
+    case "codex": return { model: s.codexRanks.staff.model, effort: null };
+    case "gemini": return { model: null, effort: null };
+    case "claude": case undefined: return { model: s.ranks.staff.model, effort: s.ranks.staff.effort };
+    // 타입 밖의 값(저장된 옛 행)은 지금까지처럼 Claude 값이다. CLI 를 더하면 아래 줄이 컴파일 오류가 되어 여기를 고치게 한다.
+    default: { const unlisted: never = cli; void unlisted; return { model: s.ranks.staff.model, effort: s.ranks.staff.effort }; }
+  }
 }
 
 /** 이름과 형식으로 자료의 모양을 정한다(서버·화면 공통). */
@@ -1044,7 +1097,7 @@ export interface UsageDayRow extends UsageAmounts {
 /** 계정 한도의 마지막 사용률. 계정 전체의 값이라 팀장별로 나누지 않는다. 초기화 시각이 지났거나 7일 넘게 못 본 값은 싣지 않는다. */
 export interface UsageLimitWindow {
   provider: CliProvider;
-  /** Claude: five_hour·seven_day(·seven_day_opus 등), Codex: primary·secondary. */
+  /** Claude: five_hour·seven_day(·seven_day_opus 등), Codex: primary·secondary, Gemini: 상태줄이 알려 준 한도 묶음 id 그대로. */
   window: string;
   /** 한도 창의 길이(분). 모르면 null. */
   windowMinutes: number | null;
@@ -1072,7 +1125,7 @@ export interface UsageReport {
 }
 
 // ---- 0.2.8: AI 계정 로그인 — 폰에서도 Claude Code·Codex 계정을 바꾸거나 다시 로그인한다(GET /api/cli-accounts, /api/cli-login) ----
-/** 로그인을 다루는 CLI. 팀장의 cli 값과 같다. */
+/** 로그인을 다루는 CLI. 팀장의 cli 값 가운데 claude·codex 만이다(gemini 는 브라우저 로그인뿐이라 여기서 다루지 않는다. 출시 앱이 모르는 값을 Claude 로 그린다). */
 export type CliAccountCli = "claude" | "codex";
 /**
  * 이 Mac 의 CLI 가 지금 쓰는 계정. 서버가 CLI 의 기록(claude auth status, ~/.codex/auth.json)으로 읽는다.

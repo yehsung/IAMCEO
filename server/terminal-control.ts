@@ -24,7 +24,7 @@ export interface SessionActivity {
 /** 터미널 조작이 Orchestrator 에서 받는 것. */
 export interface TerminalControlPort {
   readonly store: Store;
-  /** 실행 파일 경로(coreBin·claudeBin·codexBin). */
+  /** 실행 파일 경로(coreBin·claudeBin·codexBin·geminiBin). */
   readonly config: OrchestratorDeps["config"];
   readonly timings: Pick<OrchestratorTimings, "screenWaitMs" | "engineUnresponsiveMs">;
   /** 서버를 닫는 중이다. */
@@ -231,8 +231,12 @@ export class TerminalControl {
       runner ? briefly(this.coreAvailability!, this.port.timings.screenWaitMs, () => this.lastCoreAvailability ?? { ok: false, detail: "실행기 응답을 기다리는 중입니다" }) : { ok: false, detail: "core 실행기가 없습니다" },
       installed ? briefly(this.coreVersionOf(binary), this.port.timings.screenWaitMs, () => null) : null,
     ]);
+    // gemini(Antigravity CLI)는 깔려 있을 때만 싣는다: 없는 Mac 에서는 응답이 예전과 같다(이미 나간 앱이 '미설치' 줄을 보고 엉뚱한 안내를 띄우지 않게).
+    // 설정(loadConfig)이 찾아 둔 실행 파일만 본다. 실행하지 않고 있는지만 본다.
+    const geminiInstalled = !!configured.geminiBin && !!Bun.which(configured.geminiBin);
     return { backend: "core", core: { installed, available: available.ok, version, detail: available.ok ? null : available.detail ?? null }, providers: {
       claude: { installed: !!Bun.which(configured.claudeBin ?? "claude") }, codex: { installed: !!Bun.which(configured.codexBin ?? "codex") },
+      ...(geminiInstalled ? { gemini: { installed: true } } : {}),
     } };
   }
 

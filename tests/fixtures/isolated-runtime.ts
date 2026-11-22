@@ -3,7 +3,8 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { CoreRunnerOptions } from "../../server/runner/core";
 
-export interface ProviderHomes { claudeHome: string; codexHome: string; contextHome: string }
+/** geminiHome: Antigravity CLI(Gemini)의 자료 폴더 자리. 틀이 만든 providerHomes 에는 늘 있다. 손으로 만든 묶음에서는 빼도 된다. */
+export interface ProviderHomes { claudeHome: string; codexHome: string; contextHome: string; geminiHome?: string }
 export type IsolatedRuntime = ReturnType<typeof createIsolatedRuntime>;
 
 export function createIsolatedRuntime() {
@@ -11,15 +12,16 @@ export function createIsolatedRuntime() {
   const dir = realpathSync(mkdtempSync("/private/tmp/iq-"));
   const paths = Object.freeze({
     home: join(dir, "home"), iamceoHome: join(dir, "iamceo"), work: join(dir, "work"),
-    claudeHome: join(dir, "claude"), codexHome: join(dir, "codex"), contextHome: join(dir, "context"),
+    claudeHome: join(dir, "claude"), codexHome: join(dir, "codex"), geminiHome: join(dir, "gemini"), contextHome: join(dir, "context"),
     stateDir: join(dir, "state"), configDir: join(dir, "config"), bin: join(dir, "bin"),
     sessions: join(dir, "sessions"), temp: join(dir, "tmp"),
   });
   for (const path of Object.values(paths)) mkdirSync(path, { mode: 0o700 });
-  const providerHomes: ProviderHomes = Object.freeze({ claudeHome: paths.claudeHome, codexHome: paths.codexHome, contextHome: paths.contextHome });
+  const providerHomes: ProviderHomes = Object.freeze({ claudeHome: paths.claudeHome, codexHome: paths.codexHome, geminiHome: paths.geminiHome, contextHome: paths.contextHome });
   const socketPath = join(dir, "c.sock");
   const herdrSocketPath = join(dir, "no-herdr.sock");
-  const bins = Object.freeze({ coreBin: join(paths.bin, "core"), claudeBin: join(paths.bin, "claude"), codexBin: join(paths.bin, "codex"), herdrBin: join(paths.bin, "herdr") });
+  // geminiBin: Antigravity CLI(`agy`) 자리의 가짜(exit 97). 이것을 넘기지 않으면 서버 설정이 이 Mac 에 깔린 진짜 agy 를 찾는다.
+  const bins = Object.freeze({ coreBin: join(paths.bin, "core"), claudeBin: join(paths.bin, "claude"), codexBin: join(paths.bin, "codex"), geminiBin: join(paths.bin, "agy"), herdrBin: join(paths.bin, "herdr") });
   const fakeClaude = realpathSync(join(import.meta.dir, "fake-claude.ts"));
   const fakeEntry = join(dir, "fake-entry.ts");
   // The existing fake model calls fetch itself. Keep redirects and late config
@@ -68,6 +70,11 @@ await import(${JSON.stringify(fakeClaude)});
       assertOwnedPath(homes[key]);
       if (!lstatSync(homes[key]).isDirectory()) throw new Error(`${key} must be a directory`);
     }
+    // Gemini 홈은 준 때만 본다. 줬으면 다른 홈처럼 이 틀 안의 폴더여야 한다(실제 ~/.gemini 를 가리키지 못한다).
+    if (homes.geminiHome !== undefined) {
+      assertOwnedPath(homes.geminiHome);
+      if (!lstatSync(homes.geminiHome).isDirectory()) throw new Error("geminiHome must be a directory");
+    }
     return { ...homes };
   }
   function runnerOptions(homes: ProviderHomes): CoreRunnerOptions {
@@ -89,6 +96,7 @@ await import(${JSON.stringify(fakeClaude)});
       IAMCEO_HOME: paths.iamceoHome, IAMCEO_PORT: "0", IAMCEO_TEST: "1",
       IAMCEO_CORE_SOCKET: socketPath, IAMCEO_HERDR_SOCKET: herdrSocketPath,
       IAMCEO_CORE_BIN: bins.coreBin, IAMCEO_CLAUDE_BIN: bins.claudeBin, IAMCEO_CODEX_BIN: bins.codexBin,
+      IAMCEO_GEMINI_BIN: bins.geminiBin, IAMCEO_GEMINI_HOME: paths.geminiHome,
       FAKE_CLAUDE_SESSIONS: paths.sessions, FAKE_CLAUDE_LOG: join(dir, "fake.jsonl"),
     };
     for (const [key, value] of Object.entries(extra)) {

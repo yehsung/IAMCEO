@@ -2472,7 +2472,8 @@ final class AppStore: ProjectManagementStore {
     private static func empty(_ patch: SettingsPatchRequest) -> Bool {
         (try? JSONEncoder().encode(patch)) == Data("{}".utf8)
     }
-    private static func settingsPatch(base: Settings, draft: Settings) -> SettingsPatchRequest {
+    /// 서버에 보낼 변경: 기준(base)과 달라진 칸만. (시험이 직접 부른다.)
+    static func settingsPatch(base: Settings, draft: Settings) -> SettingsPatchRequest {
         var patch = SettingsPatchRequest()
         if base.permissionMode != draft.permissionMode {
             patch.permissionMode = draft.permissionMode
@@ -2489,24 +2490,24 @@ final class AppStore: ProjectManagementStore {
         if base.boardTidyHours != draft.boardTidyHours { patch.boardTidyHours = draft.boardTidyHours }
         // An older server has no such setting (nil); never send it there, the strict schema would refuse the whole save.
         if base.reportLanguage != nil, base.reportLanguage != draft.reportLanguage { patch.reportLanguage = draft.reportLanguage }
-        var ranks: [String: RankConfigPatch] = [:]
-        for key in Set(base.ranks.keys).union(draft.ranks.keys) {
-            let before = base.ranks[key], after = draft.ranks[key]
-            var rank = RankConfigPatch()
-            if before?.model != after?.model { rank.model = after?.model.map { .value($0) } ?? .null }
-            if before?.effort != after?.effort { rank.effort = after?.effort.map { .value($0) } ?? .null }
-            if rank.model != nil || rank.effort != nil { ranks[key] = rank }
+        // CLI 마다의 직급표에서 고친 칸만(모델·effort 따로). 고친 것이 없으면 그 표는 싣지 않는다.
+        for cli in RankSettingsCLI.allCases {
+            let before = base[keyPath: cli.ranksKeyPath], after = draft[keyPath: cli.ranksKeyPath]
+            var changed: [String: RankConfigPatch] = [:]
+            for key in Set(before.keys).union(after.keys) {
+                let old = before[key], new = after[key]
+                var rank = RankConfigPatch()
+                if old?.model != new?.model { rank.model = new?.model.map { .value($0) } ?? .null }
+                if old?.effort != new?.effort { rank.effort = new?.effort.map { .value($0) } ?? .null }
+                if rank.model != nil || rank.effort != nil { changed[key] = rank }
+            }
+            guard !changed.isEmpty else { continue }
+            switch cli {
+            case .claude: patch.ranks = changed
+            case .codex: patch.codexRanks = changed
+            case .gemini: patch.geminiRanks = changed
+            }
         }
-        if !ranks.isEmpty { patch.ranks = ranks }
-        var codexRanks: [String: RankConfigPatch] = [:]
-        for key in Set(base.codexRanks.keys).union(draft.codexRanks.keys) {
-            let before = base.codexRanks[key], after = draft.codexRanks[key]
-            var rank = RankConfigPatch()
-            if before?.model != after?.model { rank.model = after?.model.map { .value($0) } ?? .null }
-            if before?.effort != after?.effort { rank.effort = after?.effort.map { .value($0) } ?? .null }
-            if rank.model != nil || rank.effort != nil { codexRanks[key] = rank }
-        }
-        if !codexRanks.isEmpty { patch.codexRanks = codexRanks }
         return patch
     }
 }

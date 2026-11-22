@@ -1,0 +1,94 @@
+{
+ "memberId": "m_FH7nwxgiIbko",
+ "summary": {
+  "memberId": "m_FH7nwxgiIbko",
+  "undeliveredCount": 2,
+  "unknownCount": 0,
+  "deliveringCount": 0,
+  "checkingCount": 0,
+  "needsOwnerCount": 0,
+  "waitingBehindCount": 0,
+  "oldestAt": "2026-11-21T10:04:17.769Z",
+  "reasons": [],
+  "waitReason": "unknown",
+  "waitingSince": "2026-11-21T10:04:17.769Z",
+  "waitReasons": [
+   {
+    "waitReason": "unknown",
+    "waitingSince": "2026-11-21T10:04:17.769Z",
+    "count": 2
+   }
+  ]
+ },
+ "items": [
+  {
+   "waitReason": "unknown",
+   "waitingSince": "2026-11-21T10:04:17.772Z",
+   "id": "dl_c7bfgXJ63ZZx",
+   "deliveryId": "dl_c7bfgXJ63ZZx",
+   "messageId": null,
+   "memberId": "m_FH7nwxgiIbko",
+   "projectId": "p_taF4X7sGZvjw",
+   "kind": "instruction",
+   "status": "held",
+   "phase": "none",
+   "holdReason": "blocked",
+   "reason": null,
+   "note": "전달 대기",
+   "version": 1,
+   "createdAt": "2026-11-21T10:04:17.772Z",
+   "lastCheckedAt": null,
+   "nextCheckAt": null,
+   "autoAttempts": 0,
+   "evidence": [
+    {
+     "source": "gemini_log",
+     "verdict": "present",
+     "location": "received_input",
+     "code": "gemini_user_input",
+     "complete": true,
+     "checkedAt": "2026-11-21T10:04:17.772Z"
+    }
+   ],
+   "recommendation": null,
+   "allowedActions": [
+    "recheck",
+    "stop_retry"
+   ],
+   "ref": null,
+   "preview": "업무 지시"
+  },
+  {
+   "waitReason": "unknown",
+   "waitingSince": "2026-11-21T10:04:17.769Z",
+   "id": "dl_4vUssC8MH0Nx",
+   "deliveryId": "dl_4vUssC8MH0Nx",
+   "messageId": "57b0d14c-e256-49a1-9452-b7b467543bda",
+   "memberId": "m_FH7nwxgiIbko",
+   "projectId": "p_taF4X7sGZvjw",
+   "kind": "user_message",
+   "status": "queued",
+   "phase": "none",
+   "holdReason": null,
+   "reason": null,
+   "note": "전달 대기",
+   "version": 1,
+   "createdAt": "2026-11-21T10:04:17.769Z",
+   "lastCheckedAt": null,
+   "nextCheckAt": null,
+   "autoAttempts": 0,
+   "evidence": [],
+   "recommendation": null,
+   "allowedActions": [
+    "recheck",
+    "stop_retry"
+   ],
+   "ref": {
+    "type": "message",
+    "id": "57b0d14c-e256-49a1-9452-b7b467543bda"
+   },
+   "preview": "지시"
+  }
+ ],
+ "nextBefore": null
+}

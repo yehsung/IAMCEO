@@ -548,7 +548,7 @@ async function buildSample(lang: Lang): Promise<string> {
     const raw = {
       format: FORMAT,
       baseTime: new Date(BASE).toISOString(),
-      capabilities: await read("/api/capabilities"),
+      capabilities: sampleCapabilities(await read("/api/capabilities")),
       models: await read("/api/models"),
       runtime: await read("/api/runtime"),
       bootstrap,
@@ -743,4 +743,13 @@ ${english}
 """##
 }
 `;
+}
+
+/**
+ * 0.2.10: 앱 안의 샘플 서버(SampleServer.swift)는 창 묶음(window=1)·보관 상태 lite 를 처리하지 않는다.
+ * 그래서 샘플 자료에는 이 두 기능 표시를 싣지 않아, 샘플 모드의 앱은 예전 묶음 길을 그대로 쓴다.
+ */
+function sampleCapabilities(response: { capabilities?: Record<string, unknown> }) {
+  const { windowedState: _windowed, archiveLite: _archiveLite, ...capabilities } = response.capabilities ?? {};
+  return { ...response, capabilities };
 }

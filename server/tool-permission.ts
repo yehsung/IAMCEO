@@ -128,8 +128,9 @@ interface Entry {
    * 터미널에서 먼저 답할 수 없고, 같은 팀장의 서브에이전트가 띄운 다른 창(blocked)이 닫힌 것을 이 카드의 답으로 읽으면 안 된다.
    * 1.5.14 대화형 실측(훅 없이): agy 자기 승인 창이 뜨면 OSC 는 blocked·permission(msg 'Approve Bash: …'·'Approve Edit: Write: …'), 상태줄은 agent_state tool_use·
    * tool_confirmation_pending true 다(gemini-screen.ts geminiApprovalDialog). 서버는 그 창에 키를 보내지 않는다(대표가 터미널에서 답한다).
-   * UNVERIFIED-INTERACTIVE: '훅이 붙잡는 동안 창이 뜨지 않는다'는 헤드리스 실측(630초 대기 뒤 실행)과 훅의 동기 계약에 기댄다. 대화형 화면에서 훅이 붙잡는 동안
-   * 무엇이 보이는지(OSC 상태, 상태줄 agent_state·tool_confirmation_pending), Esc 로 턴을 멈추면 훅이 끊기는지(카드가 '터미널 쪽이 끝남'으로 닫히는지)는 아직 못 봤다.
+   * 1.5.14 대화형 실측(격리 서버 + 실제 agy, 11-23, 견본 srv-hook-wait.txt): 훅이 카드의 답을 4분 붙잡는 동안 agy 자기 승인 창은 뜨지 않았다. 화면은 '○ Running (pwd)'
+   * 와 진행 줄 'Running command...', OSC 는 working, 상태줄 agent_state 는 working(tool_use 아님)이었고, 허용하자 명령이 돌고 턴이 done 으로 끝났다.
+   * UNVERIFIED-INTERACTIVE: 훅이 붙잡는 동안 Esc 로 턴을 멈추면 훅이 끊기는지(카드가 '터미널 쪽이 끝남'으로 닫히는지)는 아직 못 봤다.
    */
   terminalAnswerable: boolean;
   grace: ReturnType<typeof setTimeout> | null;

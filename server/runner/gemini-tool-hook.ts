@@ -8,12 +8,16 @@
 //    다른 길은 실측으로 닫혔다: --settings 는 hooks 를 받지 않는다(`Error: --settings: unknown setting "hooks"`, 규칙·MCP 칸도 문서에 없다).
 //    주입 폴더를 프로젝트보다 뒤로 정렬되는 곳에 두려면 IAMCEO 홈 밖(지속되지 않는 임시 폴더)이나 대표의 프로젝트 옆에 둬야 해 하지 않는다.
 //    규칙 첫 조각에도 작업 폴더를 적는다(gemini-inject.ts).
+//    UNVERIFIED-INTERACTIVE(문제 있음): 11-23 대화형 실측(격리 서버 + 실제 agy, 권한 '매번 묻기', 결재함에서 허용 → auto_approve + overwrite Cwd)에서
+//    agy 는 'A pre-tool hook changed the arguments … Changed: Cwd.' 를 기록했는데 pwd 는 여전히 주입 폴더였다. 헤드리스 e4(auto 모드)도 같은 증상이고,
+//    헤드리스 e3·e5(allow·auto_approve)는 프로젝트였다. 대화형에서 Cwd 바꿔 쓰기가 듣는 조건(지속되는 셸·모드·판정 종류)을 확인하고 고쳐야 한다.
 // 2) 결재함 도구 승인(K(E2), Claude 의 PermissionRequest 훅 permission-hook.ts 와 같은 결재 카드). agy 에는 '승인 창을 띄우려 할 때만' 오는 훅이 없고,
 //    PreToolUse 는 정책 판단 전에 모든 호출에 온다. 그래서 훅이 도구의 종류(geminiKind: 명령·작업 폴더 안/밖 파일 쓰기·밖 읽기·연결 도구·웹)를 정해
 //    서버(/agent/permission)에 올리고, 서버가 지금 모드(상태줄의 cycle_mode)에서 agy 가 물을 종류일 때만 카드를 연다(tool-permission.ts geminiNeedsCard).
 //    대표가 허용하면 `auto_approve`(agy 가 물으려던 것을 승인. 대표가 agy 에 둔 거절 규칙은 그대로 듣는다), 거절하면 `deny` + 까닭(모델이 받는다).
 //    카드가 필요 없거나 답이 없으면(닫힘·시간 초과·서버 없음) 승인 판정 없이 끝난다 = agy 의 원래 창(오늘의 동작). 읽기 전용 도구(작업 폴더 안 읽기)와
-//    IAMCEO 의 MCP 도구(call_mcp_tool ServerName=iamceo, --settings 의 허용 규칙)는 서버에 묻지 않는다.
+//    IAMCEO 의 MCP 도구(call_mcp_tool ServerName=iamceo, --settings 의 허용 규칙), agy 자기 폴더의 연결 도구 정의 읽기(<agy 홈>/mcp/…, 1.5.14 대화형 실측:
+//    agy 는 묻지 않는다)는 서버에 묻지 않는다.
 //    1.5.14 실측: auto_approve·deny 가 run_command·write_file·edit_file·call_mcp_tool·invoke_subagent 에 듣고, 서브에이전트의 도구 호출도 이 훅을 거치며,
 //    훅을 630초 붙잡아도 agy 가 기다린다(제한 시간 700). 한 대화 안에서는 훅이 하나씩 돈다(부모와 서브에이전트는 동시에 돌 수 있다).
 // 3) 서브에이전트 단계. 대표가 단계(shared/types.ts GEMINI_SUBAGENT_TIERS: flash_lite·flash·pro)를 골랐으면 invoke_subagent 의 Model 을 그 단계로 바꿔 쓴다
@@ -138,10 +142,16 @@ try {
     return at.some((form) => within(form, tempForms)) ? 'temp' : 'outside';
   };
   const worst = () => paths.map(place).reduce((a, b) => (a === 'outside' || b === 'outside' ? 'outside' : a === 'temp' || b === 'temp' ? 'temp' : 'inside'), 'inside');
+  // agy 자기 자료 폴더의 연결 도구 정의(<agy 홈>/mcp/<서버>/<도구>.json). 홈은 훅 입력의 artifactDirectoryPath(<agy 홈>/brain/<대화 id>)로 안다.
+  // 1.5.14 대화형 실측: 도구 인자가 틀리면 모델이 그 정의 파일을 read_file 로 읽고, agy 는 매번 묻기 모드에서도 묻지 않는다('Explored 1 file (post.json)').
+  // 결재함에 올리면 대표가 답할 때까지 팀장이 멈춘다(보고 post 마다). 읽기만 묻지 않는다(쓰기는 그대로 종류를 정한다).
+  const artifacts = absText(input.artifactDirectoryPath) ? resolve(input.artifactDirectoryPath) : null;
+  const agyMcp = artifacts && basename(dirname(artifacts)) === 'brain' ? forms(join(dirname(dirname(artifacts)), 'mcp')) : [];
+  const ownDefinition = () => agyMcp.length > 0 && paths.length > 0 && paths.every((path) => forms(resolve(base, path)).some((form) => within(form, agyMcp)));
   let kind = null;
   if (name === 'run_command') kind = 'command';
   else if (WRITE_TOOLS.includes(name)) { const at = worst(); kind = at === 'inside' ? 'edit' : at === 'temp' ? 'edit_temp' : 'edit_outside'; }
-  else if (READ_TOOLS.includes(name)) { const at = worst(); kind = at === 'inside' ? null : at === 'temp' ? 'read_temp' : 'read_outside'; }
+  else if (READ_TOOLS.includes(name)) { const at = worst(); kind = at === 'inside' || ownDefinition() ? null : at === 'temp' ? 'read_temp' : 'read_outside'; }
   else if (name === 'call_mcp_tool') kind = args.ServerName === 'iamceo' ? null : 'mcp';
   else if (WEB_TOOLS.includes(name)) kind = 'web';
   if (!kind) finish();

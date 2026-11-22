@@ -254,6 +254,17 @@ describe("결재함 승인(스크립트를 실제로 돌리고, 서버는 가짜
     expect(await kindOf("read_url_content", { Url: "https://example.com" })).toBe("web");
     // 주입 폴더 쓰기는 서버에 묻지 않고 막는다.
     expect(await kindOf("write_file", { Path: join(t.injectDir, "x.txt"), Content: "x" })).toBeNull();
+    // 1.5.14 대화형 실측(격리 서버 + 실제 agy, 11-23): iamceo/post 인자가 틀리자 모델이 agy 자기 폴더의 도구 정의를 읽었고(read_file
+    // ~/.gemini/antigravity-cli/mcp/iamceo/post.json), agy 는 매번 묻기에서도 묻지 않는다. 결재함 카드를 열지 않는다(예전에는 read_outside 카드가 떠 팀장이 멈췄다).
+    expect(await kindOf("read_file", { Path: "/Users/dev/.gemini/antigravity-cli/mcp/iamceo/post.json" })).toBeNull();
+    expect(await kindOf("view_file", { AbsolutePath: "/Users/dev/.gemini/antigravity-cli/mcp/github/create_issue.json" })).toBeNull();
+    // 그 밖의 agy 자료(설정 등)와 그 폴더에 쓰기는 지금처럼 밖이다.
+    expect(await kindOf("read_file", { Path: "/Users/dev/.gemini/antigravity-cli/settings.json" })).toBe("read_outside");
+    expect(await kindOf("write_file", { Path: "/Users/dev/.gemini/antigravity-cli/mcp/iamceo/post.json", Content: "x" })).toBe("edit_outside");
+    // 훅 입력에 자료 폴더가 없으면 알아볼 근거가 없다(밖 읽기).
+    const before = server.seen.length;
+    await runHook(t.command, preToolUse("read_file", { Path: "/Users/dev/.gemini/antigravity-cli/mcp/iamceo/post.json" }, t.workspaces, { artifactDirectoryPath: undefined }));
+    expect(server.seen.length > before ? server.seen.at(-1)!.body.geminiKind : null).toBe("read_outside");
   });
   test("HTTP_PROXY 가 있어도 이 Mac 의 서버로 바로 간다(팀장 열쇠가 실린 요청이 프록시로 나가지 않는다)", async () => {
     const server = fakeServer(() => ({ id: "d3", state: "allow" }));

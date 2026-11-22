@@ -1,7 +1,7 @@
 {
   "provider": "gemini",
   "version": "1.5.14",
-  "source": "2026-11-23 00:14~00:44 실측(대표가 첫 설정을 마친 이 Mac 의 agy 1.5.14). 격리 herdr-core 0.1.18(160x50, terminal.read lines 0)에 IAMCEO providers.ts geminiLaunch 모양의 인자(--add-dir <주입 폴더> --settings <geminiSettings 모양> --model gemini-3.8-flash --effort low)로 띄웠고 바닥줄은 IAMCEO 상태줄 래퍼 줄이다(입력 JSON 은 statusline-*.json 으로 따로 남김). srv-* 는 격리 IAMCEO 서버(wave12 2bcc677, 실제 agy)의 GET /api/members/:id/screen. hooks.jsonl 은 agy 가 훅 명령에 준 입력 원본({event, input})이다. osc7501.txt 는 agy 가 낸 OSC 7501 본문(ESC ] 7501 ; … BEL 의 가운데)이다. 바꾼 것: 작업 폴더 → /private/tmp/iamceo-cli-fixture/work, 홈 → /Users/user, 계정 메일 → user@example.com, agy 대화 id·오류 id → 가짜 UUID(aaaaaaaa-…·eeeeeeee-…), OSC msg 안의 임시 폴더 경로 → 견본 폴더(원래는 약 100자에서 …로 잘림). screen 의 osc 는 그 화면 때의 herdr-core terminal.get status(msg 는 풀린 글)다.",
+  "source": "2026-11-23 00:14~00:44 실측(대표가 첫 설정을 마친 이 Mac 의 agy 1.5.14). 격리 herdr-core 0.1.18(160x50, terminal.read lines 0)에 IAMCEO providers.ts geminiLaunch 모양의 인자(--add-dir <주입 폴더> --settings <geminiSettings 모양> --model gemini-3.8-flash --effort low)로 띄웠고 바닥줄은 IAMCEO 상태줄 래퍼 줄이다(입력 JSON 은 statusline-*.json 으로 따로 남김). srv-* 는 격리 IAMCEO 서버(wave12 2bcc677, 실제 agy)의 GET /api/members/:id/screen. hooks.jsonl 은 agy 가 훅 명령에 준 입력 원본({event, input})이다. osc7501.txt 는 agy 가 낸 OSC 7501 본문(ESC ] 7501 ; … BEL 의 가운데)이다. 바꾼 것: 작업 폴더 → /private/tmp/iamceo-cli-fixture/work, 홈 → /Users/user, 계정 메일 → user@example.com, agy 대화 id·오류 id → 가짜 UUID(aaaaaaaa-…·eeeeeeee-…), OSC msg 안의 임시 폴더 경로 → 견본 폴더(원래는 약 100자에서 …로 잘림). screen 의 osc 는 그 화면 때의 herdr-core terminal.get status(msg 는 풀린 글)다. srv-hook-wait.txt 는 같은 날 01:30 이 보정 브랜치(wave12-cal)로 띄운 격리 서버의 화면이다(작업 폴더 경로만 바꿈).",
   "fixtures": [
     {
       "file": "idle-default.txt",
@@ -563,6 +563,24 @@
           "selected": 0,
           "hint": "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command"
         },
+        "folderTrust": false
+      }
+    },
+    {
+      "file": "srv-hook-wait.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "bannerVersion": true,
+      "osc": {
+        "state": "working"
+      },
+      "note": "격리 IAMCEO 서버(wave12-cal, 실제 agy, 권한 '매번 묻기')에서 run_command 의 PreToolUse 훅이 결재함 카드의 답을 기다리는 동안(2026-11-23 01:30~01:34). agy 자기 승인 창은 뜨지 않고 '○ Running (pwd)' + 진행 줄 'Running command...', OSC working, 상태줄 agent_state working(tool_use 아님). 카드에서 허용하자 명령이 돌고 턴이 done 으로 끝났다.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Running command...",
+        "approval": null,
         "folderTrust": false
       }
     },

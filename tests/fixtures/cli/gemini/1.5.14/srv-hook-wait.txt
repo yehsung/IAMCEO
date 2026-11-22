@@ -1,0 +1,21 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.14
+     ▀▀▀▀▀▀       Gemini 3.8 Flash (Low)
+    ▀▀▀▀▀▀▀▀      /private/tmp/iamceo-cli-fixture/work
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.
+
+  [대표 직접] "시험입니다. run_command 도구로 셸 명령 pwd 를 한 번 실행하고, 그 결과 한 줄만 답하세요. 다른 도구는 쓰지 마세요."
+  #70c18805-2266-47f9-ab27-a9db2c9ffd2c
+  #iamceo_triJZmJLKe_vtwKrLA_qfw
+  #iamceo_b_oN6nuCR8pKmHVcQy2KR7GQ
+
+○ Running (pwd) (ctrl+o to expand)
+⣾  Running command...
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 2%

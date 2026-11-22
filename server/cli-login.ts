@@ -159,7 +159,10 @@ const GEMINI_CODE_PROMPT = /authorization code/i;
 const GEMINI_SETUP_PROMPT = /Terms of Service|Data Use|color scheme|Finish setup|I agree to/i;
 /** 로그인 방식을 고르는 대화형 화면(Google Cloud 프로젝트·고급 SSO 등)이나, Google 계정 로그인이 아닌 설정(API 키·ADC·게이트웨이). 앱에서 다루지 않는다. */
 const GEMINI_TERMINAL_ONLY = /Select login method|Select Google Cloud sign-in method|interactive Google sign-in isn.t available/i;
-/** 로그인되어 있지 않다는 agy 의 글(`agy models` 의 `Error: authentication failed: …`, 헤드리스의 `authentication required`). */
+/**
+ * 로그인되어 있지 않다는 agy 의 글(`agy models` 의 `Error: authentication failed: …`, 헤드리스의 `authentication required`).
+ * UNVERIFIED-INTERACTIVE: 로그인된 상태의 `agy models`(모델 23줄, 종료 0)만 실측했다. 로그아웃 상태의 글·종료 코드는 역분석 추론이다.
+ */
 const GEMINI_SIGNED_OUT = /authentication (?:failed|required)|not (?:signed|logged) in|sign in required|please log back in/i;
 
 /** 로그인 주소(https, accounts.google.com, 돌아오는 곳이 GEMINI_REDIRECT, state 있음)와 그 state. 아니면 null. */

@@ -60,6 +60,9 @@ export type GeminiEffectiveMode = "default" | "accept-edits" | "auto" | "fallbac
  * - 명령: default·accept-edits 는 매번 묻는다(request-review). auto·fallback 은 샌드박스 안이면 묻지 않고 밖은 agy 의 평가기·창이 정한다:
  *   훅에서는 어느 쪽인지 모르므로 카드를 열지 않고 agy 에 맡긴다(위험한 명령은 오늘처럼 agy 의 창 = 터미널 승인 대기).
  * - 작업 공간 안 파일 쓰기: default 만 묻는다(diff 검토). 임시 폴더: auto·fallback 은 묻지 않는다. 그 밖의 폴더·IAMCEO 밖의 연결 도구·웹: 늘 묻는다.
+ * UNVERIFIED-INTERACTIVE: 이 표는 문서와 헤드리스 실측(묻기 → 자동 거절)으로 만들었다. 대화형 화면에서 agy 가 실제로 창을 띄우는 종류(특히 auto 의
+ * 임시 폴더·웹, accept-edits 의 명령)는 대표의 agy 첫 설정 뒤 확인한다. 대표가 agy 에 둔 허용 규칙(settings.json permissions.allow)은 보지 않는다:
+ * 그 규칙으로 agy 가 묻지 않을 도구에도 카드가 열릴 수 있다(허용하면 그대로 돈다).
  */
 const GEMINI_ASKS: Record<GeminiEffectiveMode, ReadonlySet<GeminiToolKind>> = {
   default: new Set(GEMINI_TOOL_KINDS),
@@ -122,6 +125,8 @@ interface Entry {
   /**
    * '승인 창이 닫혔으니 터미널에서 먼저 답했다'로 닫을 수 있는 카드인가. Gemini 카드는 아니다: agy 는 훅이 붙잡는 동안 그 호출의 창을 띄우지 않으므로
    * 터미널에서 먼저 답할 수 없고, 같은 팀장의 서브에이전트가 띄운 다른 창(blocked)이 닫힌 것을 이 카드의 답으로 읽으면 안 된다.
+   * UNVERIFIED-INTERACTIVE: '훅이 붙잡는 동안 창이 뜨지 않는다'는 헤드리스 실측(630초 대기 뒤 실행)과 훅의 동기 계약에 기댄다. 대화형 화면에서 그동안
+   * 무엇이 보이는지(OSC 상태, 상태줄 agent_state·tool_confirmation_pending), Esc 로 턴을 멈추면 훅이 끊기는지(카드가 '터미널 쪽이 끝남'으로 닫히는지) 확인한다.
    */
   terminalAnswerable: boolean;
   grace: ReturnType<typeof setTimeout> | null;

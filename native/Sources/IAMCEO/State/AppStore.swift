@@ -572,7 +572,9 @@ final class AppStore: ProjectManagementStore {
         settingsEdit = nil; settingsConflict = nil; todoWrites = [:]; operationResults = [:]; batchResults = [:]
         leaseReceiptOrder = [:]; absentOperations = []; announcedUnresolved = []; writeContextGeneration = UUID()
         strictWriteContract = false; syncSupported = false; realtimeSupported = false; capabilitiesLoaded = false; serverTakesRevisions = false
-        serverArchiveLite = false; resetWindowExtras()
+        // 0.2.10: 받아 둔 옛 판·'더 보기'는 다른 서버로 바꿀 때만 비운다. 같은 서버로 다시 붙으면 열어 둔 자료 화면이 그대로 쓴다.
+        serverArchiveLite = false
+        if sameServer { settleWindowExtrasForReconnect() } else { resetWindowExtras() }
         capabilityProbeFailed = false; seededBootstrap = nil; fullPassCursor = nil; lastSnapshotCursor = nil; pushRetryAttempt = 0
         receivedCursor = nil; appliedSnapshotCursor = nil; highestRelevantSeq = 0
         socketFailures = 0; restFailures = 0; nextSnapshotAt = .zero
@@ -832,9 +834,11 @@ final class AppStore: ProjectManagementStore {
         cancelHistoryLoad()
         historyVisible = false; historyOwners = []; historyTarget = nil
         deliveryPages = [:]; deliveryErrors = [:]; deliveryResults = [:]; deliveryFlights = [:]; deliveryChecking = []; deliveryRefreshPending = []
+        let changesProject = selectedProjectID != id || isArchive != archived
         isArchive = archived
         selectedProjectID = id
-        resetWindowExtras()
+        // 알림으로 같은 프로젝트를 다시 고르면(navigationToken) 받아 둔 옛 판·'더 보기'를 그대로 둔다.
+        if changesProject { resetWindowExtras() }
         state = mergingRecentMessageDelivery(projectCache.value(projectID: id, archived: archived))
         saveNavigation()
         writeRevisions?.members = nil; writeRevisions?.todos = nil
@@ -1511,10 +1515,10 @@ final class AppStore: ProjectManagementStore {
             }
             return result != nil
         }
-        guard canWrite, let revision = writeRevisions?.todos?[todo.id],
-              reviewedTodos[todo.id].map({ Self.same($0, todo) }) == true,
-              todoWrites[todo.id] != .checking, todoWrites[todo.id] != .sending else {
-            errorMessage = String(localized: "최신 업무 상태를 확인한 뒤 변경하세요."); return false
+        guard canWrite, todoWrites[todo.id] != .checking, todoWrites[todo.id] != .sending, let revision = reviewedTodoRevision(todo) else {
+            errorMessage = String(localized: "최신 업무 상태를 확인한 뒤 변경하세요.")
+            if canWrite, todoWrites[todo.id] != .checking, todoWrites[todo.id] != .sending { recoverOlderTodoReview(todo) }
+            return false
         }
         return await submitTodoCompletion(PendingTodo(id: todo.id, namespace: writeNamespace, revision: revision,
                                                       done: done, note: note, fileIds: fileIDs, outcome: outcome))
@@ -1527,9 +1531,7 @@ final class AppStore: ProjectManagementStore {
             }
             return result != nil
         }
-        guard canWrite, let revision = writeRevisions?.todos?[todo.id],
-              reviewedTodos[todo.id].map({ Self.same($0, todo) }) == true,
-              todoWrites[todo.id] != .checking, todoWrites[todo.id] != .sending else {
+        guard canWrite, todoWrites[todo.id] != .checking, todoWrites[todo.id] != .sending, let revision = reviewedTodoRevision(todo) else {
             errorMessage = String(localized: "최신 업무 상태를 확인한 뒤 변경하세요."); return false
         }
         return await submitTodoCompletion(PendingTodo(id: todo.id, namespace: writeNamespace, revision: revision,
@@ -1541,9 +1543,31 @@ final class AppStore: ProjectManagementStore {
         guard strictWriteContract, canWrite,
               let pending = journal.todos[Self.scoped(writeNamespace, todo.id)],
               todoWrites[todo.id] != .sending,
-              writeRevisions?.todos?[todo.id] == pending.revision,
-              reviewedTodos[todo.id].map({ Self.same($0, todo) }) == true else { return false }
+              reviewedTodoRevision(todo) == pending.revision else { return false }
         return await submitTodoCompletion(pending)
+    }
+
+    /// 화면에 보인 할 일이 서버가 그 판 번호에서 가진 값과 같으면 쓰기에 실을 판 번호, 아니면 nil.
+    /// 창 안의 할 일은 쓰기 판 번호와 같은 스냅숏의 값(reviewedTodos)과 견준다. 0.2.10 창 묶음에서 '더 보기'로 받은 창 밖 할 일은
+    /// 받은 값과 그때의 판 번호(olderDone, 서버가 같은 행에서 읽은 짝)가 지금 판 번호와 같을 때만 쓴다.
+    func reviewedTodoRevision(_ todo: Todo) -> Int? {
+        guard let revision = writeRevisions?.todos?[todo.id] else { return nil }
+        if let reviewed = reviewedTodos[todo.id] { return Self.same(reviewed, todo) ? revision : nil }
+        guard state?.window != nil, olderDone.projectID == selectedProjectID, olderDone.todoRevisions[todo.id] == revision,
+              let older = olderDone.todos.first(where: { $0.id == todo.id }), Self.same(older, todo) else { return nil }
+        return revision
+    }
+
+    /// 창 밖 할 일의 쓰기를 확인하지 못했을 때 다시 읽기: 받은 판 번호가 지금 것보다 새것이면 상태(판 번호)를 다시 읽고,
+    /// 아니면(그 사이 바뀌었거나 짝이 없다) 더 받은 끝난 할 일을 지금 창 끝부터 새로 받는다. 다음 체크는 맞는 판 번호로 간다.
+    private func recoverOlderTodoReview(_ todo: Todo) {
+        guard state?.window != nil, reviewedTodos[todo.id] == nil, let current = writeRevisions?.todos?[todo.id],
+              olderDone.projectID == selectedProjectID, olderDone.todos.contains(where: { $0.id == todo.id }) else { return }
+        if let received = olderDone.todoRevisions[todo.id], received > current {
+            Task { [weak self] in await self?.refreshWriteContext() }
+        } else {
+            Task { [weak self] in await self?.reloadOlderDoneTodos() }
+        }
     }
 
     private func submitTodoCompletion(_ pending: PendingTodo) async -> Bool {

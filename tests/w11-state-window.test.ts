@@ -153,6 +153,19 @@ describe("창 묶음(window=1)", () => {
     expect([...expectedDone.slice(0, STATE_WINDOW_DONE), ...paged].map(t => t.id)).toEqual(expectedDone.map(t => t.id));
     // 처음부터 받으면 창과 같은 앞부분이다.
     expect(store.listDoneTodosPage(project.id).items.map(t => t.id)).toEqual(expectedDone.slice(0, STATE_WINDOW_DONE).map(t => t.id));
+    // 쪽은 실린 할 일마다 쓰기 판 번호를 함께 준다(sync 의 revisions.todos 와 같은 값). 앱은 이 값으로 창 밖 할 일의 체크를 푼다.
+    const outside = expectedDone[STATE_WINDOW_DONE + 1]!;
+    store.db.query("UPDATE todos SET revision = 7 WHERE id = ?").run(outside.id);
+    const first = store.listDoneTodosPage(project.id, { cursor: state.window!.todosCursor!, limit: 5 });
+    const revisions = store.syncRevisions(project.id).todos;
+    expect(Object.keys(first.revisions).sort()).toEqual(first.items.map(t => t.id).sort());
+    for (const todo of first.items) expect(first.revisions[todo.id]).toBe(revisions[todo.id]!);
+    expect(first.revisions[outside.id]).toBe(7);
+    // 그 판 번호로 창 밖 할 일의 체크를 풀 수 있고, 같은 판 번호를 다시 쓰면 충돌이다.
+    expect(store.setTodoDoneCas(outside.id, false, 7).todo.done).toBe(false);
+    expect(() => store.setTodoDoneCas(outside.id, true, 7)).toThrow(expect.objectContaining({ status: 409 }));
+    // 업무 쪽에는 쓰기가 없어 판 번호를 싣지 않는다.
+    expect(store.listDoneWorkPage(project.id)).not.toHaveProperty("revisions");
   });
 
   test("24시간 안에 끝낸 것이 50개보다 많으면 그것 전부를 싣는다. 끝난 것이 적으면 쪽 위치가 없다", () => {
@@ -281,6 +294,8 @@ describe("HTTP", () => {
     const page = await (await get(`/api/projects/${project.id}/todos/done?cursor=${windowed.state.window.todosCursor}&limit=5`)).json();
     expect(page.items).toHaveLength(5);
     expect(typeof page.nextCursor).toBe("string");
+    expect(Object.keys(page.revisions).sort()).toEqual(page.items.map((t: Todo) => t.id).sort());
+    for (const todo of page.items as Todo[]) expect(page.revisions[todo.id]).toBe(windowed.revisions.todos[todo.id]);
     expect((await get(`/api/projects/${project.id}/work/done?cursor=bad!`)).status).toBe(400);
     expect((await get(`/api/projects/${project.id}/work/done?limit=500`)).status).toBe(400);
     expect((await get(`/api/projects/${project.id}/work/done?other=1`)).status).toBe(400);

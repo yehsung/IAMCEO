@@ -25,12 +25,18 @@ enum FileLinks {
     }
     /// Old report hash links are internal only after both project and file membership have been checked.
     static func fileID(_ url: URL, projectID: String?, files: [FileDoc]) -> String? {
+        guard let id = hashLinkFileID(url, projectID: projectID),
+              files.contains(where: { $0.id == id && $0.projectId == projectID }) else { return nil }
+        return id
+    }
+    /// 옛 해시 링크(#/p/<프로젝트>/files/<id>)가 지금 프로젝트를 가리키면 그 id. 자료 목록은 보지 않는다:
+    /// 0.2.10 창 묶음은 옛 판을 목록에 싣지 않아, 목록에 없는 id 는 자료 화면이 판 묶음을 받아 같은 프로젝트의 판인지 확인한다.
+    static func hashLinkFileID(_ url: URL, projectID: String?) -> String? {
         guard let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment else { return nil }
         let parts = fragment.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 5, parts[0].isEmpty, parts[1] == "p", parts[3] == "files",
               let project = String(parts[2]).removingPercentEncoding, project == projectID,
-              let id = String(parts[4]).removingPercentEncoding,
-              files.contains(where: { $0.id == id && $0.projectId == project }) else { return nil }
+              let id = String(parts[4]).removingPercentEncoding, !id.isEmpty else { return nil }
         return id
     }
     @MainActor static func viewedFileID(router: Router) -> String? {

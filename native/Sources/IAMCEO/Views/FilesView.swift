@@ -68,6 +68,10 @@ struct FilesView: View {
     @State private var listSharing: FileResource?
     @State private var listActionError: String?
     @State private var host: FileHostConnection?
+    /// 0.2.10 창 묶음: 링크로 연 자료가 목록에 없을 때 판 묶음 받기. 마친 열쇠(chainKey)와 실패 까닭, '다시 시도' 횟수.
+    @State private var chainSettled: String?
+    @State private var chainFailure: String?
+    @State private var chainRetry = 0
     @FocusState private var searchFocused: Bool
     #if os(macOS)
     /// The list takes ↑/↓ once a row was clicked (Mail-style paging through the reader).
@@ -101,6 +105,10 @@ struct FilesView: View {
         if let id = router.fileID { return model.byID[id] ?? store.extraFiles[id] }
         return shown.first
     }
+    /// 판 묶음을 다시 받을 때를 가르는 열쇠: 연 자료, 자료 목록, 연결(같은 서버로 다시 붙으면 다시 본다), '다시 시도'.
+    private var chainKey: String {
+        "\(router.fileID ?? ""):\(store.filesRevision):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(chainRetry)"
+    }
     private var openDecisionsByFile: [String: Int] {
         var counts: [String: Int] = [:]
         for decision in store.decisions where decision.status == "open" {
@@ -132,9 +140,14 @@ struct FilesView: View {
             if wide { router.fileID = FileLinks.pinnedSelection(current: router.fileID, visibleIDs: shown.map(\.id)) }
         }
         .task(id: "\(store.selectedProjectID ?? ""):\(store.isArchive):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(query):\(model.allIDsKey)") { await searchBodies() }
-        // 0.2.10: 링크로 연 자료가 목록에 없으면(창 묶음에서 빠진 옛 판) 그 판 묶음을 받는다.
-        .task(id: "\(router.fileID ?? ""):\(store.filesRevision)") {
-            if let id = router.fileID, model.byID[id] == nil, store.extraFiles[id] == nil { await store.loadFileChain(id: id) }
+        // 0.2.10: 링크로 연 자료가 목록에 없으면(창 묶음에서 빠진 옛 판) 그 판 묶음을 받는다. 받는 동안·받지 못했을 때는 읽기 칸이 알린다.
+        .task(id: chainKey) {
+            let key = chainKey
+            var failure: String?
+            if let id = router.fileID, model.byID[id] == nil, store.extraFiles[id] == nil { failure = await store.loadFileChain(id: id) }
+            guard !Task.isCancelled else { return }
+            chainFailure = failure
+            chainSettled = key
         }
         .task(id: store.api.map(ObjectIdentifier.init)) {
             listPreview = nil; listPreviewResource = nil
@@ -289,7 +302,9 @@ struct FilesView: View {
                     // Nothing to read: a quiet note in the middle of the pane, not a line stuck in its corner.
                     Group {
                         if router.fileID != nil {
-                            EmptyTile(icon: "questionmark.folder", title: String(localized: "찾을 수 없는 자료입니다"), detail: String(localized: "목록에서 다시 골라 주세요."), framed: false)
+                            // 0.2.10 창 묶음에서 빠진 옛 판: 받는 동안은 '불러오는 중', 받지 못하면 까닭과 '다시 시도'(iPhone 자료 화면과 같다).
+                            MissingFilePlaceholder(loading: store.stateWindow != nil && chainSettled != chainKey,
+                                                   failure: chainFailure, framed: false) { chainRetry &+= 1 }
                         } else {
                             EmptyTile(icon: "doc.text.magnifyingglass", title: String(localized: "고른 자료가 없습니다"), detail: String(localized: "왼쪽 목록에서 자료를 고르세요."), framed: false)
                         }
@@ -573,7 +588,14 @@ private struct RowThumb: View {
 private struct FileDetailScreen: View {
     @Environment(AppStore.self) private var store
     let fileID: String
-    @State private var loadingChain = false
+    /// 판 묶음 받기를 마친 열쇠(chainKey)와 실패 까닭, '다시 시도' 횟수. 마치기 전에는 '불러오는 중'(첫 화면에 '찾을 수 없는 자료'가 비치지 않게).
+    @State private var chainSettled: String?
+    @State private var chainFailure: String?
+    @State private var chainRetry = 0
+    /// 연결도 열쇠에 넣는다: 같은 서버로 다시 붙으면(연결 재시도) 받지 못한 판 묶음을 다시 받는다.
+    private var chainKey: String {
+        "\(fileID):\(store.filesRevision):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? ""):\(chainRetry)"
+    }
     var body: some View {
         // 0.2.10: 창 묶음에서 빠진 옛 판(보고·결재의 링크)은 받아 둔 것으로 연다.
         let file = store.file(id: fileID)
@@ -581,14 +603,9 @@ private struct FileDetailScreen: View {
             if let file {
                 // web .fl-panel--phone: the reader sits on a glass panel, not straight on the aurora.
                 FileReader(file: file, framed: true)
-            } else if loadingChain {
-                ScrollView {
-                    EmptyTile(loading: true, title: String(localized: "자료를 불러오는 중입니다"))
-                        .ceContentColumn()
-                }
             } else {
                 ScrollView {
-                    EmptyTile(icon: "questionmark.folder", title: String(localized: "찾을 수 없는 자료입니다"), detail: String(localized: "목록에서 다시 골라 주세요."))
+                    MissingFilePlaceholder(loading: store.stateWindow != nil && chainSettled != chainKey, failure: chainFailure) { chainRetry &+= 1 }
                         .ceContentColumn()
                 }
             }
@@ -597,11 +614,13 @@ private struct FileDetailScreen: View {
         // The reader shows the full, selectable title itself; the bar names the kind so it is not said twice.
         .navigationTitle(file.map { fileKindName($0.kind) } ?? String(localized: "자료"))
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: "\(fileID):\(store.filesRevision)") {
-            guard store.file(id: fileID) == nil, store.stateWindow != nil else { return }
-            loadingChain = true
-            await store.loadFileChain(id: fileID)
-            loadingChain = false
+        .task(id: chainKey) {
+            let key = chainKey
+            var failure: String?
+            if store.file(id: fileID) == nil { failure = await store.loadFileChain(id: fileID) }
+            guard !Task.isCancelled else { return }
+            chainFailure = failure
+            chainSettled = key
         }
     }
 }
@@ -818,7 +837,7 @@ private struct FileReaderContent: View {
             }
         }
         }
-        .task(id: "\(file.id):\(store.filesRevision)") {
+        .task(id: "\(file.id):\(store.filesRevision):\(store.api.map { String(describing: ObjectIdentifier($0)) } ?? "")") {
             if store.needsFileChain(file) { await store.loadFileChain(id: file.id) }
         }
     }
@@ -2055,6 +2074,27 @@ private extension Attachment {
 @MainActor @Observable private final class GalleryState {
     var urls: [String: URL] = [:]
     var selected: URL?
+}
+
+/// 0.2.10 창 묶음: 목록에 없는 자료(옛 판 링크)를 받는 동안·받지 못했을 때의 자리. Mac 읽기 칸과 iPhone 자료 화면이 같이 쓴다.
+/// 받았는데도 이 프로젝트의 자료가 아니면 예전처럼 '찾을 수 없는 자료'.
+private struct MissingFilePlaceholder: View {
+    let loading: Bool
+    let failure: String?
+    var framed = true
+    let retry: () -> Void
+
+    var body: some View {
+        if loading {
+            EmptyTile(loading: true, title: String(localized: "자료를 불러오는 중입니다"), framed: framed)
+        } else if let failure {
+            EmptyTile(icon: "exclamationmark.triangle", title: String(localized: "자료를 열 수 없습니다"), detail: failure, framed: framed) {
+                Button("다시 시도", action: retry).ceSecondaryButton()
+            }
+        } else {
+            EmptyTile(icon: "questionmark.folder", title: String(localized: "찾을 수 없는 자료입니다"), detail: String(localized: "목록에서 다시 골라 주세요."), framed: framed)
+        }
+    }
 }
 
 /// 0.2.10: 아티팩트와 같은 판의 원본(file 도구 original). '원본' 이름표(이전 판 줄과 같은 글꼴) 아래 이름 · 크기 칩.

@@ -228,7 +228,7 @@ private struct TeamWorkList: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(loading)
-                        if let error = store.olderDone.error, !loading {
+                        if let error = store.olderDone.workError, !loading {
                             Text(error).font(CEFont.secondary).foregroundStyle(CE.danger).frame(maxWidth: .infinity).padding(.bottom, 8)
                         }
                     }

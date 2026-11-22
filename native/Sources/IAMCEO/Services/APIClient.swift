@@ -55,6 +55,8 @@ actor APIClient {
     /// 0.2.10: 서버가 창 묶음(capabilities.windowedState)을 받으면 /api/sync 와 실시간 소켓에 window=1 을 싣는다(lite 를 켠 연결만).
     /// 서버가 400 으로 거절하면(되돌린 옛 서버) 그 자리에서 끄고 예전 묶음으로 다시 읽는다. 화면은 이 값이 아니라 받은 묶음의 window 로 가른다.
     private(set) var windowedState = false
+    /// 0.2.10: 보관 상태 lite=1 을 400 으로 거절한 서버(되돌린 옛 서버). 이 연결에서는 본문째 한 번만 읽는다.
+    private(set) var archiveLiteRefused = false
     private var fileBodyCache: [String: FileDoc] = [:]
     private var fileBodyOrder: [String] = []
     /// C8: 이 기기의 Tailscale 이 켜져 있는가. Tailscale 주소로 평문 요청을 보내기 전에 본다(authorizedURL). 시험이 바꿔 넣는다.
@@ -379,11 +381,15 @@ extension APIClient: MessageHistoryService, ProjectManagementService, SyncServic
     }
     /// 0.2.10: 서버가 보관 상태 lite(capabilities.archiveLite)를 받으면 자료 본문 없이 받는다. `lite` 는 실제로 본문을 뺀 응답인가.
     /// 옛 서버가 400 으로 거절하면 예전처럼 본문째 받는다(그때 화면은 실린 본문을 그대로 쓴다).
+    /// 거절한 서버에는 이 연결에서 다시 보내지 않는다(sync 의 windowedState 와 같다). 다시 붙으면 새 연결이라 다시 본다.
     func archiveState(projectID: String, lite: Bool) async throws -> (state: ProjectState, lite: Bool) {
         let path = "/api/projects/\(Self.segment(projectID))/archive/state"
-        guard lite else { return (try await request(path), false) }
+        guard lite, !archiveLiteRefused else { return (try await request(path), false) }
         do { return (try await request(path + "?lite=1"), true) }
-        catch let error as APIError where error.status == 400 && error.code == "invalid_query" { return (try await request(path), false) }
+        catch let error as APIError where error.status == 400 && error.code == "invalid_query" {
+            archiveLiteRefused = true
+            return (try await request(path), false)
+        }
     }
     /// 0.2.10: 창 묶음 밖의 끝난 할 일·완료 업무. 창 묶음의 위치(todosCursor·workCursor)나 앞 쪽의 nextCursor 를 그대로 넘긴다.
     func doneTodos(projectID: String, cursor: String, limit: Int = 50) async throws -> DonePage<Todo> {

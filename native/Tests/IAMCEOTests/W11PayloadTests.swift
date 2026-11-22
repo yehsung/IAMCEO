@@ -201,6 +201,13 @@ import XCTest
         let archived = try await api.archiveState(projectID: "p", lite: true)
         XCTAssertEqual(archived.state.project.id, "p")
         XCTAssertFalse(archived.lite)
+        // 거절한 서버에는 이 연결에서 다시 보내지 않는다(다시 읽을 때마다 요청이 두 번 가지 않게).
+        let archiveReads = fixture.requests.filter { $0.url?.path.hasSuffix("/archive/state") == true }.count
+        let again = try await api.archiveState(projectID: "p", lite: true)
+        XCTAssertFalse(again.lite)
+        let archiveRequests = fixture.requests.filter { $0.url?.path.hasSuffix("/archive/state") == true }
+        XCTAssertEqual(archiveRequests.count, archiveReads + 1)
+        XCTAssertFalse(archiveRequests.last?.url?.query?.contains("lite") ?? false)
         // 끝난 할 일 쪽 받기: 위치는 받은 그대로 넘긴다.
         let page = try await api.doneTodos(projectID: "p", cursor: "WyJhIiwiYiJd")
         XCTAssertEqual(page.items.map(\.id), ["t1"])
@@ -218,10 +225,37 @@ import XCTest
         var windowed = true
         var pages: [String] = []
         var versionReads = 0
+        /// 할 일의 쓰기 판 번호(sync 의 revisions.todos 와 끝난 할 일 쪽의 revisions 가 같은 값을 준다).
+        var todoRevisions: [String: Int] = ["open": 1, "recent-a": 2, "recent-b": 2, "old-1": 3, "old-2": 5]
+        /// 체크를 풀어 다시 열린 할 일(창 묶음에 안 끝난 것으로 실린다).
+        var reopened: [String] = []
+        /// 받은 할 일 쓰기: (id, If-Match).
+        var todoSends: [(id: String, ifMatch: String?)] = []
+        var failTodosPage = false
+        var failVersions = false
+        /// nil 이면 기본 창(done-new 하나, 다음 쪽 있음). 값이 있으면 그 완료 업무와 위치로 창을 싣는다(서버에서 지운 뒤의 창).
+        var doneWorkWindow: (items: [WorkItem], cursor: String?)?
+        /// 실시간 순번. 서버처럼 내용이 바뀌면 올린다(같은 순번·판 번호면 앱은 같은 상태로 보고 다시 반영하지 않는다).
+        var seq = 1
+        /// 새로 끝난 일 때문에 창 밖으로 밀려난 할 일(창 묶음에서 뺀다).
+        var pushedOut: Set<String> = []
+        func change(_ body: (WindowServer) -> Void) { lock.withLock { body(self) } }
+        func read<T>(_ body: (WindowServer) -> T) -> T { lock.withLock { body(self) } }
         func handle(_ request: URLRequest) throws -> IsolatedTestHTTPReply {
             lock.lock(); defer { lock.unlock() }
             let path = request.url!.path, query = request.url?.query ?? ""
             let encoder = JSONEncoder()
+            if path.hasPrefix("/api/todos/"), path.hasSuffix("/done"), request.httpMethod == "POST" {
+                let id = String(path.dropFirst("/api/todos/".count).dropLast("/done".count))
+                let ifMatch = request.value(forHTTPHeaderField: "If-Match")
+                todoSends.append((id, ifMatch))
+                guard let revision = todoRevisions[id], ifMatch == "\"\(revision)\"" else {
+                    return IsolatedTestHTTPReply(status: 409, data: Data(#"{"error":"내용이 변경되었습니다","code":"REVISION_CONFLICT"}"#.utf8))
+                }
+                reopened.append(id)
+                todoRevisions[id] = revision + 1
+                return IsolatedTestHTTPReply(data: try encoder.encode(TodoWriteResult(todo: Todo(id: id, projectId: "p", createdAt: "2026-09-01T00:00:00Z"), revision: revision + 1)))
+            }
             switch path {
             case "/api/capabilities":
                 return IsolatedTestHTTPReply(data: try encoder.encode(ServerCapabilities(contractVersion: 2, capabilities: CapabilityFlags(realtime: true, operations: true, windowedState: windowed, archiveLite: true))))
@@ -232,30 +266,39 @@ import XCTest
                 var state = ProjectState(project: Project(id: "p"), members: [Member(id: "m", projectId: "p")],
                                          todos: [Todo(id: "open", projectId: "p", title: "열린", createdAt: "2026-11-01T00:00:00Z"),
                                                  Todo(id: "recent-a", projectId: "p", done: true, doneAt: "2026-11-20T00:00:00Z", createdAt: "2026-11-02T00:00:00Z"),
-                                                 Todo(id: "recent-b", projectId: "p", done: true, doneAt: "2026-11-21T00:00:00Z", createdAt: "2026-11-03T00:00:00Z")],
-                                         work: [WorkItem(id: "doing", projectId: "p", sec: "doing", order: 1),
-                                                WorkItem(id: "done-new", projectId: "p", sec: "done", order: 2, doneAt: "2026-11-21T00:00:00Z")],
+                                                 Todo(id: "recent-b", projectId: "p", done: true, doneAt: "2026-11-21T00:00:00Z", createdAt: "2026-11-03T00:00:00Z")]
+                                            .filter { !pushedOut.contains($0.id) }
+                                            + reopened.map { Todo(id: $0, projectId: "p", createdAt: "2026-09-01T00:00:00Z") },
+                                         work: [WorkItem(id: "doing", projectId: "p", sec: "doing", order: 1)]
+                                            + (doneWorkWindow?.items ?? [WorkItem(id: "done-new", projectId: "p", sec: "done", order: 2, doneAt: "2026-11-21T00:00:00Z")]),
                                          files: [FileDoc(id: "f3", kind: "document", projectId: "p", title: "덱 v3", order: 3, replaces: "f2", versions: 3)])
                 if windowedRequest {
-                    state.window = ProjectStateWindow(doneTodos: 5, doneWork: 4, olderFileVersions: 2, todosCursor: "c-todos", workCursor: "c-work")
+                    state.window = ProjectStateWindow(doneTodos: 5 - reopened.count, doneWork: 4, olderFileVersions: 2, todosCursor: "c-todos",
+                                                      workCursor: doneWorkWindow.map { $0.cursor } ?? "c-work")
                 }
-                let snapshot = SyncSnapshot(protocolVersion: 2, cursor: try SyncCursor(epoch: "e", seq: 1), requestedProjectId: "p", projectStatus: .ok,
+                let snapshot = SyncSnapshot(protocolVersion: 2, cursor: try SyncCursor(epoch: "e", seq: seq), requestedProjectId: "p", projectStatus: .ok,
                                             bootstrap: Bootstrap(projects: [ProjectSummary(id: "p")]), state: state,
-                                            revisions: SyncRevisions(settings: 1, members: ["m": MemberRevisions(configRevision: 1, sessionGeneration: 1)], todos: ["open": 1]))
+                                            revisions: SyncRevisions(settings: 1, members: ["m": MemberRevisions(configRevision: 1, sessionGeneration: 1)], todos: todoRevisions))
                 return IsolatedTestHTTPReply(data: try encoder.encode(snapshot))
             case "/api/projects/p/todos/done":
                 pages.append(query)
-                if query.contains("cursor=c-todos&") {
-                    let page = DonePage(items: [Todo(id: "old-1", projectId: "p", done: true, doneAt: "2026-10-02T00:00:00Z"),
-                                                Todo(id: "recent-b", projectId: "p", done: true, doneAt: "2026-11-21T00:00:00Z")], nextCursor: "c-todos-2")
-                    return IsolatedTestHTTPReply(data: try encoder.encode(page))
+                if failTodosPage { return IsolatedTestHTTPReply(status: 500, data: Data(#"{"error":"고장"}"#.utf8)) }
+                // 서버처럼 쪽마다 실린 할 일의 판 번호를 같이 준다.
+                func page(_ items: [Todo], next: String?) -> DonePage<Todo> {
+                    let shown = items.filter { !reopened.contains($0.id) }
+                    return DonePage(items: shown, nextCursor: next, revisions: Dictionary(uniqueKeysWithValues: shown.compactMap { todo in todoRevisions[todo.id].map { (todo.id, $0) } }))
                 }
-                return IsolatedTestHTTPReply(data: try encoder.encode(DonePage(items: [Todo(id: "old-2", projectId: "p", done: true, doneAt: "2026-10-01T00:00:00Z")], nextCursor: nil)))
+                if query.contains("cursor=c-todos&") {
+                    return IsolatedTestHTTPReply(data: try encoder.encode(page([Todo(id: "old-1", projectId: "p", done: true, doneAt: "2026-10-02T00:00:00Z"),
+                                                                              Todo(id: "recent-b", projectId: "p", done: true, doneAt: "2026-11-21T00:00:00Z")], next: "c-todos-2")))
+                }
+                return IsolatedTestHTTPReply(data: try encoder.encode(page([Todo(id: "old-2", projectId: "p", done: true, doneAt: "2026-10-01T00:00:00Z")], next: nil)))
             case "/api/projects/p/work/done":
                 pages.append(query)
                 return IsolatedTestHTTPReply(data: try encoder.encode(DonePage(items: [WorkItem(id: "done-old", projectId: "p", sec: "done", doneAt: "2026-09-01T00:00:00Z")], nextCursor: nil)))
             case "/api/files/f3/versions", "/api/files/f1/versions":
                 versionReads += 1
+                if failVersions { return IsolatedTestHTTPReply(status: 500, data: Data(#"{"error":"고장"}"#.utf8)) }
                 return IsolatedTestHTTPReply(data: try encoder.encode([FileDoc(id: "f3", projectId: "p", title: "덱 v3", order: 3, replaces: "f2"),
                                                                       FileDoc(id: "f2", projectId: "p", title: "덱 v2", order: 2, replaces: "f1", replacedBy: "f3"),
                                                                       FileDoc(id: "f1", projectId: "p", title: "덱 v1", order: 1, replacedBy: "f2")]))
@@ -325,6 +368,142 @@ import XCTest
         XCTAssertFalse(network.requests.contains { $0.url?.query?.contains("window") == true })
         store.disconnect()
         await network.close()
+    }
+
+    /// 검토 지적(native 1): '이전 완료 더 보기'로 받은 창 밖의 끝난 할 일도 체크를 풀 수 있다. 서버가 쪽에 같은 행에서 읽어 준 판 번호가
+    /// 지금 판 번호와 같을 때만 그 판 번호로 쓴다. 어긋나면 거절하고(보내지 않는다) 그 쪽을 새로 받아, 다음 체크는 맞는 판 번호로 간다.
+    func testOlderDoneTodoCanBeUncheckedWithTheRevisionTheServerSent() async throws {
+        let server = WindowServer()
+        let (store, network) = try await connectedStore(server)
+        defer { store.disconnect() }
+        try await pollUntil("쓸 수 있음") { store.canWrite }
+        await store.loadOlderDoneTodos()
+        XCTAssertEqual(store.olderDone.todoRevisions["old-1"], 3, "쪽이 준 판 번호")
+        XCTAssertEqual(store.olderDone.todoRevisions["recent-a"], 2, "처음 받을 때 남긴 창 사본도 같은 스냅숏의 판 번호를 단다")
+        let old1 = try XCTUnwrap(store.windowedDoneTodos?.first { $0.id == "old-1" })
+        XCTAssertNil(store.reviewedTodos["old-1"], "창 묶음 밖이라 스냅숏의 확인 대상에는 없다")
+        let unchecked = await store.setTodoDone(old1, done: false)
+        XCTAssertTrue(unchecked, store.errorMessage ?? "")
+        XCTAssertEqual(server.read { $0.todoSends.map(\.id) }, ["old-1"])
+        XCTAssertEqual(server.read { $0.todoSends.first?.ifMatch }, "\"3\"")
+        try await pollUntil("다시 열린 할 일이 창에 실림") { store.todos.contains { $0.id == "old-1" && !$0.done } }
+        XCTAssertFalse(store.windowedDoneTodos?.contains { $0.id == "old-1" } ?? true, "끝난 목록에서 빠진다")
+
+        // 받은 뒤 서버에서 판 번호가 오른 창 밖 할 일: 보내지 않고 거절한 뒤, 그 쪽을 새로 받는다.
+        await store.loadOlderDoneTodos()
+        let stale = try XCTUnwrap(store.windowedDoneTodos?.first { $0.id == "old-2" })
+        XCTAssertEqual(store.olderDone.todoRevisions["old-2"], 5)
+        server.change { $0.todoRevisions["old-2"] = 6 }
+        await store.refresh()
+        try await pollUntil("새 판 번호") { store.writeRevisions?.todos?["old-2"] == 6 }
+        let refused = await store.setTodoDone(stale, done: false)
+        XCTAssertFalse(refused)
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertEqual(server.read { $0.todoSends.count }, 1, "어긋난 판 번호로는 보내지 않는다")
+        try await pollUntil("창 끝부터 다시 받음") {
+            store.olderDone.todosCursor == "c-todos-2" && !store.olderDone.todosExhausted && !store.olderDone.loadingTodos
+        }
+        XCTAssertFalse(store.windowedDoneTodos?.contains { $0.id == "old-2" } ?? true, "어긋난 사본은 버렸다(첫 쪽만 다시 받았다)")
+        await store.loadOlderDoneTodos()
+        XCTAssertEqual(store.olderDone.todoRevisions["old-2"], 6, "다시 받은 쪽의 판 번호")
+        let fresh = try XCTUnwrap(store.windowedDoneTodos?.first { $0.id == "old-2" })
+        let retried = await store.setTodoDone(fresh, done: false)
+        XCTAssertTrue(retried, store.errorMessage ?? "")
+        XCTAssertEqual(server.read { $0.todoSends.last?.ifMatch }, "\"6\"")
+        await network.close()
+    }
+
+    /// 처음 '더 보기' 때 창 안에 있다가 그 뒤 창 밖으로 밀려난 할 일도 체크를 풀 수 있다(같은 스냅숏의 판 번호를 남겨 둔다).
+    func testTodoPushedOutOfTheWindowAfterLoadingCanStillBeUnchecked() async throws {
+        let server = WindowServer()
+        let (store, network) = try await connectedStore(server)
+        defer { store.disconnect() }
+        try await pollUntil("쓸 수 있음") { store.canWrite }
+        await store.loadOlderDoneTodos()
+        server.change { $0.pushedOut = ["recent-a"]; $0.seq += 1 }
+        await store.refresh()
+        try await pollUntil("창 밖으로 밀림") { !store.todos.contains { $0.id == "recent-a" } }
+        XCTAssertNil(store.reviewedTodos["recent-a"])
+        let pushed = try XCTUnwrap(store.windowedDoneTodos?.first { $0.id == "recent-a" }, "창 끝보다 먼저 끝냈으니 더 받은 쪽에 남는다")
+        let unchecked = await store.setTodoDone(pushed, done: false)
+        XCTAssertTrue(unchecked, store.errorMessage ?? "")
+        XCTAssertEqual(server.read { $0.todoSends.last?.ifMatch }, "\"2\"")
+        await network.close()
+    }
+
+    /// 검토 지적(native 4): 더 받은 끝난 항목은 창 끝보다 먼저 끝낸 것만 남긴다. 창 범위인데 창에 없으면 지웠거나 바뀐 것이다.
+    func testOlderDoneItemsKeepOnlyWhatIsOlderThanTheWindowEnd() {
+        let current = [WorkItem(id: "doing", projectId: "p", sec: "doing"),
+                       WorkItem(id: "b", projectId: "p", sec: "done", doneAt: "2026-11-21T00:00:00Z"),
+                       WorkItem(id: "m", projectId: "p", sec: "done", doneAt: "2026-11-20T00:00:00Z")]
+        let older = [WorkItem(id: "b", projectId: "p", sec: "done", doneAt: "2026-11-21T00:00:00Z"),
+                     WorkItem(id: "removed", projectId: "p", sec: "done", doneAt: "2026-11-20T12:00:00Z"),
+                     WorkItem(id: "z", projectId: "p", sec: "done", doneAt: "2026-11-20T00:00:00Z"),
+                     WorkItem(id: "a", projectId: "p", sec: "done", doneAt: "2026-11-20T00:00:00Z"),
+                     WorkItem(id: "old", projectId: "p", sec: "done", doneAt: "2026-10-01T00:00:00Z"),
+                     WorkItem(id: "doing", projectId: "p", sec: "done", doneAt: "2026-09-01T00:00:00Z")]
+        let merged = DoneOrder.merged(current: current, older: older, more: true, finished: { $0.sec == "done" }, key: DoneOrder.workKey)
+        // 창 끝은 m(11-20, id m). 같은 시각이면 id 가 작은 것(a)이 더 오래되었다. z 는 창 범위인데 창에 없어 버린다.
+        XCTAssertEqual(DoneOrder.work(merged).map(\.id), ["b", "m", "a", "old"])
+        XCTAssertEqual(DoneOrder.merged(current: current, older: older, more: false, finished: { $0.sec == "done" }, key: DoneOrder.workKey).map(\.id), ["b", "m"],
+                       "창 밖에 더 없으면 창이 끝난 항목 전부다")
+    }
+
+    /// 검토 지적(native 4·5): 서버에서 지운 완료 업무는 다음 상태에서 사라지고, 할 일·업무의 '더 보기' 오류는 제 화면에만 남는다.
+    func testRemovedDoneWorkLeavesAndLoadErrorsStayApart() async throws {
+        let server = WindowServer()
+        let (store, network) = try await connectedStore(server)
+        defer { store.disconnect() }
+        server.change { $0.failTodosPage = true }
+        await store.loadOlderDoneTodos()
+        XCTAssertNotNil(store.olderDone.todosError)
+        XCTAssertNil(store.olderDone.workError, "할 일 쪽 실패는 업무 화면에 보이지 않는다")
+        await store.loadOlderDoneWork()
+        XCTAssertNotNil(store.olderDone.todosError, "업무 쪽을 받아도 할 일 쪽 오류는 지우지 않는다")
+        XCTAssertNil(store.olderDone.workError)
+        XCTAssertEqual(store.windowedDoneWork?.map(\.id), ["done-new", "done-old"])
+        // 팀장이 done-new 를 지웠다(work_remove): 서버의 창은 남은 완료 업무로 다시 채워진다.
+        server.change { $0.doneWorkWindow = ([WorkItem(id: "done-old", projectId: "p", sec: "done", doneAt: "2026-09-01T00:00:00Z")], nil); $0.seq += 1 }
+        await store.refresh()
+        try await pollUntil("지운 업무가 빠짐") { store.windowedDoneWork?.map(\.id) == ["done-old"] }
+        await network.close()
+    }
+
+    /// 검토 지적(native 2·6): 같은 서버로 다시 붙거나 같은 프로젝트를 다시 골라도 받아 둔 옛 판·'더 보기'를 비우지 않는다.
+    /// 판 묶음을 받지 못하면 화면이 보일 까닭을 돌려준다.
+    func testWindowExtrasSurviveReconnectAndChainFailureIsReported() async throws {
+        let server = WindowServer()
+        let (store, network) = try await connectedStore(server)
+        defer { store.disconnect() }
+        server.change { $0.failVersions = true }
+        let failure = await store.loadFileChain(id: "f1")
+        XCTAssertNotNil(failure, "받지 못한 까닭")
+        XCTAssertNil(store.file(id: "f1"))
+        server.change { $0.failVersions = false }
+        let loaded = await store.loadFileChain(id: "f1")
+        XCTAssertNil(loaded)
+        XCTAssertEqual(store.file(id: "f1")?.title, "덱 v1")
+        await store.loadOlderDoneTodos()
+        store.olderDone.loadingWork = true
+        store.settleWindowExtrasForReconnect()
+        XCTAssertEqual(store.file(id: "f1")?.title, "덱 v1", "같은 서버로 다시 붙으면 옛 판을 그대로 둔다")
+        XCTAssertTrue(store.olderDone.todos.contains { $0.id == "old-1" })
+        XCTAssertFalse(store.olderDone.loadingWork, "앞 연결에서 받던 중이던 표시는 내린다")
+        await store.selectProject(id: "p", archived: false, navigationToken: UUID())
+        XCTAssertEqual(store.file(id: "f1")?.title, "덱 v1", "같은 프로젝트를 다시 골라도 그대로")
+        await network.close()
+    }
+
+    /// 검토 지적(native 3): 보고 본문의 옛 해시 링크는 창 묶음에서 목록에 없는 옛 판도 앱 안으로 연다(같은 프로젝트일 때만).
+    func testOldHashLinksResolveVersionsOutsideTheList() throws {
+        let link = try XCTUnwrap(URL(string: "iamceo://x/#/p/p/files/f1"))
+        let listed = [FileDoc(id: "f3", projectId: "p")]
+        XCTAssertNil(FileLinks.fileID(link, projectID: "p", files: listed), "목록만 보면 옛 판이 없다")
+        XCTAssertEqual(FileLinks.fileID(link, projectID: "p", files: listed + [FileDoc(id: "f1", projectId: "p")]), "f1", "받아 둔 판(versionFiles)에서 찾는다")
+        XCTAssertEqual(FileLinks.hashLinkFileID(link, projectID: "p"), "f1")
+        XCTAssertNil(FileLinks.hashLinkFileID(link, projectID: "other"), "다른 프로젝트의 링크는 열지 않는다")
+        XCTAssertNil(FileLinks.hashLinkFileID(try XCTUnwrap(URL(string: "iamceo://x/#/p/p/files/")), projectID: "p"))
+        XCTAssertNil(FileLinks.fileID(link, projectID: "p", files: [FileDoc(id: "f1", projectId: "other")]))
     }
 
     // MARK: 할 일 쓰기 확인

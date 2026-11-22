@@ -16,6 +16,7 @@ import type {
   CliProvider,
   Decision,
   DonePage,
+  DoneTodosPage,
   DecisionCloseKind,
   DecisionCloseFollowUp,
   DecisionOption,
@@ -2334,8 +2335,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   /** 0.2.10: 끝난 할 일을 최근 끝낸 순서로 이어 받는다(창 묶음의 todosCursor 다음부터). 보관한 프로젝트는 없는 것으로 친다. */
-  listDoneTodosPage(projectId: string, opts: { cursor?: string; limit?: number } = {}): DonePage<Todo> {
-    return this.donePage("todos", projectId, opts, toTodo);
+  /** revisions: 실린 할 일의 쓰기 판 번호(같은 행에서 읽어 값과 어긋나지 않는다). 앱이 창 밖 할 일의 체크를 풀 때 쓴다. */
+  listDoneTodosPage(projectId: string, opts: { cursor?: string; limit?: number } = {}): DoneTodosPage {
+    const revisions: Record<string, number> = {};
+    const page = this.donePage("todos", projectId, opts, (r) => { revisions[r.id] = r.revision; return toTodo(r); });
+    return { ...page, revisions };
   }
 
   /** 0.2.10: 완료 칸 업무를 최근 끝낸 순서로 이어 받는다(창 묶음의 workCursor 다음부터). */

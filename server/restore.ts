@@ -136,8 +136,11 @@ function relocateAttachments(db: Database, manifest: BackupManifest, destination
       db.query(`UPDATE ${table} SET cwd = ? WHERE id = ?`).run(relocate(row.cwd), row.id);
     }
   }
+  // The first manifest entry per source path, as Array.find picked it (a map instead of a scan per file).
+  const bySource = new Map<string, BackupManifest["attachments"][number]>();
+  for (const entry of manifest.attachments) if (!bySource.has(entry.sourcePath)) bySource.set(entry.sourcePath, entry);
   for (const row of db.query<{ id: string; path: string }, []>("SELECT id,path FROM files WHERE path IS NOT NULL").all()) {
-    const entry = manifest.attachments.find((entry) => entry.sourcePath === row.path);
+    const entry = bySource.get(row.path);
     db.query("UPDATE files SET path = ? WHERE id = ?").run(entry ? paths.get(entry.id)! : relocate(row.path), row.id);
   }
 }

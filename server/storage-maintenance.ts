@@ -6,6 +6,13 @@ import type { RecordPruneResult, Store } from "./store.ts";
 
 export const STAGING_GRACE_MS = 7 * 86_400_000;
 export const QUARANTINE_GRACE_MS = 86_400_000;
+/**
+ * 게시를 마친(published) 업로드 기록을 .staging 에서 치우기까지. 게시가 끝나면 파일은 이미 uploads/<id> 로 옮겨졌고 이 기록은
+ * 정리의 근거가 되지 않는다(정리는 실패가 확정된 것만 다룬다). 예전에는 영원히 남아 매시 정리가 모두 열어 보았다(11-22: 715개).
+ */
+export const PUBLISHED_JOURNAL_GRACE_MS = 86_400_000;
+/** 한 번의 정리에서 게시 기록을 치우는 데 쓰는 최대 시간. 쌓인 것이 많으면 다음 정리(한 시간 뒤)가 이어 한다. */
+export const PUBLISHED_JOURNAL_BUDGET_MS = 100;
 /** E4: 끝난 봉투의 보낸 글 사본을 비우기까지. */
 export const WIRE_TEXT_RETENTION_MS = 30 * 86_400_000;
 /** E4: 끝난 실행·생명주기 기록과 영수증을 지우기까지. 대화·결재·할 일·자료는 기한이 없다. */
@@ -80,6 +87,17 @@ export function createStorageReferences(store: Store, inboxDir: string): FileRef
   } };
 }
 
+export interface SweepResult {
+  quarantined: string[];
+  removed: string[];
+  retained: string[];
+  errors: string[];
+  /** Published upload journals removed from .staging (their files are in uploads/ and stay). Only present when there were any. */
+  cleared?: string[];
+  records?: RecordPruneResult;
+  exports?: string[];
+}
+
 /** Independent service; the runtime owner schedules sweep under the data-home lock. */
 export class StorageMaintenance {
   private readonly uploadsDir: string;
@@ -132,10 +150,9 @@ export class StorageMaintenance {
     return out;
   }
 
-  sweep(now = Date.now()): { quarantined: string[]; removed: string[]; retained: string[]; errors: string[]; records?: RecordPruneResult; exports?: string[] } {
+  sweep(now = Date.now()): SweepResult {
     if (!Number.isFinite(now) || now < 0) throw new Error("Invalid maintenance time");
-    const result: { quarantined: string[]; removed: string[]; retained: string[]; errors: string[]; records?: RecordPruneResult; exports?: string[] } =
-      { quarantined: [] as string[], removed: [] as string[], retained: [] as string[], errors: [] as string[] };
+    const result: SweepResult = { quarantined: [], removed: [], retained: [], errors: [] };
     if (this.options.records) {
       try { result.records = this.pruneRecords(now)!; }
       catch { result.errors.push("records"); }
@@ -150,6 +167,7 @@ export class StorageMaintenance {
     if (!existsSync(this.uploadsDir)) return result;
     if (!lstatSync(this.uploadsDir).isDirectory() || lstatSync(this.uploadsDir).isSymbolicLink()) throw new Error("Uploads must be a real directory");
     // Process old quarantine first: a single sweep can never skip the 24-hour hold.
+    const clearingEnds = performance.now() + PUBLISHED_JOURNAL_BUDGET_MS;
     for (const area of [".quarantine", ".staging"] as const) {
       const root = join(this.uploadsDir, area);
       if (!existsSync(root)) continue;
@@ -158,6 +176,11 @@ export class StorageMaintenance {
         const directory = join(root, id);
         try {
           const manifest = this.readCandidate(directory, id);
+          if (area === ".staging" && manifest.state === "published") {
+            if (performance.now() < clearingEnds && this.clearPublished(directory, manifest, now)) (result.cleared ??= []).push(id);
+            else result.retained.push(id);
+            continue;
+          }
           if (manifest.state !== "failed" || manifest.failedAt === null || manifest.failedAt < manifest.createdAt || manifest.failedAt > now || now - manifest.failedAt < STAGING_GRACE_MS) {
             result.retained.push(id); continue;
           }
@@ -191,6 +214,19 @@ export class StorageMaintenance {
       }
     }
     return result;
+  }
+
+  /**
+   * A settled publication's journal: only manifest files left (every slot moved out), no failure marks, older than the grace.
+   * Anything else stays. Never touches uploads/<id>.
+   */
+  private clearPublished(directory: string, manifest: PublicationManifest, now: number): boolean {
+    if (manifest.failedAt !== null || manifest.quarantinedAt !== null || manifest.createdAt > now || now - manifest.createdAt < PUBLISHED_JOURNAL_GRACE_MS) return false;
+    if (readdirSync(directory).some((name) => name !== "manifest.json" && name !== "manifest.next")) return false;
+    const entries = this.deletionInventory(directory);
+    for (const entry of entries) unlinkSync(entry.path);
+    rmdirSync(directory);
+    return true;
   }
 
   private readCandidate(directory: string, id: string): PublicationManifest {

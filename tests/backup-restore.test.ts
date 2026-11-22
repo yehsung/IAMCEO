@@ -193,16 +193,17 @@ describe("consistent backup packages", () => {
     expect(backupFile(join(f.home, "iamceo.db-wal"))).toEqual(before);
   });
 
-  test("storage-full leaves the prior success and config intact; next attempt can succeed", async () => {
+  // APFS 는 첨부를 clone 하고(copyFileSync), clone 이 안 되는 볼륨은 예전처럼 바이트를 쓴다(writeSync). 어느 쪽에서 디스크가 차도 같다.
+  test.each(["clone", "byte copy"] as const)("storage-full (%s) leaves the prior success and config intact; next attempt can succeed", async (copy) => {
     const f = fixture();
     const first = f.backup();
     const original = fs.writeSync;
-    const spy = spyOn(fs, "writeSync").mockImplementation(() => {
-      throw Object.assign(new Error("fixture disk full"), { code: "ENOSPC" });
-    });
+    const full = () => { throw Object.assign(new Error("fixture disk full"), { code: "ENOSPC" }); };
+    const spies = copy === "clone" ? [spyOn(fs, "copyFileSync").mockImplementation(full)]
+      : [spyOn(fs, "copyFileSync").mockImplementation(() => { throw Object.assign(new Error("fixture: no clones here"), { code: "ENOTSUP" }); }), spyOn(fs, "writeSync").mockImplementation(full)];
     let error: unknown;
     try { f.backup("2026-11-08T00:00:00.000Z"); } catch (caught) { error = caught; }
-    finally { spy.mockRestore(); }
+    finally { for (const spy of spies) spy.mockRestore(); }
     expect(fs.writeSync).toBe(original);
     expect(classifyStorageError(error)).toBe("storage_full");
     expect(listBackups(f.root).map((snapshot) => snapshot.manifest.id)).toEqual([first.manifest.id]);
@@ -477,12 +478,14 @@ describe("separate-home restore and outbound reconciliation", () => {
     finally { owner.release(); }
   });
 
-  test("failed restore publishes nothing, releases owner and succeeds after correction", () => {
+  test.each(["clone", "byte copy"] as const)("failed restore (%s) publishes nothing, releases owner and succeeds after correction", (copy) => {
     const f = fixture();
     const snapshot = f.backup();
-    const spy = spyOn(fs, "writeSync").mockImplementation(() => { throw Object.assign(new Error("full"), { code: "ENOSPC" }); });
+    const full = () => { throw Object.assign(new Error("full"), { code: "ENOSPC" }); };
+    const spies = copy === "clone" ? [spyOn(fs, "copyFileSync").mockImplementation(full)]
+      : [spyOn(fs, "copyFileSync").mockImplementation(() => { throw Object.assign(new Error("no clones"), { code: "EXDEV" }); }), spyOn(fs, "writeSync").mockImplementation(full)];
     try { expect(() => restoreBackup({ snapshotDir: snapshot.directory, destinationHome: f.destination })).toThrow("storage_full"); }
-    finally { spy.mockRestore(); }
+    finally { for (const spy of spies) spy.mockRestore(); }
     expect(fs.readdirSync(f.destination)).toEqual([".owner.lock"]);
     expect(restoreBackup({ snapshotDir: snapshot.directory, destinationHome: f.destination }).outboundEnabled).toBe(false);
   });

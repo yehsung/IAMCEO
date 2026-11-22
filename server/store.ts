@@ -2998,15 +2998,11 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       // 0.2.7 묶음 4: 결재 답 첨부와 다시 열린 카드의 직전 답 첨부.
       for (const r of this.rows("SELECT answer_attachments AS a, last_answer_attachments AS b FROM decisions WHERE project_id = ?", id)) { collect(r.a); collect(r.b); }
       for (const r of this.rows("SELECT completion_file_ids AS v FROM todos WHERE project_id = ?", id)) collect(r.v);
-      // 다른 프로젝트의 기록이 같은 첨부를 가리키면 남긴다.
-      const elsewhere = (attachmentId: string) => !!this.row(`SELECT 1 FROM messages WHERE project_id != ?1 AND instr(attachments, ?2) > 0
-        UNION ALL SELECT 1 FROM files WHERE project_id != ?1 AND instr(attachments, ?2) > 0
-        UNION ALL SELECT 1 FROM decisions WHERE project_id != ?1 AND (instr(images, ?2) > 0 OR instr(COALESCE(answer_attachments, ''), ?2) > 0 OR instr(COALESCE(last_answer_attachments, ''), ?2) > 0)
-        UNION ALL SELECT 1 FROM todos WHERE project_id != ?1 AND instr(completion_file_ids, ?2) > 0
-        UNION ALL SELECT 1 FROM deliveries WHERE project_id != ?1 AND instr(text, ?2) > 0 LIMIT 1`, id, attachmentId);
-      const attachments = [...candidates].filter(attachmentId => !elsewhere(attachmentId))
-        .map(attachmentId => this.row("SELECT id, path FROM attachments WHERE id = ?", attachmentId))
-        .filter((r): r is Row => !!r).map(r => ({ id: r.id as string, path: r.path as string }));
+      // 다른 프로젝트의 기록이 같은 첨부를 가리키면 남긴다. 첨부 행이 있는 후보만, 다른 프로젝트의 기록을 한 번만 읽어 가린다.
+      // 11-22: 예전에는 첨부마다 다른 프로젝트 전체를 instr 로 훑어(후보 × 기록) 큰 프로젝트 하나 지우는 동안 서버가 6초 멈췄다.
+      const rows = [...candidates].map(attachmentId => this.row("SELECT id, path FROM attachments WHERE id = ?", attachmentId)).filter((r): r is Row => !!r);
+      const elsewhere = this.attachmentsMentionedElsewhere(id, rows.map(r => r.id as string));
+      const attachments = rows.filter(r => !elsewhere.has(r.id as string)).map(r => ({ id: r.id as string, path: r.path as string }));
       // 프로젝트 행에 외래 키로 묶이지 않은 기록부터 지운다. 나머지는 ON DELETE CASCADE 가 지운다.
       this.run(`DELETE FROM decision_close_audit WHERE decision_id IN (SELECT id FROM decisions WHERE project_id = ?1)
         OR answered_decision_id IN (SELECT id FROM decisions WHERE project_id = ?1)`, id);
@@ -3029,6 +3025,52 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       this.emitProjects();
       return { project, memberIds, attachments };
     }, "immediate");
+  }
+
+  /**
+   * `ids` 중 다른 프로젝트의 대화·자료·결재(그림·답·직전 답)·할 일·전달 글 어딘가에 글자 그대로 들어 있는 것.
+   * 예전 질의(첨부마다 `instr(열, id) > 0`)와 같은 답을, 그 기록을 한 번만 읽어 낸다: 어떤 id 든 그 첫 두 글자(앵커)가 나오는
+   * 자리에서만 시작할 수 있으므로, 앵커가 나오는 자리마다 그 길이의 글자를 잘라 후보 집합에서 찾는다. 다 찾으면 바로 멈춘다.
+   */
+  private attachmentsMentionedElsewhere(projectId: string, ids: string[]): Set<string> {
+    const found = new Set<string>();
+    const remaining = new Set(ids);
+    // 빈 id 는 앵커가 없다(instr 은 NULL 이 아닌 모든 값에서 1, COALESCE 한 열은 NULL 에서도 1): 예전 질의 그대로 묻는다.
+    if (remaining.delete("") && this.row(`SELECT 1 FROM messages WHERE project_id != ?1 AND instr(attachments, ?2) > 0
+        UNION ALL SELECT 1 FROM files WHERE project_id != ?1 AND instr(attachments, ?2) > 0
+        UNION ALL SELECT 1 FROM decisions WHERE project_id != ?1 AND (instr(images, ?2) > 0 OR instr(COALESCE(answer_attachments, ''), ?2) > 0 OR instr(COALESCE(last_answer_attachments, ''), ?2) > 0)
+        UNION ALL SELECT 1 FROM todos WHERE project_id != ?1 AND instr(completion_file_ids, ?2) > 0
+        UNION ALL SELECT 1 FROM deliveries WHERE project_id != ?1 AND instr(text, ?2) > 0 LIMIT 1`, projectId, "")) found.add("");
+    if (!remaining.size) return found;
+    const anchors = new Map<string, Set<number>>();
+    for (const id of remaining) {
+      const anchor = id.slice(0, 2);
+      let lengths = anchors.get(anchor);
+      if (!lengths) anchors.set(anchor, lengths = new Set());
+      lengths.add(id.length);
+    }
+    const decoder = new TextDecoder();
+    const sql = `SELECT attachments AS v FROM messages WHERE project_id != ?1
+      UNION ALL SELECT attachments FROM files WHERE project_id != ?1
+      UNION ALL SELECT images FROM decisions WHERE project_id != ?1
+      UNION ALL SELECT answer_attachments FROM decisions WHERE project_id != ?1
+      UNION ALL SELECT last_answer_attachments FROM decisions WHERE project_id != ?1
+      UNION ALL SELECT completion_file_ids FROM todos WHERE project_id != ?1
+      UNION ALL SELECT text FROM deliveries WHERE project_id != ?1`;
+    for (const row of this.db.query<{ v: unknown }, [string]>(sql).iterate(projectId)) {
+      if (row.v === null || row.v === undefined) continue;
+      const text = typeof row.v === "string" ? row.v : row.v instanceof Uint8Array ? decoder.decode(row.v) : String(row.v);
+      for (const [anchor, lengths] of anchors) {
+        for (let at = text.indexOf(anchor); at !== -1; at = text.indexOf(anchor, at + 1)) {
+          for (const length of lengths) {
+            const id = text.slice(at, at + length);
+            if (remaining.delete(id)) found.add(id);
+          }
+        }
+      }
+      if (!remaining.size) break;
+    }
+    return found;
   }
 
   /** 프로젝트 내보내기용 읽기. 토큰·전달 내부 기록은 싣지 않는다. 대화는 오래된 것부터 묶음으로 읽는다(큰 프로젝트도 메모리에 다 올리지 않는다). */

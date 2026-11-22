@@ -159,9 +159,13 @@ describe("보수적 저장소 정리", () => {
     writeFileSync(join(uploadsDir, "orphan.bin"), "orphan");
     writeFileSync(join(inboxDir, "closed-member"), "inbox");
     writeFileSync(join(backupDir, "old.db"), "backup");
+    const publishedId = manifest(published).id;
     const result = maintenance.sweep(Date.now() + 100 * STAGING_GRACE_MS);
     expect(result.removed).toEqual([]);
-    expect(result.retained.sort()).toEqual([manifest(active).id, manifest(published).id].sort());
+    // 게시를 마친 기록(.staging 의 manifest)만 치우고, 게시된 파일은 그대로다.
+    expect(result.retained).toEqual([manifest(active).id]);
+    expect(result.cleared).toEqual([publishedId]);
+    expect(existsSync(published.directory)).toBe(false);
     expect(existsSync(saved.path)).toBe(true);
     expect(readFileSync(join(uploadsDir, "orphan.bin"), "utf8")).toBe("orphan");
     expect(readFileSync(join(inboxDir, "closed-member"), "utf8")).toBe("inbox");

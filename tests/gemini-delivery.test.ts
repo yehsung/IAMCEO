@@ -66,10 +66,12 @@ async function setup(cli: "gemini" | "claude" = "gemini", fake: Partial<FakeCore
     }
     return { originalWrite: "settled" as const, externalInput, unconfirmed: true, riskApproved };
   };
-  runner = new CoreRunner({ socketPath: core.socketPath, claudeBin: FAKE_BIN, codexBin: FAKE_BIN, geminiBin: FAKE_BIN, claudeHome, codexHome, geminiHome, contextHome: home },
+  /** 운영과 같은 배선의 실행기. 서버를 다시 켠 것처럼 새로 만들 수 있다(restart). */
+  const makeRunner = () => new CoreRunner({ socketPath: core.socketPath, claudeBin: FAKE_BIN, codexBin: FAKE_BIN, geminiBin: FAKE_BIN, claudeHome, codexHome, geminiHome, contextHome: home },
     { pollMs: 20, rpcTimeoutMs: 2000, sendTimeoutMs: 300, contextTimeoutMs: 300, hookShadow: false, recoveryStore: store,
       repair: { load: (memberId, request) => service.repair.load(memberId, request), prepare: (memberId, request, dispatch) => service.repair.prepare(memberId, request, dispatch) },
       quiescence: (_memberId, dispatch) => quiescence(dispatch) });
+  runner = makeRunner();
   /** 복구가 실행기에 다시 넣기를 맡기기 직전에 끼워 넣을 일(확인과 다시 넣기 사이에 상태가 바뀌는 경우를 만든다). */
   let beforeRepair: (() => Promise<void>) | null = null;
   const recoveryRunner = {
@@ -81,11 +83,12 @@ async function setup(cli: "gemini" | "claude" = "gemini", fake: Partial<FakeCore
   service = new DeliveryRecovery({ store, runner: () => recoveryRunner, admit: () => true, writing: () => false, writerDone: () => true, now: () => time });
   const events: RunnerEvent[] = [];
   // 총괄이 하듯 실행기가 알아낸 터미널·대화 id 를 명부에 적는다.
-  runner.on(event => {
+  const listen = (event: RunnerEvent) => {
     events.push(event);
     if (event.type === "session" && event.memberId === id) store.patchMember(id, { sessionId: event.sessionId });
     if (event.type === "pane" && event.memberId === id) store.patchMember(id, { paneId: event.paneId });
-  });
+  };
+  runner.on(listen);
   cleanups.push(async () => { await service.shutdown(); await runner.shutdown(); await core.stop(); db.close(); rmSync(home, { recursive: true, force: true }); });
   const member = () => store.requireMember(id);
   const rm = (): RunnerMember => ({ ...member(), sessionGeneration: store.memberRevisions(id).sessionGeneration, model: null, effort: null, subagentModel: null, permissionMode: "bypassPermissions" });
@@ -103,13 +106,31 @@ async function setup(cli: "gemini" | "claude" = "gemini", fake: Partial<FakeCore
     service.recordResult(dispatch.dispatchId, result);
     return { dispatch, result };
   }
+  /** 서버가 쓰기 도중에 다시 켜진 것처럼: 봉투를 쓰기 시작으로 적고 넣기를 시작만 한다(결과는 복구에 적지 않는다). */
+  function beginEnvelope(deliveryId: string): { dispatch: DeliveryDispatch; sending: Promise<SendResult> } {
+    const observed = runner.observationState(id)!;
+    const hookMark = runner.deliveryHookMark(rm());
+    const dispatch = service.prepareDispatch([deliveryId], observed.identity, { serverEpoch: "test-epoch", turn: observed.turn, inputEpoch: observed.inputEpoch, logs: runner.deliveryBaseline(rm()), capturedAt: new Date().toISOString(), ...(hookMark !== undefined ? { hookMark } : {}) });
+    store.transaction(() => {
+      store.updateDispatch(dispatch.dispatchId, "prepared", "write_started");
+      store.setDeliveryStatus(deliveryId, "delivering", { attempt: true });
+    });
+    return { dispatch, sending: runner.send(rm(), dispatch.wireText, { ...opts, marker: dispatch.bundleMarker }) };
+  }
+  /** 서버를 다시 켠 것처럼 실행기를 닫고 새로 만든다(터미널은 엔진에 그대로 남는다). 새 실행기는 아직 터미널에 붙지 않았다. */
+  async function restart(): Promise<CoreRunner> {
+    await runner.shutdown();
+    runner = makeRunner();
+    runner.on(listen);
+    return runner;
+  }
   /** 다음 확인 시각으로 시계를 돌리고 확인을 한 번 돈다. */
   async function check(deliveryId: string, advanceMs = 0) {
     time = Math.max(time + advanceMs, Date.parse(r(deliveryId).nextCheckAt ?? new Date(time).toISOString()));
     await service.tick();
   }
   const notice = (deliveryId: string) => service.memberNotices(id).items.find(item => item.id === deliveryId);
-  return { home, core, store, project, id, opts, member, rm, r, events, sendEnvelope, check, notice,
+  return { home, core, store, project, id, opts, member, rm, r, events, sendEnvelope, beginEnvelope, restart, check, notice,
     get runner() { return runner; }, get service() { return service; }, get now() { return time; }, set beforeRepair(value: (() => Promise<void>) | null) { beforeRepair = value; } };
 }
 
@@ -290,6 +311,49 @@ describe("결과를 모르는 Gemini 전달: 대표가 중복 위험을 알고 �
     expect(again.dispatch.identity).toMatchObject({ terminalId: reopened.paneId, sessionId: conversation });
     await until("전달", () => f.core.turns(f.id).length === 2);
     expect(f.core.turns(f.id)[1]!.terminal).toBe(reopened.paneId);
+  });
+  test("첫 전달의 /mcp 띄우기 도중 서버가 다시 켜져 MCP 관리 창이 남아도: 다시 붙은 뒤의 복구 확인이 창을 Esc 로 닫고 다시 읽어, 대표가 다시 보내기를 고르면 넣는다", async () => {
+    const f = await setup();
+    const started = await f.runner.start(f.rm(), f.opts);
+    const d = f.store.enqueue({ projectId: f.project.id, memberId: f.id, kind: "instruction", text: "첫 지시" });
+    // 옛 서버: 봉투를 쓰기 시작으로 적고, 첫 전달 앞의 /mcp 로 관리 창을 연 뒤 Esc 를 누르기 전에 꺼졌다(배포·앱 업데이트).
+    let atEsc!: () => void;
+    const reached = new Promise<void>(resolve => { atEsc = resolve; });
+    f.core.intercept(call => { if (call.method !== "terminal.keys") return undefined; atEsc(); return "drop"; });
+    const { dispatch, sending } = f.beginEnvelope(d.id);
+    await reached;
+    await f.restart();
+    f.core.intercept(null);
+    await sending; // 옛 실행기의 넣기는 결과를 남기지 못한다(복구에 적지 않는다).
+    expect(f.core.mcpOpens).toEqual([started.paneId]);
+    expect(f.core.mcpPanelOpen(f.id)).toBe(true);
+    expect(f.store.getDispatch(dispatch.dispatchId)!.transportState).toBe("write_started");
+    expect(f.core.turns(f.id)).toEqual([]);
+    // 새 서버가 같은 터미널에 다시 붙는다. 쓰기 결과를 모르는 봉투가 있어 넣기는 막혀 있다(그래서 넣기 안의 MCP 띄우기가 창을 닫지 못한다).
+    expect(await f.runner.reattachOwned(f.rm())).toMatchObject({ outcome: "rejoined", started: { paneId: started.paneId } });
+    expect(await f.runner.send(f.rm(), "다른 글", f.opts)).toMatchObject({ ok: false, reason: "busy" });
+    const keysBefore = f.core.keys.length;
+    // 복구 확인: 관리 창이 보이고 쉬는 중이라 Esc 로 닫고 다시 읽는다. 입력칸은 빈 칸이다(창이 남아 있으면 '모름'이라 다시 보내기가 거절됐다).
+    await f.check(d.id);
+    expect(f.core.mcpPanelOpen(f.id)).toBe(false);
+    expect(f.core.keys.slice(keysBefore).map(k => k.keys)).toEqual([["esc"]]);
+    expect(f.r(d.id).evidence[1]).toMatchObject({ source: "core_screen", code: "empty" });
+    // 창이 닫힌 뒤의 확인은 키를 보내지 않는다.
+    await f.check(d.id, 121_000);
+    expect(f.core.keys.length).toBe(keysBefore + 1);
+    const asked = f.notice(d.id)!;
+    expect(asked).toMatchObject({ phase: "needs_owner", reason: "log_missing" });
+    expect(asked.allowedActions).toEqual(["recheck", "retry_with_risk", "stop_retry"]);
+    await f.service.recover(d.id, { operationId: randomUUID(), expectedVersion: asked.version, action: "retry_with_risk", acceptDuplicateRisk: true });
+    await f.check(d.id);
+    await until("재전송", () => f.core.turns(f.id).length === 1);
+    expect(f.core.turns(f.id)[0]!.prompt).toContain(dispatch.markers[0]!.marker);
+    expect(f.core.turns(f.id)[0]!.terminal).toBe(started.paneId);
+    expect(f.store.requireDelivery(d.id).status).toBe("delivered");
+    expect(f.service.fenced(f.id)).toBe(false);
+    // 관리 창이 이미 MCP 를 띄웠다: /mcp 는 옛 서버의 한 번뿐이고, 다시 보낸 턴에는 연결 도구가 있다.
+    expect(f.core.mcpOpens).toHaveLength(1);
+    expect(f.core.turns(f.id)[0]!.mcp).toBe(true);
   });
 });
 

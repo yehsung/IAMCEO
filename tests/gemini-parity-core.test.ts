@@ -245,6 +245,27 @@ describe("결재함 승인: 모드별로 agy 가 물을 종류에만 카드(Clau
     expect(asked("fallback")).toEqual(["edit_outside", "read_outside", "mcp", "web"]);
     for (const odd of [null, undefined, "", "Bash", "read"]) expect(geminiNeedsCard(odd, "default")).toBe(false);
   });
+  test("대신하는 모드(fallback): 샌드박스 밖으로 돌리려는 명령(run_command BypassSandbox:true)은 agy 가 묻으므로 카드. 샌드박스 안 명령과 auto 의 명령은 카드 없음", async () => {
+    // agy 1.5.14 헤드리스 실측(gemini-inject.ts GeminiSettingsInput.autoFallback): accept-edits + 터미널 샌드박스 + proceed-in-sandbox 는
+    // 샌드박스 안 명령을 묻지 않고 샌드박스 밖 명령만 묻는다(auto 의 평가기가 없다). 훅은 모델이 준 BypassSandbox 를 그대로 싣는다.
+    expect(geminiNeedsCard("command", "fallback", { CommandLine: "npm install", BypassSandbox: true })).toBe(true);
+    expect(geminiNeedsCard("command", "fallback", { CommandLine: "npm install", BypassSandbox: false })).toBe(false);
+    expect(geminiNeedsCard("command", "fallback", { CommandLine: "npm install" })).toBe(false);
+    expect(geminiNeedsCard("command", "fallback")).toBe(false);
+    // auto 는 샌드박스 밖 명령도 agy 의 평가기가 위험한 것만 묻는다: 훅에서는 알 수 없어 그대로 agy 에 맡긴다.
+    expect(geminiNeedsCard("command", "auto", { CommandLine: "npm install", BypassSandbox: true })).toBe(false);
+    // 명령이 아닌 종류에 그 칸이 실려도 표 그대로다.
+    expect(geminiNeedsCard("edit", "fallback", { Path: "/w/a.ts", BypassSandbox: true })).toBe(false);
+    const { store, member, dir } = storeFixture();
+    const tp = permissions(store, () => "fallback");
+    expect(await tp.request(member, gemini("run_command", { CommandLine: "npm test", Cwd: dir }, "command"))).toEqual({ id: null, state: "closed" });
+    expect(store.listOpenToolPermissions()).toEqual([]);
+    const pending = tp.request(member, gemini("run_command", { CommandLine: "npm install", Cwd: dir, BypassSandbox: true }, "command"));
+    const card = store.listOpenToolPermissions()[0]!;
+    expect(card.toolPermission).toMatchObject({ tool: "run_command", action: "명령 실행", target: "npm install", cwd: dir });
+    tp.answer(card.id, { choice: "allow" });
+    expect(await pending).toEqual({ id: card.id, state: "allow" });
+  });
   test("연결 도구는 Claude 와 같은 mcp__서버__도구 이름과 그 인자로 보인다", () => {
     expect(geminiToolForCard("call_mcp_tool", { ServerName: "github", ToolName: "create_issue", Arguments: { title: "버그" } })).toEqual({ toolName: "mcp__github__create_issue", toolInput: { title: "버그" } });
     expect(geminiToolForCard("call_mcp_tool", { ServerName: "a b/c", ToolName: "x" }).toolName).toBe("mcp__a_b_c__x");
@@ -392,7 +413,7 @@ describe("결재함 승인: 실제 훅 스크립트 → 실제 서버(/agent/per
     const answer = await fetch(`${base}/api/decisions/${card.id}/answer`, { method: "POST", headers: { Authorization: `Bearer ${config.accessCode}`, "Content-Type": "application/json" }, body: JSON.stringify({ choice: "allow" }) });
     expect(answer.status).toBe(200);
     // agy 1.5.14 는 overwrite 의 Cwd 를 적용하지 않는다(실측). 명령 글 앞의 cd 로 프로젝트에서 돈다. 카드에는 모델이 쓴 글(bun test)만 보인다.
-    const inWork = `cd '${isolated.paths.work.replace(/'/g, "'\\''")}' && {\nbun test\n}`;
+    const inWork = `cd '${isolated.paths.work.replace(/'/g, "'\\''")}' && {\nbun test\n\n}`;
     expect(JSON.parse(await output)).toEqual({ decision: "auto_approve", overwrite: { CommandLine: inWork } });
     expect(await child.exited).toBe(0);
     // auto 로 바꾸면 같은 명령은 카드 없이 agy 에 맡긴다(cd 를 붙인 명령 글만).

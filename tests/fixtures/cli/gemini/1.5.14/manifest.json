@@ -713,7 +713,9 @@
       "note": "~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl 의 압축 앞뒤 네 줄: 마지막 답(PLANNER_RESPONSE) → USER_INPUT '<USER_REQUEST>\\n/compact\\n</USER_REQUEST>…' → {source SYSTEM, type CHECKPOINT, status DONE, input_tokens, cache_read_tokens, output_tokens, truncated_fields:[content], content '# Resuming from a compaction…'} → 다음 사용자 글. step_index 는 압축 뒤에도 이어진다. transcript_full.jsonl 도 같은 내용.",
       "expect": {
         "compactOutcome": "succeeded",
-        "promptTokens": null,
+        "promptTokens": {
+          "compacted": true
+        },
         "hasModelResponse": true
       }
     },

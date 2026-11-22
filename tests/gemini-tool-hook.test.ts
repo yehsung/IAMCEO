@@ -69,8 +69,8 @@ describe("geminiToolHookSet: hooks.json 의 PreToolUse 묶음과 설정 파일",
   });
 });
 
-/** 훅이 명령 글 앞에 붙이는 cd 묶음(gemini-tool-hook.ts SCRIPT 의 head). agy 1.5.14 는 overwrite 의 Cwd 를 적용하지 않는다(실측). */
-const inDir = (dir: string, command: string): string => `cd '${dir.replace(/'/g, "'\\''")}' && {\n${command}\n}`;
+/** 훅이 명령 글을 감싸는 cd 묶음(gemini-tool-hook.ts SCRIPT 의 head, 닫는 } 앞의 빈 줄 포함). agy 1.5.14 는 overwrite 의 Cwd 를 적용하지 않는다(실측). */
+const inDir = (dir: string, command: string): string => `cd '${dir.replace(/'/g, "'\\''")}' && {\n${command}\n\n}`;
 
 describe("작업 폴더 바로잡기(스크립트를 실제로 돌린다)", () => {
   test("run_command 의 Cwd 가 없으면(agy 는 첫째 작업 공간 = 주입 폴더에서 돌린다) 명령 글 앞에 프로젝트로 가는 cd 를 붙인다(Cwd 는 바꾸지 않는다)", async () => {
@@ -103,7 +103,7 @@ describe("작업 폴더 바로잡기(스크립트를 실제로 돌린다)", () =
     const fresh = await runHook(command, preToolUse("run_command", { CommandLine: "export A=1", RunPersistent: true, RequestedTerminalID: "" }, workspaces));
     expect(JSON.parse(fresh.stdout)).toEqual({ decision: "allow", overwrite: { CommandLine: inDir(project, "export A=1") } });
   });
-  test("바꿔 쓴 명령은 sh·bash·zsh 에서 원래 명령의 ; · & · 끝 주석 · here-document · 종료 코드를 그대로 지키며 그 폴더에서 돈다(따옴표가 든 폴더 이름 포함)", async () => {
+  test("바꿔 쓴 명령은 sh·bash·zsh 에서 원래 명령의 ; · & · 끝 주석 · here-document · 끝 백슬래시 · 종료 코드를 그대로 지키며 그 폴더에서 돈다(따옴표가 든 폴더 이름 포함)", async () => {
     const root = temp();
     const home = join(root, ".iamceo"), run = join(home, "run"), project = join(root, "it's proj");
     const injectDir = join(run, "m_lead1.gemini", "agy", "m_lead1");
@@ -117,6 +117,9 @@ describe("작업 폴더 바로잡기(스크립트를 실제로 돌린다)", () =
       ["cat <<'EOF'\nhere\nEOF\npwd", `here\n${project}\n`, 0],
       ["true & pwd; wait", `${project}\n`, 0],
       ["pwd && exit 3", `${project}\n`, 3],
+      // 끝 백슬래시(줄 잇기): 닫는 } 앞의 빈 줄이 이어질 줄이 되어 } 를 먹지 않는다(빈 줄이 없으면 'unexpected end of file', 아무것도 돌지 않았다).
+      ["pwd; echo a \\", `${project}\na\n`, 0],
+      ["echo a \\\n", "a\n", 0],
     ];
     const shells = ["/bin/sh", "/bin/bash", "/bin/zsh"].filter(shell => { try { return statSync(shell).isFile(); } catch { return false; } });
     expect(shells.length).toBeGreaterThan(0);
@@ -129,6 +132,20 @@ describe("작업 폴더 바로잡기(스크립트를 실제로 돌린다)", () =
         const [text, exit] = await Promise.all([new Response(child.stdout).text(), child.exited]);
         expect([shell, original, text, exit]).toEqual([shell, original, stdout, code]);
       }
+    }
+  });
+  test("알려진 한계: 닫는 줄이 없는 here-document 는 닫는 } 까지 먹어 문법 오류로 아무것도 돌지 않는다(원래는 경고만 하고 돈다. 모델 쪽 오류라 두고, eval 로 감싸지 않는다)", async () => {
+    // eval 로 감싸면 이 경우도 원래와 같아지지만, agy 창에 보이는 명령과 '이 글자로 시작하는 명령 항상 허용'의 기준이 바뀐다(gemini-tool-hook.ts).
+    const { command, project, injectDir, workspaces } = layout();
+    const original = "cat <<EOF\nline1\nline2";
+    const out = await runHook(command, preToolUse("run_command", { CommandLine: original }, workspaces));
+    const rewritten = JSON.parse(out.stdout).overwrite.CommandLine as string;
+    expect(rewritten).toBe(inDir(project, original));
+    const shells = ["/bin/sh", "/bin/bash", "/bin/zsh"].filter(shell => { try { return statSync(shell).isFile(); } catch { return false; } });
+    for (const shell of shells) {
+      const child = Bun.spawn([shell, "-c", rewritten], { cwd: injectDir, stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
+      const [text, exit] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+      expect([shell, text, exit === 0]).toEqual([shell, "", false]);
     }
   });
   test("파일 쓰기 도구의 경로가 주입 폴더 안이면 막는다(까닭에 작업 폴더). 상대 경로는 첫째 작업 공간에 붙여 읽는다", async () => {
@@ -250,6 +267,13 @@ describe("결재함 승인(스크립트를 실제로 돌리고, 서버는 가짜
     expect(server.seen[0]).toEqual({ path: "/agent/permission", auth: "Bearer member-token-1", body: {
       toolName: "run_command", toolInput: { CommandLine: "npm test", WaitMsBeforeAsync: 5000, Cwd: t.project }, sessionId: CONV, cwd: t.project,
       cli: "gemini", geminiKind: "command", toolCallId: "call_646705910486809191" } });
+  });
+  test("모델이 준 BypassSandbox 는 요청의 toolInput 에 그대로 실린다(대신하는 모드에서 서버가 카드를 여는 근거)", async () => {
+    const server = fakeServer(() => ({ id: null, state: "closed" }));
+    const t = permissionLayout(server.url);
+    await runHook(t.command, preToolUse("run_command", { CommandLine: "npm install", BypassSandbox: true, WaitMsBeforeAsync: 5000 }, t.workspaces));
+    expect(server.seen).toHaveLength(1);
+    expect(server.seen[0]!.body).toMatchObject({ geminiKind: "command", toolInput: { CommandLine: "npm install", BypassSandbox: true, Cwd: t.project } });
   });
   test("거절 → deny + 대표 메모(모델이 받는 까닭), 기다림(pending) 뒤의 답도 받는다", async () => {
     let polls = 0;

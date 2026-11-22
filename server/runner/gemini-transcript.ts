@@ -66,16 +66,22 @@ function tailEntries(geminiHome: string, conversationId: string): Record<string,
   } catch { return null; } finally { try { closeSync(fd); } catch { /* 이미 닫혔다 */ } }
 }
 
+/** 마지막 모델 호출의 프롬프트 크기와 모델 이름(geminiPromptTokens). */
+export interface GeminiPromptTokens { tokens: number; model: string | null; at: string | null }
+/** 마지막 모델 호출 뒤에 압축(CHECKPOINT)이 있었다: 압축 뒤 크기를 아직 모른다(geminiPromptTokens). */
+export interface GeminiPromptCompacted { compacted: true }
+
 /**
  * 마지막 모델 호출(source MODEL, 토큰 칸이 있는 줄)의 프롬프트 크기(input_tokens + cache_read_tokens)와 모델 이름. 그 뒤에 압축(CHECKPOINT)이 있었으면
- * 압축 뒤 아직 모델을 부르지 않은 것이라 null 이다(압축 전 크기를 지금 크기로 적지 않는다). 기록이 없거나 그런 줄이 없으면 null.
+ * 압축 뒤 아직 모델을 부르지 않은 것이라 `{ compacted: true }` 다(압축 전 크기를 지금 크기로 적지 않는다. 부르는 쪽은 그때 상태줄의 % 도 압축 전 값이라
+ * 쓰지 않는다: 1.5.14 실측에서 상태줄은 압축 뒤 첫 모델 호출 전까지 압축 전 값을 다시 그렸다). 기록이 없거나 그런 줄이 없으면 null.
  */
-export function geminiPromptTokens(geminiHome: string, conversationId: string): { tokens: number; model: string | null; at: string | null } | null {
+export function geminiPromptTokens(geminiHome: string, conversationId: string): GeminiPromptTokens | GeminiPromptCompacted | null {
   const entries = tailEntries(geminiHome, conversationId);
   if (!entries) return null;
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
-    if (isGeminiCheckpoint(entry)) return null;
+    if (isGeminiCheckpoint(entry)) return { compacted: true };
     if (entry.source !== "MODEL") continue;
     const input = count(entry.input_tokens), cached = count(entry.cache_read_tokens);
     if (input === null) continue;

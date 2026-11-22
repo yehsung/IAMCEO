@@ -16,7 +16,7 @@ import { geminiStatusLineLaunch } from "../server/runner/gemini-statusline.ts";
 import type { DeliveryDispatch } from "../server/service-contracts.ts";
 import type { DeliveryProbe, RunnerEvent, RunnerMember, StartOpts } from "../server/runner/types.ts";
 import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
-import { composerScreen, coreSetup, geminiComposerScreen, primesMcp, rejection, startFakeCore, type FakeCore, type FakeCoreCall, type FakeCoreOptions } from "./fixtures/core-harness.ts";
+import { composerScreen, coreSetup, GEMINI_MCP_PANEL, geminiComposerScreen, primesMcp, rejection, startFakeCore, type FakeCore, type FakeCoreCall, type FakeCoreOptions } from "./fixtures/core-harness.ts";
 
 const ITEM = "#iamceo_AAAAAAAAAAAAAAAAAAAAAA";
 const ITEM2 = "#iamceo_CCCCCCCCCCCCCCCCCCCCCC";
@@ -943,6 +943,32 @@ describe("문맥·서브에이전트·진전: 상태줄 기록에서", () => {
     expect(await until("문맥 사건", () => ofType(g.events, "context_usage").at(-1))).toMatchObject({ tokens: 20_000, model: "gemini-4-neon" });
     expect(g.core.runs()[0]!.argv).toContain("gemini-4-neon");
   });
+  test("압축 뒤 모델 호출이 없던 턴(장애·중단)은 상태줄의 압축 전 % 를 싣지 않는다(재지 않는다). 압축 뒤 첫 모델 호출이 있으면 그 크기로 다시 잰다", async () => {
+    // 1.5.14 실측(core.ts reportGeminiContext): 압축이 끝난 뒤에도 상태줄은 첫 모델 호출 전까지 압축 전 값을 그대로 다시 그린다(16,552 그대로).
+    // 그 % 를 정확한 값으로 내면 총괄이 '자동 압축 뒤에도 기준 이상'으로 읽어 그 세션의 자동 압축을 끈다(Claude 의 compactedAfterUsage 와 같은 뜻으로 막는다).
+    const store = compactStore();
+    const f = await setup({}, {}, { compactStore: store.port });
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    const id = await turn(f, live, "큰 일 @fake:usage=150000 @fake:window=200000");
+    expect(await until("문맥 사건", () => ofType(f.events, "context_usage").at(-1))).toMatchObject({ tokens: 150_000, exact: { window: 200_000, source: "statusline" } });
+    const known = { ...live, sessionId: id };
+    expect(await f.runner.compact(known, "", f.opts)).toMatchObject({ ok: true });
+    await until("압축 끝", () => ofType(f.events, "compacted").length === 1);
+    await until("묶임 풀림", () => !f.runner.isBusy("m_gem1"));
+    const measured = ofType(f.events, "context_usage").length;
+    // 압축 뒤의 턴이 모델 답 없이 장애로 끝난다. 그동안 agy 는 상태줄에 압축 전 75% 를 다시 그린다.
+    f.core.setOnTurn(() => { f.core.drawGeminiStatus("m_gem1", { context_window: { used_percentage: 75, context_window_size: 200_000, total_input_tokens: 150_000, total_output_tokens: 5 } }); return false; });
+    const ended = ofType(f.events, "turn_end").length;
+    expect(await f.runner.send(known, "다음 일 @fake:error=Model%20unavailable", f.opts)).toMatchObject({ ok: true });
+    await until("장애 턴 끝", () => ofType(f.events, "turn_end").length > ended);
+    expect(ofType(f.events, "turn_end").at(-1)).toMatchObject({ isError: true });
+    expect(ofType(f.events, "context_usage").slice(measured)).toEqual([]);
+    // 압축 뒤 첫 모델 호출이 있으면 그 호출의 크기가 정확한 값이다.
+    f.core.setOnTurn(null);
+    await turn(f, known, "그다음 일 @fake:usage=30000 @fake:window=200000");
+    expect(ofType(f.events, "context_usage").slice(measured)).toEqual([expect.objectContaining({ tokens: 30_000, shownPct: null, exact: { window: 200_000, source: "statusline" } })]);
+  });
   test("대화 기록을 읽지 못하면 예전처럼 상태줄이 알려 준 % 다(토큰 수 없이)", async () => {
     const f = await setup();
     const elsewhere = join(f.home, "other-gemini-home");
@@ -1235,6 +1261,38 @@ describe("전달 수신 증거: 훅 기록(PreInvocation)의 표지", () => {
     // 다른 세대의 봉투는 보지 않는다.
     expect(f.runner.inspectGoneDelivery({ ...known, paneId: null, sessionGeneration: 2 }, first)).toMatchObject({ finding: "unknown", evidence: [{ source: "gemini_log", code: "identity_changed" }] });
     expect(f.runner.inspectGoneDelivery({ ...known, paneId: null }, { ...first, cli: "codex" })).toMatchObject({ finding: "unknown", evidence: [{ source: "gemini_log", code: "identity_changed" }] });
+  });
+  test("복구 확인의 MCP 관리 창 닫기는 창이 보이고 OSC 가 쉬는 중이며 그 터미널에 아직 입력이 없을 때만이다: 빈 입력칸·승인 창·신뢰 창(OSC 막힘)·이미 입력이 들어간 터미널에는 키를 보내지 않는다", async () => {
+    // 닫는 쪽(서버 재시작 뒤 남은 창을 닫고 다시 보내기까지)은 tests/gemini-delivery.test.ts 의 '관리 창이 남아도' 시험이 본다.
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    const markers = [{ deliveryId: "d1", marker: ITEM }];
+    const panel = geminiComposerScreen("", "", `${GEMINI_MCP_PANEL}IAMCEO · fake-model`);
+    // 쉬는 중이어도 관리 창이 아니면(빈 입력칸) 누르지 않는다.
+    expect((await f.runner.inspectDelivery(live, probe(f, f.runner, live, markers, f.runner.deliveryHookMark(live), null))).evidence[1]).toMatchObject({ source: "core_screen", code: "empty" });
+    // 승인 창·신뢰 창은 OSC 막힘이다: 화면이 관리 창처럼 보여도 누르지 않는다.
+    const blocked: [Parameters<FakeCore["setStatus"]>[1], string][] = [
+      [{ state: "blocked", kind: "permission", app: "antigravity", msg: "Approve Bash: ls" }, realScreen("approval-command")],
+      [{ state: "blocked", kind: "permission", app: "antigravity", msg: "Trust this folder?" }, realScreen("folder-trust")],
+      [{ state: "blocked", kind: "permission", app: "antigravity", msg: "Approve Bash: ls" }, panel],
+    ];
+    for (const [status, screen] of blocked) {
+      f.core.setStatus("m_gem1", status);
+      f.core.setScreen("m_gem1", screen);
+      expect((await f.runner.inspectDelivery(live, probe(f, f.runner, live, markers, f.runner.deliveryHookMark(live), null))).finding).toBe("wait");
+    }
+    expect(f.core.keys).toEqual([]);
+    // 첫 전달이 들어간 터미널(MCP 띄우기가 끝났다): 그 뒤에 보이는 관리 창은 사람이 연 것이라 그대로 둔다(입력칸은 모름).
+    f.core.setStatus("m_gem1", { state: "idle", app: "antigravity" });
+    f.core.setScreen("m_gem1", null);
+    const id = await turn(f, live, "첫 지시");
+    const known = { ...live, sessionId: id };
+    const pressed = f.core.keys.length;
+    f.core.setStatus("m_gem1", { state: "idle", app: "antigravity" });
+    f.core.setScreen("m_gem1", panel);
+    expect((await f.runner.inspectDelivery(known, probe(f, f.runner, known, markers, f.runner.deliveryHookMark(known), id))).evidence[1]).toMatchObject({ source: "core_screen", code: "unknown" });
+    expect(f.core.keys.length).toBe(pressed);
   });
   test("훅을 넣지 않는 환경이면 자리도 근거도 없다(모름)", async () => {
     const f = await setup();

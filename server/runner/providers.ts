@@ -9,7 +9,8 @@ import { writeStatuslineWrapper } from "./statusline.ts";
 import { hookEventsDir, hookSettings, mergeHooks } from "./hooks.ts";
 import { permissionHook } from "./permission-hook.ts";
 import { subagentEnv } from "./env.ts";
-import { geminiHookEventsDir, geminiHooksConfig } from "./gemini-hooks.ts";
+import { geminiHookEventsDir, geminiHooksFile, geminiRecorderHookSet, type GeminiHookSet } from "./gemini-hooks.ts";
+import { geminiToolHookSet } from "./gemini-tool-hook.ts";
 import { geminiInjectDir, geminiSettings, writeGeminiInjectDir } from "./gemini-inject.ts";
 import { geminiStatusLine } from "./gemini-statusline.ts";
 
@@ -92,16 +93,22 @@ function geminiLaunch(member: RunnerMember, opts: StartOpts, bins: ProviderBins,
   if (opts.resume && !member.sessionId) throw new CoreError("session_unknown", "Antigravity conversation id is unknown; reattach the existing core terminal or explicitly start a fresh session");
   const events = bins.hookEvents ?? process.env.IAMCEO_HOOK_EVENTS !== "0";
   // 경로로 쓸 수 없는 팀장 id·상대 경로면 여기서 던진다(띄우지 않는다). 아래의 '빼고 띄웁니다' 줄이 띄우지도 않을 것에 남지 않게 먼저 본다.
-  geminiInjectDir(opts.systemPromptFile, member.id);
+  const plannedInjectDir = geminiInjectDir(opts.systemPromptFile, member.id);
   // 훅·상태줄을 만들지 못해도 CLI 는 띄운다(기록이 없을 뿐이다). 지침·MCP 를 쓰지 못하면 띄우지 않는다.
-  let hooks: Record<string, unknown> | null = null;
+  // 훅은 장치마다 따로 만든다(gemini-hooks.ts geminiHooksFile): 한 장치를 만들지 못해도 나머지는 그대로 싣는다.
+  const hookSets: GeminiHookSet[] = [];
   // 만들지 못한 것은 서버 기록에 한 줄 남긴다: 그 세션은 뜨지만 대화 id·문맥 %·전달 수신 확인의 근거가 줄어든다. 까닭은 오류 종류만 적는다(경로·열쇠는 적지 않는다).
   const why = (error: unknown): string => (error as NodeJS.ErrnoException)?.code ?? (error instanceof Error ? error.name : "error");
   if (bins.contextHome && events) {
-    try { hooks = geminiHooksConfig({ memberId: member.id, eventsDir: geminiHookEventsDir(bins.contextHome) }); }
+    try { hookSets.push(geminiRecorderHookSet({ memberId: member.id, eventsDir: geminiHookEventsDir(bins.contextHome) })); }
     catch (error) { console.warn(`[gemini] ${member.id}: 훅 기록을 만들지 못해 훅 없이 띄웁니다. 전달 수신 확인과 대화 id 의 둘째 근거(훅 기록)가 없습니다 (${why(error)})`); }
   }
-  const injectDir = writeGeminiInjectDir({ memberId: member.id, systemPromptFile: opts.systemPromptFile, mcpConfigFile: opts.mcpConfigFile, hooks });
+  // 도구 호출 직전 판정(작업 폴더 바로잡기). 사건 기록과 따로다: IAMCEO_HOOK_EVENTS=0 이어도 싣는다(산출물이 주입 폴더에 생기지 않게).
+  if (bins.contextHome) {
+    try { hookSets.push(geminiToolHookSet({ runDir: join(bins.contextHome, "run"), cwd: member.cwd, injectDir: plannedInjectDir })); }
+    catch (error) { console.warn(`[gemini] ${member.id}: 도구 훅을 만들지 못해 빼고 띄웁니다. 작업 폴더 바로잡기가 없습니다 (${why(error)})`); }
+  }
+  const injectDir = writeGeminiInjectDir({ memberId: member.id, systemPromptFile: opts.systemPromptFile, mcpConfigFile: opts.mcpConfigFile, cwd: member.cwd, hooks: geminiHooksFile(...hookSets) });
   // 이 띄우기의 값. 상태줄 명령이 기록마다 적고, 실행기는 터미널 라벨의 같은 값으로 이 터미널의 기록을 가려낸다.
   const launchId = crypto.randomUUID().replaceAll("-", "");
   let statusLine: { type: "command"; command: string } | null = null;

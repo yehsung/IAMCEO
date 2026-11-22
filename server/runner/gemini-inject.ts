@@ -6,7 +6,11 @@
 //   <주입 폴더>/.agents/rules/iamceo-NN.md   역할 지침 조각(머리에 trigger: always_on)
 //   <주입 폴더>/.agents/mcp_config.json      IAMCEO MCP 서버를 띄우는 명령. 팀장 열쇠는 여기 없다(아래 환경 파일에서 읽어 넘긴다)
 //   <주입 폴더 옆>/<팀장 id>.env               MCP 서버에 넘길 환경(팀장 열쇠가 든다. 0600). 주입 폴더 **밖**이다
-//   <주입 폴더>/.agents/hooks.json           사건 기록 훅(gemini-hooks.ts). 훅을 넣지 않으면 없다
+//   <주입 폴더>/.agents/hooks.json           훅(gemini-hooks.ts geminiHooksFile): 사건 기록과 도구 호출 직전 판정(gemini-tool-hook.ts). 훅을 넣지 않으면 없다
+//   <주입 폴더 옆>/<팀장 id>.hook.json         도구 훅의 설정(작업 폴더·주입 폴더). 주입 폴더 **밖**이다
+//
+// agy 는 작업 공간(실행 폴더 + --add-dir)을 경로 글자 순으로 정렬해 첫째를 '현재 폴더'로 쓴다(1.5.14 실측). 주입 폴더는 홈의 `.iamceo` 때문에 대개
+// 프로젝트보다 앞이라, 규칙 첫 조각에 작업 폴더를 적고(geminiWorkspaceRule) 도구 훅이 명령 폴더를 바로잡고 주입 폴더 쓰기를 막는다.
 //
 // 주입 폴더는 팀장마다 따로다: <지침 파일의 폴더>/agy/<팀장 id>. 총괄은 Gemini 팀장의 지침·MCP 설정을 팀장만의 폴더(run/<id>.gemini)에 쓰지만,
 // 실행기는 그것을 믿지 않고 팀장 id 를 한 단계 더 둔다: 부르는 쪽이 여러 팀장의 파일을 한 폴더에 두어도 지침과 열쇠(mcp_config.json)가 서로 덮이지 않는다.
@@ -128,6 +132,15 @@ export function parseGeminiMcpEnv(text: string): Record<string, string> {
 /** 이 팀장의 MCP 환경 파일. 주입 폴더의 옆(같은 agy 폴더 안)이라 agy 의 작업 폴더에 들지 않는다. */
 export function geminiMcpEnvFile(injectDir: string): string { return `${injectDir}.env`; }
 
+/**
+ * 규칙 첫 조각의 맨 앞에 싣는 '작업 폴더' 절. agy 가 주입 폴더를 첫째 작업 공간(현재 폴더)으로 보여 주더라도 산출물·명령은 프로젝트에서 하게 한다.
+ * 훅(gemini-tool-hook.ts)이 run_command 의 폴더를 바로잡고 주입 폴더 쓰기를 막지만, 모델이 처음부터 바른 폴더를 쓰면 되묻기·재시도가 없다.
+ */
+export function geminiWorkspaceRule(cwd: string, injectDir: string): string {
+  return `## 작업 폴더\n- 이 세션의 작업 폴더(현재 폴더)는 \`${cwd}\` 다. 파일은 그 아래에 만들고 고친다. 명령(run_command)은 Cwd 를 \`${cwd}\` 또는 그 아래 폴더로 준다.\n`
+    + `- \`${injectDir}\` 는 IAMCEO 가 이 세션에 넣은 설정 폴더(규칙·MCP·훅)다. 작업 공간 목록의 첫째로 보여도 현재 폴더가 아니다. 거기에 파일을 만들거나 고치지 않는다.\n\n`;
+}
+
 /** 이 팀장의 주입 폴더. 지침 파일이 있는 폴더 아래 agy/<팀장 id>. 경로로 쓸 수 없는 id 면 던진다. */
 export function geminiInjectDir(systemPromptFile: string, memberId: string): string {
   if (!isAbsolute(systemPromptFile)) throw new CoreError("config", "Antigravity launch files need an absolute rules file path");
@@ -137,6 +150,11 @@ export function geminiInjectDir(systemPromptFile: string, memberId: string): str
 
 export interface GeminiInjectInput {
   memberId: string;
+  /**
+   * 팀장의 작업 폴더(프로젝트). 있으면 규칙 첫 조각의 맨 앞에 '작업 폴더' 절을 싣는다(geminiWorkspaceRule). agy 는 작업 공간을 경로 글자 순으로 정렬해
+   * 첫째를 현재 폴더로 쓰는데, 주입 폴더가 대개 프로젝트보다 앞이라 모델이 주입 폴더를 현재 폴더로 안다(gemini-tool-hook.ts).
+   */
+  cwd?: string;
   /** 역할 지침 파일. 본문을 규칙 조각으로 나눠 싣는다. */
   systemPromptFile: string;
   /** IAMCEO 의 MCP 설정 파일(mcpServers.iamceo). */
@@ -152,7 +170,8 @@ export interface GeminiInjectInput {
 export function writeGeminiInjectDir(input: GeminiInjectInput): string {
   const dir = geminiInjectDir(input.systemPromptFile, input.memberId);
   const bridge = readGeminiMcpBridge(input.mcpConfigFile);
-  const chunks = splitGeminiRules(readFileSync(input.systemPromptFile, "utf8"));
+  const roleText = readFileSync(input.systemPromptFile, "utf8");
+  const chunks = splitGeminiRules(input.cwd ? `${geminiWorkspaceRule(input.cwd, dir)}${roleText}` : roleText);
   const files = chunks.map((chunk, i) => geminiRuleFile(chunk, i + 1, chunks.length));
   if (files.some(file => bytesOf(file) > GEMINI_RULE_FILE_MAX_BYTES)) throw new CoreError("config", "Antigravity rule file would exceed the 24,000 byte limit");
   const agents = join(dir, ".agents"), rules = join(agents, "rules");

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GEMINI_LAUNCH_LABEL, isProviderArgv, providerBin, providerFor, providerLaunch } from "../server/runner/providers.ts";
-import { GEMINI_MCP_LAUNCHER, GEMINI_RULE_CHUNK_BYTES, GEMINI_RULE_FILE_MAX_BYTES, geminiInjectDir, geminiMcpEnvText, geminiRuleFile, geminiSettings, parseGeminiMcpEnv, readGeminiMcpBridge, splitGeminiRules, writeGeminiInjectDir } from "../server/runner/gemini-inject.ts";
+import { GEMINI_MCP_LAUNCHER, GEMINI_RULE_CHUNK_BYTES, GEMINI_RULE_FILE_MAX_BYTES, geminiInjectDir, geminiMcpEnvText, geminiRuleFile, geminiSettings, geminiWorkspaceRule, parseGeminiMcpEnv, readGeminiMcpBridge, splitGeminiRules, writeGeminiInjectDir } from "../server/runner/gemini-inject.ts";
 import { GEMINI_HOOKS_NAME, geminiHookEventsDir } from "../server/runner/gemini-hooks.ts";
 import { GEMINI_STATUSLINE_MARKER, geminiStatusLineLaunch } from "../server/runner/gemini-statusline.ts";
 import { CoreError } from "../server/runner/core-client.ts";
@@ -276,27 +276,31 @@ describe("providerLaunch(gemini): 명령줄과 환경", () => {
       expect("statusLine" in settings).toBe(false);
       expect(existsSync(join(home, "run", "agy", "m_lead1", ".agents", "hooks.json"))).toBe(false);
       expect(existsSync(join(home, "run", "agy", "m_lead1", ".agents", "mcp_config.json"))).toBe(true);
-      expect(lines).toHaveLength(2);
+      expect(lines).toHaveLength(3);
       expect(lines[0]).toStartWith("[gemini] m_lead1: 훅 기록을 만들지 못해 훅 없이 띄웁니다");
-      expect(lines[1]).toStartWith("[gemini] m_lead1: 상태줄 명령을 만들지 못해 상태줄 없이 띄웁니다");
+      expect(lines[1]).toStartWith("[gemini] m_lead1: 도구 훅을 만들지 못해 빼고 띄웁니다");
+      expect(lines[2]).toStartWith("[gemini] m_lead1: 상태줄 명령을 만들지 못해 상태줄 없이 띄웁니다");
       for (const line of lines) {
         expect(line).not.toContain(home);
         expect(line).not.toContain("secret");
         expect(line).not.toContain("/");
         expect(line.split("\n")).toHaveLength(1);
       }
-      // 훅을 끈 환경에서는 상태줄 줄만 남는다.
+      // 사건 기록 훅을 끈 환경에서는 도구 훅·상태줄 줄만 남는다(도구 훅은 기록과 따로 싣는다).
       lines.length = 0;
       providerLaunch(member(), opts, { geminiBin: "/fake/agy", contextHome: broken, hookEvents: false });
-      expect(lines).toHaveLength(1);
-      expect(lines[0]).toContain("상태줄");
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain("도구 훅");
+      expect(lines[1]).toContain("상태줄");
     } finally { warn.mockRestore(); }
   });
-  test("훅을 끄면(hookEvents false) hooks.json 을 두지 않고 예전 것은 지운다", () => {
+  test("사건 기록 훅을 끄면(hookEvents false) 기록 사건은 빼고 도구 훅(PreToolUse)만 남긴다. contextHome 이 없으면 hooks.json 을 두지 않고 예전 것은 지운다", () => {
     const home = temp(), opts = runFiles(home), hooks = join(home, "run", "agy", "m_lead1", ".agents", "hooks.json");
     providerLaunch(member(), opts, { geminiBin: "/fake/agy", contextHome: home });
-    expect(existsSync(hooks)).toBe(true);
+    expect(Object.keys(JSON.parse(readFileSync(hooks, "utf8"))[GEMINI_HOOKS_NAME]).sort()).toEqual(["PreInvocation", "PreToolUse", "SessionStart", "Stop"]);
     providerLaunch(member(), opts, { geminiBin: "/fake/agy", contextHome: home, hookEvents: false });
+    expect(Object.keys(JSON.parse(readFileSync(hooks, "utf8"))[GEMINI_HOOKS_NAME])).toEqual(["PreToolUse"]);
+    providerLaunch(member(), opts, { geminiBin: "/fake/agy" });
     expect(existsSync(hooks)).toBe(false);
   });
   test("Claude·Codex 의 명령줄은 그대로다(gemini 가지가 섞이지 않는다)", () => {
@@ -352,7 +356,11 @@ describe("주입 폴더: 규칙 조각·MCP·훅", () => {
       expect(bytes(file)).toBeLessThan(GEMINI_RULE_FILE_MAX_BYTES);
       restored += file.slice(head.length);
     });
-    expect(restored).toBe(rules);
+    // 첫 조각의 맨 앞은 '작업 폴더' 절이다(agy 가 주입 폴더를 현재 폴더로 보여 줘도 산출물은 프로젝트에). 그 뒤는 지침 원문 그대로다.
+    const injectDir = flag(launch.argv, "--add-dir")!;
+    expect(restored).toBe(`${geminiWorkspaceRule("/tmp", injectDir)}${rules}`);
+    expect(restored.startsWith("## 작업 폴더\n- 이 세션의 작업 폴더(현재 폴더)는 `/tmp` 다.")).toBe(true);
+    expect(restored).toContain(`\`${injectDir}\` 는 IAMCEO 가 이 세션에 넣은 설정 폴더`);
   });
   test("다시 띄우면 지금 지침으로 맞춘다: 남는 예전 조각은 지우고, 같은 내용은 다시 쓰지 않는다", () => {
     const home = temp(), bins = { geminiBin: "/fake/agy", contextHome: home };
@@ -364,16 +372,17 @@ describe("주입 폴더: 규칙 조각·MCP·훅", () => {
     writeFileSync(join(dir, "note.txt"), "x");
     providerLaunch(member(), runFiles(home, "m_lead1", RULES), bins);
     expect(readdirSync(dir).sort()).toEqual(["iamceo-01.md", "note.txt"]);
-    expect(readFileSync(join(dir, "iamceo-01.md"), "utf8").endsWith(RULES)).toBe(true);
+    expect(readFileSync(join(dir, "iamceo-01.md"), "utf8").endsWith(`${geminiWorkspaceRule("/tmp", join(home, "run", "agy", "m_lead1"))}${RULES}`)).toBe(true);
     const before = statSync(join(dir, "iamceo-01.md")).mtimeMs, mcpBefore = statSync(join(home, "run", "agy", "m_lead1", ".agents", "mcp_config.json")).mtimeMs;
     Bun.sleepSync(15);
     providerLaunch(member(), runFiles(home, "m_lead1", RULES), bins);
     expect(statSync(join(dir, "iamceo-01.md")).mtimeMs).toBe(before);
     expect(statSync(join(home, "run", "agy", "m_lead1", ".agents", "mcp_config.json")).mtimeMs).toBe(mcpBefore);
     expect(readdirSync(join(home, "run", "agy", "m_lead1", ".agents")).filter(name => name.endsWith(".tmp"))).toEqual([]);
-    // 빈 지침이면 조각이 없다.
+    // 빈 지침이면 '작업 폴더' 절 한 조각뿐이다.
     providerLaunch(member(), runFiles(home, "m_lead1", ""), bins);
-    expect(readdirSync(dir)).toEqual(["note.txt"]);
+    expect(readdirSync(dir).sort()).toEqual(["iamceo-01.md", "note.txt"]);
+    expect(readFileSync(join(dir, "iamceo-01.md"), "utf8").endsWith(geminiWorkspaceRule("/tmp", join(home, "run", "agy", "m_lead1")))).toBe(true);
   });
   test("mcp_config.json: 열쇠를 싣지 않는다. 주입 폴더 밖의 환경 파일을 읽어 IAMCEO MCP 다리(command·args)를 띄우는 sh 명령이다", () => {
     const home = temp();
@@ -416,12 +425,19 @@ describe("주입 폴더: 규칙 조각·MCP·훅", () => {
     rmSync(opts.mcpConfigFile);
     expect(() => providerLaunch(member(), opts, bins)).toThrow();
   });
-  test("hooks.json: 세 사건의 기록 명령(이 팀장의 사건 파일로)", () => {
+  test("hooks.json: 세 사건의 기록 명령(이 팀장의 사건 파일로)과 도구 훅(PreToolUse) 한 묶음", () => {
     const home = temp();
     const launch = providerLaunch(member(), runFiles(home), { geminiBin: "/fake/agy", contextHome: home });
     const hooks = JSON.parse(readFileSync(join(flag(launch.argv, "--add-dir")!, ".agents", "hooks.json"), "utf8"));
     expect(Object.keys(hooks)).toEqual([GEMINI_HOOKS_NAME]);
-    expect(Object.keys(hooks[GEMINI_HOOKS_NAME]).sort()).toEqual(["PreInvocation", "SessionStart", "Stop"]);
+    expect(Object.keys(hooks[GEMINI_HOOKS_NAME]).sort()).toEqual(["PreInvocation", "PreToolUse", "SessionStart", "Stop"]);
+    // 도구 훅: 기록 명령과 달리 `{}` 를 찍지 않는다(PreToolUse 에서 `{}` 는 도구를 막는다). 설정 파일은 주입 폴더 밖이다.
+    const tool = hooks[GEMINI_HOOKS_NAME].PreToolUse;
+    expect(tool).toHaveLength(1);
+    expect(tool[0].matcher).toStartWith("^(run_command|write_file|edit_file");
+    expect(tool[0].hooks[0].command).not.toContain("printf");
+    expect(tool[0].hooks[0].command.endsWith("2>/dev/null; exit 0")).toBe(true);
+    expect(tool[0].hooks[0].command).toContain(`'${join(home, "run", "agy", "m_lead1")}.hook.json'`);
     const handler = hooks[GEMINI_HOOKS_NAME].PreInvocation[0];
     expect(handler.type).toBe("command");
     expect(handler.timeout).toBe(5);

@@ -2405,7 +2405,8 @@ export class Orchestrator implements OrchestratorApi {
     this.requireActive(project);
     const rt = this.runtime(member.id);
     // 0.2.8: 로그인 오류로 끝난 턴의 막힘(blocked, 설정 막힘 login_required)은 일하는 중이 아니다. 다시 로그인한 뒤 같은 대화로 다시 연다.
-    const loginStopped = account === "login" && member.blockedCode === "login_required";
+    // 0.2.10: Gemini 팀장은 막힘 코드 대신 인증 오류로 끝난 실행으로 가린다(geminiLoginStopped).
+    const loginStopped = account === "login" && (member.blockedCode === "login_required" || this.geminiLoginStopped(member));
     // 멈출 때 하던 실행은 세대를 바꾸기 전에 찾는다(바꾼 뒤에는 새 세대의 기록만 보인다).
     const loginRunId = loginStopped ? this.loginStopRun(member) : null;
     const handling = rt.closing || rt.starting || (!fromPump && rt.pumping) || rt.reopening || !!rt.turn || member.status === "working" || (member.status === "blocked" && !usage && !loginStopped);
@@ -4910,6 +4911,7 @@ export class Orchestrator implements OrchestratorApi {
    * 앱에서 CLI 로그인이 끝났다(server/cli-login.ts). after·before: 로그인 뒤·전 계정의 지문(모르면 null).
    * - 다른 계정이면 그 CLI 의 계정 세대를 올린다: 떠 있는 팀장은 쉬는 때에(일하는 중이면 그 턴이 끝난 뒤) 같은 대화를 새 계정으로 다시 연다(설정 적용과 같은 길).
    * - 사용 한도로 멈춘 팀장(다른 계정일 때)과 로그인 오류로 멈춘 팀장(같은 계정이어도)은 지금 다시 열고 멈춘 일을 이어 가게 한다.
+   *   로그인 오류로 멈춘 팀장은 Claude 는 막힘 코드 login_required, Gemini 는 인증 오류로 끝난 턴에서 멈춘 팀장(geminiLoginStopped)이다.
    * - 0.2.10 Gemini(Antigravity CLI): 앞 계정을 모르면(처음 로그인했거나 agy 가 메일을 알려 주지 않았다) 같은 계정인지 알 수 없어도 세대를 올린다(changed 는 null).
    *   떠 있는 agy 는 다른 프로세스가 키체인에 쓴 새 로그인을 읽지 않는다고 본다(역분석 추론, UNVERIFIED-INTERACTIVE): 같은 대화(`--conversation`)로 다시 여는 값이 싸다.
    *   로그인·첫 설정 화면에서 멈춘 Gemini 팀장(gemini_setup)은 건드리지 않는다(그 화면은 사람만 끝낸다. 대표가 그 터미널에서 끝내는 중일 수 있다):
@@ -4934,7 +4936,7 @@ export class Orchestrator implements OrchestratorApi {
     for (const m of live) {
       // 잠든 팀장은 깨우지 않는다(재우기는 대표·총괄의 뜻이다). 한도 카드에 남아 깨울 때 새 계정으로 뜬다.
       if (m.status === "asleep" || setupBlocked.has(m.id)) continue;
-      if (m.blockedCode === "login_required") now.push({ member: m, why: "login" });
+      if (m.blockedCode === "login_required" || this.geminiLoginStopped(m)) now.push({ member: m, why: "login" });
       else if (bump && this.apiRecovery.usageLimited(m.id) && m.sessionId) now.push({ member: m, why: "usage" });
     }
     const soon = new Set(now.map(n => n.member.id));
@@ -4964,10 +4966,26 @@ export class Orchestrator implements OrchestratorApi {
   private async reopenForAccount(memberId: string, why: AccountReopen): Promise<void> {
     const member = this.store.getMember(memberId);
     if (!member || member.origin !== "runner") return;
-    if (why === "login" && member.blockedCode !== "login_required") return;
+    if (why === "login" && member.blockedCode !== "login_required" && !this.geminiLoginStopped(member)) return;
     const usage = why === "usage" ? this.usageStop(member) : null;
     if (why === "usage" && !usage) return;
     await this.switchProvider(member, { cli: member.cli }, false, false, usage, undefined, why);
+  }
+
+  /**
+   * 0.2.10: 인증 오류로 끝난 턴에서 멈춘 Gemini(Antigravity CLI) 팀장인가. 일반 오류 상태(status error: onTurnError 가 두고 성공한 턴이 지운다)이고, 이 세대에서
+   * 입력이 들어간 마지막 실행이 인증 오류(classifyGeminiTurnError auth: UNAUTHENTICATED·token expired 등)로 끝났다. 떠 있는 agy 는 다른 프로세스가 키체인에 쓴
+   * 새 로그인을 읽지 않는다고 보아(cliLoggedIn), 같은 계정으로 다시 로그인해도 같은 대화로 다시 열고 멈춘 일을 이어 가게 한다(Claude 의 login_required 와 같은 길).
+   * Claude 의 막힘 코드(login_required)는 붙이지 않는다: 앱(출시된 판 포함)은 그 코드의 관측 메모를 Claude 문구('Claude 로그인이 필요합니다 … /login')로 보이고,
+   * agy 는 오류 턴 뒤 쉬는 중을 알려 막힘이 곧 지워진다. 대표에게는 지금처럼 일반 오류(chat.member_error)로 알린다.
+   */
+  private geminiLoginStopped(member: Member): boolean {
+    return member.cli === "gemini" && member.status === "error" && this.geminiAuthRun(member) !== null;
+  }
+  /** Gemini 팀장의 이 세대 마지막 실행이 인증 오류로 끝났으면 그 실행(이미 통지했어도). 아니면 null. */
+  private geminiAuthRun(member: Member): ExecutionJournal | null {
+    const run = this.store.lastWrittenExecution(member.id, this.store.memberRevisions(member.id).sessionGeneration);
+    return run && run.memberId === member.id && run.phase === "ended" && run.result === "error" && classifyGeminiTurnError(run.reason ?? "") === "auth" ? run : null;
   }
 
   /**
@@ -4975,8 +4993,8 @@ export class Orchestrator implements OrchestratorApi {
    * 이어가기 글을 한 번 넣는다(사용 한도 이어가기와 같은 장치). 같은 대화를 이어 열지 못하면 총괄을 깨워 중단을 알린다.
    */
   private loginStopRun(member: Member): string | null {
-    // 아래의 로그인 사유는 Claude 의 것이다. Gemini(Antigravity CLI)의 로그인 오류에는 이 이어가기가 없다: 일반 오류의 길로 간다.
-    if (member.cli === "gemini") return null;
+    // 0.2.10 Gemini(Antigravity CLI): 그 실행이 인증 오류(classifyGeminiTurnError auth)로 끝났다(아래의 로그인 사유는 Claude 의 것이다).
+    if (member.cli === "gemini") { const run = this.geminiAuthRun(member); return run && !run.interruptionNotifiedAt ? run.runId : null; }
     const run = this.store.lastWrittenExecution(member.id, this.store.memberRevisions(member.id).sessionGeneration);
     // 실행의 사유는 오류 분류값과 글(`authentication_failed: Please run /login · …`) 또는 사유 코드(claude_login_required)다.
     const loginReason = (reason: string | null | undefined) => !!reason && (reason === CLAUDE_LOGIN_REASON || CLAUDE_LOGIN_ERRORS.has(reason.split(":")[0]!.trim()));

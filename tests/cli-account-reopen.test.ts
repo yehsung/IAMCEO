@@ -198,3 +198,72 @@ describe("다시 로그인한 뒤 로그인 오류로 멈춘 팀장", () => {
     expect(readFileSync(path, "utf8").length).toBeGreaterThan(0);
   }, 60_000);
 });
+
+describe("다시 로그인한 뒤 인증 오류로 멈춘 Gemini 팀장(0.2.10)", () => {
+  async function geminiWorker(t: CoreEnv, name: string, handle: string): Promise<Member> {
+    const w = (await t.orch.addMember(t.project.id, { name, handle, role: name, cli: "gemini" })).member;
+    await t.orch.assign(t.project.id, w.handle, { text: `준비 @fake:post=${handle}준비` });
+    await t.waitFor("첫 보고", () => t.texts().some((m) => m.title === `${handle}준비`));
+    await t.waitFor("대화 id", () => t.member(w.id).sessionId);
+    await t.idle(w.id);
+    return t.member(w.id);
+  }
+  test("같은 계정으로 다시 로그인해도 지금 같은 대화(--conversation)로 다시 열고, 멈춘 일의 이어가기 글(LOGIN_RESUME_TEXT)을 한 번 넣는다. Claude 막힘 코드(login_required)는 붙이지 않는다", async () => {
+    // 인증 오류 턴 끝은 그 팀장의 전달에 재시도 대기(processing_auth, 기본 60초)를 건다(Claude 와 같다). 이어가기 글도 그 뒤에 나간다: 시험에서는 짧게.
+    const t = await setup({ timings: { turnErrorRetryMs: 300 } });
+    const g = await geminiWorker(t, "자료 조사", "research");
+    // 앞서 같은 계정으로 로그인했다(지문 g-account). 처음 로그인은 앞 계정을 몰라 세대를 올려 쉬는 팀장을 다시 연다: 그것이 끝나기를 기다린다.
+    const runs0 = t.runs(g.id).length;
+    await t.orch.cliLoggedIn("gemini", "g-account", null);
+    await t.orch.accountReopening;
+    await t.waitFor("첫 로그인 적용", () => t.runs(g.id).length === runs0 + 1);
+    await t.idle(g.id);
+    const before = t.store.lastWrittenExecution(g.id, t.store.memberRevisions(g.id).sessionGeneration)?.runId;
+    await t.orch.assign(t.project.id, g.handle, { text: "가짜 자료 조사 @fake:error=UNAUTHENTICATED" });
+    const run = await t.waitFor("인증 오류로 끝남", () => {
+      const r = t.store.lastWrittenExecution(g.id, t.store.memberRevisions(g.id).sessionGeneration);
+      return r && r.runId !== before && r.phase === "ended" && r.result === "error" && t.member(g.id).status === "error" ? r : null;
+    });
+    expect(t.member(g.id).blockedCode).toBeUndefined();
+    const runsBefore = t.runs(g.id).length;
+
+    const result = await t.orch.cliLoggedIn("gemini", "g-account", null);
+    expect(result).toEqual({ changed: false, reopenedNow: 1, atNextTurn: 0, setupBlocked: 0 });
+    await t.orch.accountReopening;
+    await t.waitFor("다시 열림", () => t.runs(g.id).length === runsBefore + 1);
+    expect(t.runs(g.id).at(-1)).toMatchObject({ cli: "gemini", conversationFlag: g.sessionId });
+    const resumed = await t.waitFor("이어가기 턴", () => t.turns(g.id).find(x => x.prompt.includes(LOGIN_LEAD) && x.outcome === "done"));
+    expect(resumed.prompt).toContain(LOGIN_RESUME_TEXT);
+    expect(resumed.prompt).not.toContain("가짜 자료 조사");
+    await t.idle(g.id);
+    expect(t.member(g.id).status).toBe("idle");
+    expect(activityCodes(t, g.id)).toContain("activity.login_reopen_continue");
+    expect(t.texts().some(m => m.textCode === "chat.login_resumed")).toBe(true);
+    expect(t.store.getExecutionJournal(run.runId)?.interruptionNotifiedAt).toBeTruthy();
+    // 같은 계정: 세대는 그대로(첫 로그인의 1). 이어가기 글은 한 번만이고, 다시 로그인해도 또 열지 않는다.
+    expect(epochs(t)?.gemini).toEqual({ epoch: 1, identity: "g-account" });
+    expect(await t.orch.cliLoggedIn("gemini", "g-account", null)).toEqual({ changed: false, reopenedNow: 0, atNextTurn: 0, setupBlocked: 0 });
+    await t.orch.accountReopening;
+    await Bun.sleep(QUIET_MS);
+    expect(t.turns(g.id).filter(x => x.prompt.includes(LOGIN_LEAD))).toHaveLength(1);
+    expect(t.runs(g.id)).toHaveLength(runsBefore + 1);
+  }, 60_000);
+
+  test("인증이 아닌 오류로 멈춘 Gemini 팀장·쉬는 Gemini 팀장은 같은 계정 로그인으로 다시 열지 않는다", async () => {
+    const t = await setup({ timings: { turnErrorRetryMs: 600_000 } });
+    const g = await geminiWorker(t, "자료 조사", "research");
+    const first = t.runs(g.id).length;
+    await t.orch.cliLoggedIn("gemini", "g-account", null);
+    await t.orch.accountReopening;
+    await t.waitFor("첫 로그인 적용", () => t.runs(g.id).length === first + 1);
+    await t.idle(g.id);
+    const runs0 = t.runs(g.id).length;
+    expect((await t.orch.cliLoggedIn("gemini", "g-account", null)).reopenedNow).toBe(0);
+    await t.orch.assign(t.project.id, g.handle, { text: "가짜 자료 조사 @fake:error=CLI%20reported%20an%20error" });
+    await t.waitFor("일반 오류", () => t.member(g.id).status === "error");
+    expect((await t.orch.cliLoggedIn("gemini", "g-account", null)).reopenedNow).toBe(0);
+    await t.orch.accountReopening;
+    await Bun.sleep(QUIET_MS);
+    expect(t.runs(g.id).length).toBe(runs0);
+  }, 60_000);
+});

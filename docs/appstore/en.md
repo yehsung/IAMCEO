@@ -73,11 +73,12 @@ AI agent,coding agent,AI team,developer,remote,approval,inbox,CLI,terminal,autom
 
 ## whatsNew
 
-What's New in 0.2.9 (up to 4,000 characters). Fixes made on the server need a Mac server on 0.2.9 or later, so each item says so.
+What's New in 0.2.10 (up to 4,000 characters). Fixes made on the server need a Mac server on 0.2.10 or later, so each item says so.
 
 ```text
-• The conversation no longer waits on an empty screen. Recent messages show as soon as a project opens, and earlier ones load after.
-• Opens faster when you connect from far away. The Mac server now compresses large responses, so the app downloads about a third as much. Requires the IAMCEO server 0.2.9 or later on your Mac.
-• A lead running on Codex now hands unrelated work to staff right away instead of queueing it, and a newly started Codex staff member no longer skips its first instruction. Fixed by updating the Mac server to 0.2.9 or later.
-• "Add staff member" and "New project" start on the AI tool your lead uses (Claude Code or Codex).
+• You can now use Gemini. The lead and staff can run on Google's Antigravity CLI, with approval cards in your Inbox, compaction, resuming after usage limits and signing in from your phone, just like Claude Code and Codex staff. Requires the Antigravity CLI and the IAMCEO server 0.2.10 or later on your Mac.
+• Long-running projects open lighter. Finished to-dos and finished work arrive as only the recent ones first, and "Show earlier finished" loads the rest. Requires Mac server 0.2.10 or later.
+• The Files tab no longer fills up with a separate copy of every version; earlier versions fold under "Earlier versions", and a deck's original (PPTX or PDF) opens from "Original" under the preview. Requires Mac server 0.2.10 or later.
+• When the server can't be reached, iPhone still shows the recent state it saw last.
+• Gemini joins Claude Code and Codex in the AI tool picker.
 ```

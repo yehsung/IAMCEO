@@ -7,7 +7,7 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
-### 0.2.10 — 출시 전
+### 0.2.10 — 2026-11-23
 
 - **Gemini를 쓸 수 있습니다.** 총괄과 팀장을 Google의 Antigravity CLI(`agy`)로 띄웁니다. Claude Code·Codex처럼 내 계정 로그인으로 돕니다. 새 팀장·팀장 실행 설정·새 프로젝트에서 CLI를 Gemini로 고르거나, 총괄에게 Gemini로 띄워 달라고 하면 됩니다. 모델은 Antigravity CLI가 알려 주는 목록 그대로입니다(요금제에 든 Claude·GPT-OSS 모델도 함께 보입니다). 역할 지침, IAMCEO 도구 연결, 사건 기록 훅은 그 세션에만 넣고, `~/.gemini`의 설정과 프로젝트 폴더에는 아무것도 쓰지 않습니다. Antigravity CLI는 도구 연결을 첫 입력 때에야 띄우므로, IAMCEO가 팀장을 띄우거나 다시 연 뒤 첫 지시 앞에 `/mcp`로 연결을 먼저 띄웁니다(팀장 터미널에 MCP 관리 창이 잠깐 열렸다 닫힙니다). 옛 Gemini CLI(`gemini` 명령)는 지원하지 않습니다.
 - **Gemini를 쓰기 전에 이 Mac에서 한 번 준비합니다.** [Antigravity CLI](https://antigravity.google/docs/getting-started)를 설치하고 터미널에서 `agy`를 한 번 실행해 첫 설정(약관 동의)을 끝냅니다. 로그인은 그때 하거나 앱의 'AI 계정'에서 합니다. 끝내지 않은 채 띄운 팀장은 '로그인·첫 설정 필요'로 멈추고, 팀 화면에서 그 팀장의 터미널을 열어 직접 끝낼 수 있습니다(다른 터미널에서 끝냈다면 그 팀장을 재웠다가 다시 깨웁니다). 로그인과 약관 동의 화면에는 IAMCEO가 어떤 키도 보내지 않습니다. 폴더 신뢰 창도 같습니다: IAMCEO가 띄운 팀장에는 보통 뜨지 않지만, 뜨면 승인 대기가 아니라 '폴더 신뢰 확인 필요'로 멈추고 터미널에서 직접 답하도록 알립니다. 점검표(설정 → AI 모델 → 실행 환경)에는 Antigravity CLI를 설치했거나 Gemini 팀장이 있을 때 Gemini 줄이 생깁니다.
@@ -199,7 +199,7 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 
 ## English
 
-### 0.2.10 — unreleased
+### 0.2.10 — 2026-11-23
 
 - **You can now use Gemini.** The lead and staff can run on Google's Antigravity CLI (`agy`), under your own log-in like Claude Code and Codex. Pick Gemini as the CLI in "Add staff member", a member's run settings or "New project", or ask the lead to start someone on Gemini. The models are exactly the list the Antigravity CLI reports (Claude and GPT-OSS models in your plan appear too). The role instructions, the connection to IAMCEO's tools and the event hooks go into that session only; nothing is written to your `~/.gemini` settings or to the project folder. The Antigravity CLI starts its tool connections only at the first input, so after starting or reopening a staff member IAMCEO opens them with `/mcp` before the first instruction (the MCP manager opens and closes briefly in that member's terminal). The older Gemini CLI (the `gemini` command) is not supported.
 - **Set it up once on this Mac before using Gemini.** Install the [Antigravity CLI](https://antigravity.google/docs/getting-started) and run `agy` once in Terminal to finish the first-run setup (terms). Sign in then, or from "AI accounts" in the app. A staff member started before that stops at "Sign-in or setup needed"; you can open that member's terminal on the team screen and finish it there (or, if you finished it in another terminal, put that member to sleep and wake it again). IAMCEO never sends a key to the sign-in and terms screens. The same goes for the folder trust prompt: it normally does not appear for a staff member IAMCEO starts, but if it does, the member stops at "Folder trust needs an answer" rather than waiting for approval, and you are told to answer it in the terminal yourself. The checklist (Settings → AI models → Runtime) gains a Gemini line when the Antigravity CLI is installed or a staff member uses Gemini.

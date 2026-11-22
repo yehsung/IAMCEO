@@ -9,10 +9,11 @@ const DAY = 24 * HOUR;
 export const VERSION_WINDOW_MS = 14 * DAY;
 /**
  * 판 표시 없이 같은 제목으로 다시 올린 자료를 이을 때의 창(역할 규칙이 '새 판은 같은 제목으로'라고 가르친다).
- * 판 표시가 없는 만큼 짧게 둔다: '일일 보고'·'테스트 결과'처럼 같은 이름으로 거듭 올리는 다른 보고를 한 판 묶음으로 접지 않게
- * (역할 규칙은 그런 보고의 제목에 날짜·회차를 넣으라고 한다).
+ * 바로 앞 판이 이 안에 올라왔을 때만, 곧 같은 작업 중에 고쳐 다시 올린 것만 잇는다. 하루 간격으로 올리는
+ * '일일 보고'·'테스트 결과'(24시간)는 창 밖이라 잇지 않고, 정리(iamceo files tidy)도 쌓인 날짜 없는 보고를 한 판 묶음으로 접지 않는다.
+ * 같은 날 몇 시간 간격으로 다시 올린 같은 이름의 보고는 이어질 수 있어, 역할 규칙은 그런 보고의 제목에 날짜·회차를 넣으라고 한다.
  */
-export const SAME_TITLE_WINDOW_MS = 48 * HOUR;
+export const SAME_TITLE_WINDOW_MS = 12 * HOUR;
 /** 판 표시 없이 같은 제목으로 다시 올렸을 때 잇는 종류. 사진·영상·소리는 '화면 캡처'처럼 흔한 제목이 많아 잇지 않는다. */
 const SAME_TITLE_KINDS = new Set(["artifact", "document", "table", "code", "pdf", "file"]);
 
@@ -154,6 +155,7 @@ export interface ChainFile {
 export type ChainBasis = "marker+full" | "marker+stem" | "same-title";
 /**
  * 잇지 않은 까닭. different-tail: 줄기(괄호·쌍점 앞)만 같고 두 제목에 판 번호가 없거나 한쪽에만 있어 새 판인지 알 수 없다('(요약) 최종'·'(전체) 최종').
+ * ambiguous: 줄기만 같은 앞 판 가운데 판 번호가 오르는 것(하나뿐이면 이었을 후보)이 둘 이상이다. candidates 에 그 후보만 싣는다.
  * unchained·new-item 은 정리 계획(planTidy)에서만 나온다: 팀장이 unchain 으로 끊은 쌍, new_item:true 로 '새 자료'라고 밝혀 올린 자료.
  */
 export type ChainSkip = "no-uploader" | "no-kind" | "no-marker" | "too-short" | "ordinal-tail" | "no-match" | "ambiguous" | "version-went-down" | "same-number-different-tail" | "different-tail" | "different-date" | "unchained" | "new-item";
@@ -196,8 +198,9 @@ function datesAgree(previous: TitleParts, next: TitleParts): boolean {
  * 새 자료 next 를 이을 앞 판을 고른다. heads 는 같은 프로젝트의 아직 최신인 판들(순서 무관).
  * 조건: 같은 팀장(member_id)·같은 종류, 앞 판이 아직 최신이고 next 보다 앞서 14일 안.
  * - 판 표시(v12·3판·새 판 4·2차 시안·초안·최종·(최신) 등)가 있으면: 판 표시·날짜·형식 낱말을 걷은 제목(full)이 같은 가장 새 판.
- *   없으면 줄기(stem, 괄호·쌍점 앞)가 같은 판이 꼭 하나이고(꼬리에 순번이 없을 때) 두 제목에 모두 판 번호가 있어 새 판 번호가 클 때만.
- * - 판 표시가 없으면: 사진·영상·소리가 아니고, 제목이 글자 그대로(날짜까지) 같은 48시간 안의 가장 새 판.
+ *   없으면 줄기(stem, 괄호·쌍점 앞)가 같은 판 가운데(꼬리에 순번이 없을 때) 두 제목에 모두 판 번호가 있어 새 판 번호가 큰 판이 꼭 하나일 때만.
+ *   후보를 세기 전에 판 번호 조건부터 거른다: 새 제목에 번호가 없으면 줄기가 같은 판이 몇이든 different-tail, 번호가 오르는 판이 둘 이상이면 ambiguous.
+ * - 판 표시가 없으면: 사진·영상·소리가 아니고, 제목이 글자 그대로(날짜까지) 같은 12시간 안(SAME_TITLE_WINDOW_MS)의 가장 새 판.
  * - 판 번호가 거꾸로 가거나, 줄기로만 맞는데 판 번호가 없거나 같거나, 두 제목의 날짜가 다르면(datesAgree) 잇지 않는다.
  */
 export function pickPrevious(next: ChainFile, heads: readonly ChainFile[]): ChainVerdict {
@@ -232,19 +235,20 @@ export function pickPrevious(next: ChainFile, heads: readonly ChainFile[]): Chai
   if (p.ordinal) return { chain: false, why: "ordinal-tail" };
   const sameStem = pool.filter((h) => { const q = parts.get(h.id)!; return q.stem === p.stem && !q.ordinal; });
   const byStem = sameStem.filter(agrees);
-  if (byStem.length !== 1) {
-    if (byStem.length > 1) return { chain: false, why: "ambiguous", candidates: byStem };
-    return { chain: false, why: sameStem.length ? "different-date" : "no-match" };
-  }
-  const to = byStem[0]!;
-  const q = parts.get(to.id)!;
-  const order = compareVersions(p.version, q.version);
-  if (order === -1) return { chain: false, why: "version-went-down" };
+  if (!byStem.length) return { chain: false, why: sameStem.length ? "different-date" : "no-match" };
+  // 판 번호 조건부터 거른 뒤 센다. 그래야 '여럿(ambiguous)'은 '하나뿐이면 이었을 후보'가 둘 이상일 때만 나온다
+  // (도구 답이 그 후보를 '앞 판이 여럿'이라 보이고 replaces 로 고르라고 권한다).
+  // 꼬리가 다른데 새 제목에 판 번호가 없으면('(요약) 최종'·'(전체) 최종', '(토스) 초안'·'(카카오페이) 초안') 줄기가 같은 판이 몇이든 다른 자료일 수 있다.
+  if (!p.version) return { chain: false, why: "different-tail" };
+  const order = (h: ChainFile) => compareVersions(p.version, parts.get(h.id)!.version);
+  const up = byStem.filter((h) => order(h) === 1);
+  if (up.length > 1) return { chain: false, why: "ambiguous", candidates: up };
+  if (up.length === 1) return { chain: true, to: up[0]!, basis: "marker+stem" };
+  if (byStem.some((h) => order(h) === -1)) return { chain: false, why: "version-went-down" };
   // 같은 판 번호인데 꼬리가 다르면('v1 (오프닝)' 과 'v1 (클로징)') 판이 아니라 다른 부분일 수 있다.
-  if (order === 0) return { chain: false, why: "same-number-different-tail" };
-  // 꼬리가 다른데 판 번호로 새 판임을 알 수 없으면('(요약) 최종'·'(전체) 최종', '(토스) 초안'·'(카카오페이) 초안', 앞 판에만 번호가 없는 것) 다른 자료일 수 있다.
-  if (order !== 1) return { chain: false, why: "different-tail" };
-  return { chain: true, to, basis: "marker+stem" };
+  if (byStem.some((h) => order(h) === 0)) return { chain: false, why: "same-number-different-tail" };
+  // 앞 판에만 번호가 없으면('경쟁사 분석: 토스' 뒤 '경쟁사 분석: 카카오페이 v1') 판 번호로 새 판임을 알 수 없다.
+  return { chain: false, why: "different-tail" };
 }
 
 export interface TidyLink {

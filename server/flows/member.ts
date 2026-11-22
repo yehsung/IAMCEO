@@ -423,8 +423,8 @@ export class MemberFlows {
   private refuseOwnerDirectRepeat(target: Member, quote: VerifiedQuote | null): void {
     if (quote?.verified && quote.source) {
       const message = this.store.getMessage(quote.source.id);
-      if (message?.mine && message.targetMemberId === target.id && this.store.listDeliveries(target.projectId).some(d =>
-        d.memberId === target.id && d.kind === "user_message" && d.refType === "message" && d.refId === message.id &&
+      if (message?.mine && message.targetMemberId === target.id && this.store.listDeliveriesByRef("message", message.id, target.projectId).some(d =>
+        d.memberId === target.id && d.kind === "user_message" &&
         ["queued", "delivering", "delivered"].includes(d.status))) {
         const reason = `대표가 이미 ${target.name}에게 직접 보낸 지시입니다(#${message.id}). 다시 보내지 마세요. 더할 일이 있으면 인용 없이 그 부분만 쓰세요.`;
         this.store.appendActivity(target.id, "system", reason);
@@ -505,8 +505,9 @@ export class MemberFlows {
     const project = this.store.requireProject(projectId);
     if (project.creationGoal && matches(project.creationGoal)) return { id: project.id, text: project.creationGoal, at: project.createdAt };
     let before: string | undefined;
+    // 0.2.10: 대화 쪽과 같은 범위를 읽되 글을 조립하지 않는다(전달·답 상태는 인용 대조에 쓰지 않는다). 쪽마다 전달 이력을 다시 읽어 6초까지 걸렸다.
     for (let page = 0; page < QUOTE_SCAN_PAGES; page++) {
-      const messages = this.store.listMessages(projectId, { before, limit: 500 });
+      const messages = this.store.listMessageBodies(projectId, { before, limit: 500 });
       const found = [...messages].reverse().find((m) => m.mine && matches(m.body));
       if (found) return { id: found.id, text: found.body, at: found.at };
       if (messages.length < 500) return null;
@@ -824,7 +825,7 @@ export class MemberFlows {
     if (this.store.requireProject(member.projectId).archived || this.port.archiving(member.projectId)) return;
     this.store.transaction(() => {
       for (const decision of this.store.listUnreceivedAnswers(member.id)) {
-        if (!this.store.listDeliveries(member.projectId).some(d => d.refType === "decision" && d.refId === decision.id && d.memberId === member.id)) this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "answer", text: formatAnswerFor(decision, this.port.attachmentsFor(member, decision.answerAttachments ?? [])), refType: "decision", refId: decision.id });
+        if (!this.store.listDeliveriesByRef("decision", decision.id, member.projectId).some(d => d.memberId === member.id)) this.store.enqueue({ projectId: member.projectId, memberId: member.id, kind: "answer", text: formatAnswerFor(decision, this.port.attachmentsFor(member, decision.answerAttachments ?? [])), refType: "decision", refId: decision.id });
       }
     });
   }

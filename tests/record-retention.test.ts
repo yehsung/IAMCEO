@@ -65,6 +65,34 @@ describe("살아 있는 것만 찾는 색인", () => {
     ["세대별 마지막 실행", "SELECT j.rowid FROM execution_journal j\n    WHERE j.member_id = m.id AND j.project_id = m.project_id AND j.generation = m.session_generation\n    ORDER BY j.created_at DESC, j.rowid DESC LIMIT 1", "execution_journal_member_recent"],
   ];
   const source = readFileSync(join(import.meta.dir, "..", "server", "store.ts"), "utf8");
+  // 0.2.10: 전달 이력 전체를 읽지 않는 길의 쿼리와 그 색인(LIVE_INDEXES). 매개변수는 모두 같은 값 하나로 채운다.
+  const livePlans: [string, string, string][] = [
+    ["살아 있는 전달(아직 전달되지 않음)", "SELECT rowid FROM deliveries WHERE project_id = ? AND status != 'delivered'", "deliveries_open"],
+    ["살아 있는 전달(확인이 끝나지 않음)", "SELECT d.rowid FROM delivery_recovery r CROSS JOIN deliveries d ON d.id = r.delivery_id\n      WHERE r.phase IN ('checking','waiting','retry_wait','needs_owner') AND d.project_id = ?", "delivery_recovery_due"],
+    ["쓰기 결과를 모르는 봉투", "SELECT id FROM delivery_dispatches WHERE member_id = ? AND transport_state IN ('prepared','write_started','unknown') ORDER BY created_at, rowid", "delivery_dispatches_physical"],
+    ["정정한 글", "SELECT source_message_id FROM report_references WHERE project_id = ? AND corrects_message_id = ? ORDER BY sequence DESC, rowid DESC LIMIT 1", "report_references_corrects"],
+    ["처리된 결재 최근 50", "SELECT * FROM decisions WHERE project_id = ? AND status != 'open' ORDER BY COALESCE(answered_at, created_at) DESC, rowid DESC LIMIT 50", "decisions_done_order"],
+    ["전달 없는 실패한 대표 글", "SELECT m.* FROM messages m WHERE m.project_id = ? AND m.mine = 1 AND m.delivery = 'failed'\n      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id AND +d.project_id = m.project_id)\n      ORDER BY m.at DESC, m.id DESC", "messages_owner_failed"],
+    ["원문별 전달(+project_id)", "SELECT id FROM deliveries WHERE ref_type = 'message' AND ref_id = ? AND kind = 'user_message' AND +project_id = ? ORDER BY rowid DESC LIMIT 1", "deliveries_reference"],
+    ["이 전달의 마지막 봉투", "SELECT d.id FROM delivery_dispatch_items i CROSS JOIN delivery_recovery r ON r.delivery_id = i.delivery_id CROSS JOIN delivery_dispatches d ON d.id = i.dispatch_id\n        WHERE i.delivery_id = ? AND d.member_id = ? ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1", "delivery_dispatch_items_delivery"],
+  ];
+  test.each(livePlans)("0.2.10 %s: store.ts 쿼리가 그대로이고 색인을 탄다", (_name, sql, index) => {
+    expect(source).toContain(sql);
+    const { db } = freshStore();
+    const count = sql.split("?").length - 1;
+    const detail = (db.query(`EXPLAIN QUERY PLAN ${sql}`).all(...Array(count).fill("p")) as { detail: string }[]).map(r => r.detail).join(" | ");
+    expect(detail).toContain(index);
+    expect(detail).not.toMatch(/SCAN (deliveries|d|messages|m|delivery_dispatches|report_references|decisions)\b/);
+  });
+  test("0.2.10 고아 대표 글 점검은 아직 나가지 않은 대표 글 색인을 탄다(프로젝트 하나·전체)", () => {
+    expect(source).toContain("SELECT m.* FROM messages m WHERE m.mine = 1 AND m.delivery IN ('queued','held')");
+    const { db } = freshStore();
+    const sql = (scope: string) => `SELECT m.* FROM messages m WHERE m.mine = 1 AND m.delivery IN ('queued','held') ${scope}
+      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id) ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`;
+    const plan = (text: string, ...p: string[]) => (db.query(`EXPLAIN QUERY PLAN ${text}`).all(...p) as { detail: string }[]).map(r => r.detail).join(" | ");
+    expect(plan(sql("AND m.project_id = ?"), "p")).toContain("messages_owner_pending");
+    expect(plan(sql(""))).toContain("messages_owner_pending");
+  });
   test.each(plans)("%s: store.ts 쿼리가 그대로이고 새 색인을 탄다", (_name, sql, index) => {
     expect(source).toContain(sql);
     const { db } = freshStore();

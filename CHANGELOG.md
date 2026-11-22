@@ -7,7 +7,10 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
-### 0.2.9 — 2026-11-20
+### 0.2.10 — 출시 전
+
+- **오래 쓸수록 서버가 느려지던 전달 기록 읽기를 고쳤습니다.** 프로젝트를 열거나 대화를 넘기거나 팀장에게 글을 넣을 때마다 서버가 지금까지 쌓인 전달 기록 전체를 읽었고, 30초마다 도는 점검은 총괄 자신의 보고까지 모두 다시 맞춰 봤습니다. 이제 아직 끝나지 않은 전달과 지금 보여 줄 글에 딸린 기록만 읽습니다. 지금 기록으로도 앱이 받는 상태 묶음 만들기가 5배 넘게, 대화 한 쪽이 6배쯤 빨라지고, 기록이 50배로 쌓여도(약 3년치) 대화 한 쪽은 0.6초 → 0.01초, 상태 묶음은 3.6초 → 0.2초, 30초 점검은 거의 0입니다. 앱 화면과 주고받는 내용은 그대로이고, 새 서버가 처음 뜰 때 색인을 한 번 만듭니다(지금 기록으로 0.2초쯤).
+
 
 - **Codex 총괄이 서로 상관없는 일을 미루지 않고 바로 나눠 맡깁니다.** 서버가 Codex 세션에 넣는 글 앞에 붙이던 '이 일은 순서대로 하고 서브에이전트를 띄우지 말라'는 줄이 총괄에게도 붙어, Codex 총괄이 팀장에게 일을 나누는 것까지 순서대로 했습니다. 다른 성격의 일을 시켜도 앞 일이 끝날 때까지 새 팀장을 띄우지 않고 예정에만 올려 두었고, 팀장에게 주는 지시에도 '병렬 금지'를 적었습니다. 이제 총괄에게는 자기 서브에이전트만 띄우지 말라고 알립니다. 총괄 지침에도 나누는 기준을 더했습니다: 서로 결과를 기다릴 필요가 없는 일은 지금 맞는 팀장에게 맡기거나 새로 띄워 함께 돌리고('그리고'·'이것도'는 순서를 정한 말이 아닙니다), 한 가지 일에 '팀장·사원'처럼 위아래를 따로 띄우지 않으며(이름에 직급을 붙이지 않습니다), 대표가 서브에이전트·병렬을 말하면 팀장을 더 띄우는 대신 그 팀장의 병렬을 켭니다. 총괄이 대표에게 쓰는 글에서도 화면과 같이 '팀장'이라고 부릅니다(예전에는 '직원'). 바뀐 지침은 새로 여는 세션부터 실립니다.
 - **새로 띄운 Codex 팀장이 첫 지시를 하지 않고 '막힘'으로 보고하던 것을 고쳤습니다.** Codex는 뜨는 동안 스스로 한 번 '일하는 중 → 끝'을 알립니다. 서버가 그것을 아직 넣지도 못한 첫 지시의 결과로 읽어 '결과만 보고하고 일은 다시 하지 말라'는 글을 첫 지시와 한 묶음으로 넣었고, 팀장은 그 글을 따라 일을 하지 않았습니다. 이제 넣는 중인 지시는 그 알림으로 닫지 않고, 넣기가 끝난 뒤에 그 글로 시작한 턴인지 가려 닫습니다.
@@ -178,7 +181,10 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 
 ## English
 
-### 0.2.9 — 2026-11-20
+### 0.2.10 — unreleased
+
+- **The server no longer slows down as delivery history piles up.** Opening a project, paging the chat or handing text to a staff member used to read every delivery record ever kept, and the 30-second check re-matched even the lead's own reports. Now only unfinished deliveries and the records of the messages being shown are read. With today's records the state bundle the apps fetch builds over 5x faster and a chat page about 6x faster; with 50x the records (about three years) a chat page goes from 0.6 s to 0.01 s, the state bundle from 3.6 s to 0.2 s, and the 30-second check to nearly nothing. What the apps see is unchanged; the new server builds its indexes once on first start (about 0.2 s with today's records).
+
 
 - **A Codex lead hands out unrelated work right away instead of queueing it.** The line the server puts in front of text for Codex sessions ("work sequentially for this task; do not spawn subagents") also went to the lead, so a Codex lead handed out work sequentially too: a task of a different kind stayed on the "next" list until the earlier one finished, with no new staff member, and its instructions told staff not to run in parallel. The lead is now told only not to spawn its own subagents. The lead's rules also gained criteria for dividing work: tasks that do not need each other's results go to the right staff member now, or to a new one, and run together ("and" or "this too" does not set an order); one task never gets a separate senior-and-junior pair of sessions (no ranks in names); and when you ask for subagents or parallel work the lead turns on parallel for that staff member instead of starting more sessions. In what it writes to you, the lead now uses the same word the app does for them (in Korean, 팀장 instead of 직원). Changed rules apply to sessions opened from now on.
 - **A newly started Codex staff member no longer skips its first instruction and reports "blocked".** While it starts, Codex reports one "working, then done" of its own. The server read that as the result of a first instruction it had not even delivered yet and sent "only report the result, do not run the task again" bundled with that instruction, and the staff member obeyed. An instruction that is still being delivered is no longer closed by that report; once delivery finishes the server checks whether the turn was started by that text.

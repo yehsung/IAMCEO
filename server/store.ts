@@ -456,6 +456,26 @@ const RESTORABLE_TIMES = {
   files: { createdAt: "created_at" },
 } as const;
 
+/**
+ * 0.2.10: 프로젝트의 살아 있는 전달. 아직 전달되지 않았거나(status != 'delivered', 색인 deliveries_open) 전달됐어도 확인이 끝나지 않은 것
+ * (복구 phase 가 checking·waiting·retry_wait·needs_owner, 색인 delivery_recovery_due). 만든 순서(rowid).
+ * 전달 알림(DeliveryRecovery.item)이 내보낼 수 있는 전달은 모두 여기 든다: 알림은 전달되지 않은 것이거나 phase 가 끝나지 않은 duplicate_draft 다.
+ * phase 'none' 은 사유가 언제나 NULL 이다(넣을 때 기본값, 다시 none 으로 돌릴 때도 reason: null). 전달되고 phase 가 resolved·stopped·none 인
+ * 이력은 읽지 않는다. 아래 두 조건은 db.ts LIVE_INDEXES 의 부분 색인과 글자까지 같아야 한다(tests/record-retention.test.ts).
+ */
+const LIVE_DELIVERIES_SQL = `SELECT * FROM deliveries WHERE rowid IN (
+    SELECT rowid FROM deliveries WHERE project_id = ? AND status != 'delivered'
+    UNION ALL SELECT d.rowid FROM delivery_recovery r CROSS JOIN deliveries d ON d.id = r.delivery_id
+      WHERE r.phase IN ('checking','waiting','retry_wait','needs_owner') AND d.project_id = ?)
+  ORDER BY rowid`;
+
+/** 결과 보고 누락 안내 글의 id 는 이 접두사 + 실행 id 다(Orchestrator). END 는 접두사 끝 글자 '_'(0x5F)의 다음 글자 '`'로 바꾼 것: [접두사, END) 가 그 접두사로 시작하는 id 전부. */
+const MISSING_REPORT_PREFIX = "msg_missing_report_";
+const MISSING_REPORT_END = "msg_missing_report`";
+
+/** 이 글자로 시작하는 쓰기는 고아 보고 점검의 물높이를 버린다(Store.run). 전달·팀장·프로젝트 행을 지우거나 팀장을 만드는 문장은 모두 Store.run 을 거친다. */
+const REPORT_SCAN_RESET = ["DELETE FROM deliveries", "DELETE FROM members", "DELETE FROM projects", "INSERT INTO members"];
+
 const HANDLE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 export const MAX_ACTIVITY_PER_MEMBER = 500;
 // 도구 결과 하나가 수 MB 일 수 있다. 활동 판은 훑어보는 용도라 잘라도 된다.
@@ -913,37 +933,71 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   private readonly sqlTransaction: Database["transaction"];
   private commitFrames: (() => void)[][] = [];
   private lastMessageMs = 0;
+  /**
+   * 0.2.10: 읽기 묶음은 프로젝트의 전달 이력 전체가 아니라 살아 있는 전달(LIVE_DELIVERIES_SQL)과 그 복구 기록만 미리 읽는다.
+   * 나머지(끝난 전달, 조립하는 글의 보고 출처·정정·대표 글 전달)는 키로 바로 읽거나 messagesFrom 이 쪽의 글 id 로 한 번에 읽는다.
+   * 묶음 안에서는 쓰지 않으므로(run 이 막는다) 미리 읽은 값과 바로 읽은 값은 같다.
+   */
   private deliveryRead: {
-    projectId: string; deliveries: Delivery[]; rows: Map<string, Row>; recoveries: Map<string, Row>;
+    projectId: string; live: Delivery[]; rows: Map<string, Row>; recoveries: Map<string, Row>;
     stalls: Set<string>; startedRuns: Map<string, number>; verdicts: Map<string, StoredPumpVerdict | null>;
-    reportRefs: Map<string, Row>; superseded: Map<string, string>; messageDeliveries: Map<string, Delivery[]>; memo: Map<string, unknown>;
+    messageDeliveries: Map<string, Delivery[]>;
+    /** listDeliveries(이 프로젝트)를 부른 때만 읽는 전체 이력. 자주 도는 길은 부르지 않는다. */
+    all: Delivery[] | null;
+    /** 글 id → 보고 출처 행 / 그 글을 정정한 글 / 그 대표 글의 마지막 전달 id. 없음(null)도 적는다. */
+    reportRefs: Map<string, Row | null>; superseded: Map<string, string | null>; ownerDeliveries: Map<string, string | null>;
+    memo: Map<string, unknown>;
   } | null = null;
 
   /** Request-local read snapshot. Never survives a synchronous read or caches runtime wait state across requests. */
   withDeliveryRead<T>(projectId: string, read: () => T): T {
     if (this.deliveryRead?.projectId === projectId) return read();
     const previous = this.deliveryRead;
-    const rows = this.rows("SELECT * FROM deliveries WHERE project_id = ? ORDER BY rowid", projectId);
-    const reportRefs = this.rows("SELECT * FROM report_references WHERE project_id = ? ORDER BY sequence, rowid", projectId);
+    const rows = this.rows(LIVE_DELIVERIES_SQL, projectId, projectId);
     const messageDeliveries = new Map<string, Delivery[]>();
     for (const row of rows) if (row.ref_type === "message" && !["delivered", "failed"].includes(row.status)) {
       const own = messageDeliveries.get(row.ref_id) ?? [];
       own.push(toDelivery(row)); messageDeliveries.set(row.ref_id, own);
     }
-    this.deliveryRead = { projectId, rows: new Map(rows.map(row => [row.id, row])), deliveries: rows.map(toDelivery),
-      recoveries: new Map(this.rows("SELECT r.* FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id WHERE d.project_id = ?", projectId).map(row => [row.delivery_id, row])),
-      stalls: new Set(this.rows("SELECT s.delivery_id FROM delivery_stalls s JOIN deliveries d ON d.id = s.delivery_id WHERE d.project_id = ? AND s.resolved_at IS NULL", projectId).map(row => row.delivery_id)),
+    this.deliveryRead = { projectId, rows: new Map(rows.map(row => [row.id, row])), live: rows.map(toDelivery),
+      recoveries: new Map((rows.length ? this.rows("SELECT r.* FROM json_each(?) j CROSS JOIN delivery_recovery r ON r.delivery_id = j.value", JSON.stringify(rows.map(row => row.id))) : []).map(row => [row.delivery_id, row])),
+      // 풀리지 않은 정체 표시는 몇 줄뿐이다. 그 표에서 출발한다(전달 이력에서 출발하면 이력 전체를 훑는다).
+      stalls: new Set(this.rows("SELECT s.delivery_id FROM delivery_stalls s CROSS JOIN deliveries d ON d.id = s.delivery_id WHERE s.resolved_at IS NULL AND d.project_id = ?", projectId).map(row => row.delivery_id)),
       // 그 프로젝트의 팀장마다 펌프의 마지막 판정(없으면 null). 전달마다 따로 읽지 않는다.
       verdicts: new Map(this.verdictsReady ? this.rows("SELECT m.id AS owner_id, v.* FROM members m LEFT JOIN member_delivery_verdicts v ON v.member_id = m.id WHERE m.project_id = ?", projectId)
         .map(row => [row.owner_id as string, row.member_id ? toPumpVerdict(row) : null]) : []),
       startedRuns: new Map(this.rows("SELECT member_id, MAX(rowid) AS last_run FROM execution_journal WHERE project_id = ? AND started_at IS NOT NULL GROUP BY member_id", projectId).map(row => [row.member_id, row.last_run])),
-      reportRefs: new Map(reportRefs.map(row => [row.source_message_id, row])), superseded: new Map(reportRefs.filter(row => row.corrects_message_id).map(row => [row.corrects_message_id, row.source_message_id])),
-      messageDeliveries, memo: new Map() };
+      messageDeliveries, all: null, reportRefs: new Map(), superseded: new Map(), ownerDeliveries: new Map(), memo: new Map() };
     try {
       const result = read();
       if (result instanceof Promise) throw new Error("withDeliveryRead requires a synchronous callback");
       return result;
     } finally { this.deliveryRead = previous; }
+  }
+
+  /**
+   * 조립할 글들의 보고 출처·정정한 글·(대표 글이면) 마지막 대표 글 전달을 한 번에 읽어 묶음에 적는다. 예전에는 묶음을 만들 때
+   * 프로젝트의 보고 출처와 전달 전체를 읽어 두었다. 값은 글마다 따로 읽는 것(getReportReferences·messageFrom·ownerDelivery)과 같다.
+   */
+  private prefetchMessageReads(projectId: string, rows: Row[]): void {
+    const read = this.deliveryRead;
+    if (!read || read.projectId !== projectId) return;
+    const ids = rows.map(row => row.id as string).filter(id => !read.reportRefs.has(id));
+    if (ids.length) {
+      const list = JSON.stringify(ids);
+      for (const id of ids) { read.reportRefs.set(id, null); read.superseded.set(id, null); }
+      for (const row of this.rows("SELECT * FROM report_references WHERE source_message_id IN (SELECT value FROM json_each(?)) AND +project_id = ?", list, projectId)) read.reportRefs.set(row.source_message_id, row);
+      // 같은 글을 여러 번 정정했으면 마지막(sequence, rowid) 것. 글마다 읽는 쿼리의 ORDER BY sequence DESC, rowid DESC LIMIT 1 과 같다.
+      for (const row of this.rows(`SELECT corrects_message_id, source_message_id FROM report_references WHERE corrects_message_id IS NOT NULL
+        AND corrects_message_id IN (SELECT value FROM json_each(?)) AND +project_id = ? ORDER BY sequence, rowid`, list, projectId)) read.superseded.set(row.corrects_message_id, row.source_message_id);
+    }
+    const mine = rows.filter(row => row.mine && !read.ownerDeliveries.has(row.id)).map(row => row.id as string);
+    if (mine.length) {
+      for (const id of mine) read.ownerDeliveries.set(id, null);
+      // rowid 차례로 읽는다. 같은 글의 뒤 전달이 앞 것을 덮는다(받는 이가 바뀌어 여러 번 생긴 것).
+      for (const row of this.rows(`SELECT ref_id, id FROM deliveries WHERE ref_type = 'message' AND ref_id IN (SELECT value FROM json_each(?))
+        AND kind = 'user_message' AND +project_id = ? ORDER BY rowid`, JSON.stringify(mine), projectId)) read.ownerDeliveries.set(row.ref_id, row.id);
+    }
   }
 
   private deliveryReadMemo<T>(key: string, read: () => T): T {
@@ -952,17 +1006,26 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.deliveryRead.memo.get(key) as T;
   }
 
-  deliveryNoticePreviews(projectId: string): Map<string, string> {
+  /**
+   * 전달 알림의 원문 미리보기(`종류:id` → 본문·제목). deliveries 를 주면(0.2.10, 알림으로 내보낼 전달들) 그 전달들이 가리키는 원문만 읽는다.
+   * 주지 않으면 예전처럼 그 프로젝트의 전달이 가리킨 원문 전부. 그 전달들에 대한 값은 어느 쪽이든 같다.
+   */
+  deliveryNoticePreviews(projectId: string, deliveries?: Delivery[]): Map<string, string> {
     const previews = new Map<string, string>();
     for (const [type, table, column] of [["message", "messages", "body"], ["decision", "decisions", "title"], ["todo", "todos", "title"]]) {
-      for (const row of this.rows(`SELECT id, ${column} AS preview FROM ${table} WHERE id IN (SELECT ref_id FROM deliveries WHERE project_id = ? AND ref_type = ?)`, projectId, type)) previews.set(`${type}:${row.id}`, row.preview);
+      const rows = deliveries === undefined
+        ? this.rows(`SELECT id, ${column} AS preview FROM ${table} WHERE id IN (SELECT ref_id FROM deliveries WHERE project_id = ? AND ref_type = ?)`, projectId, type)
+        : this.rows(`SELECT id, ${column} AS preview FROM ${table} WHERE id IN (SELECT value FROM json_each(?))`,
+          JSON.stringify([...new Set(deliveries.filter(d => d.projectId === projectId && d.refType === type && d.refId !== null).map(d => d.refId!))]));
+      for (const row of rows) previews.set(`${type}:${row.id}`, row.preview);
     }
     return previews;
   }
 
   listUnlinkedFailedMessages(projectId: string): Message[] {
+    // 0.2.10: 실패한 대표 글만 담은 부분 색인(messages_owner_failed)에서 출발하고, 전달 확인은 ref 색인으로 한다(+d.project_id).
     return this.rows(`SELECT m.* FROM messages m WHERE m.project_id = ? AND m.mine = 1 AND m.delivery = 'failed'
-      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.project_id = m.project_id AND d.ref_type = 'message' AND d.ref_id = m.id)
+      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id AND +d.project_id = m.project_id)
       ORDER BY m.at DESC, m.id DESC`, projectId).map(toMessage);
   }
   private recheckPending: ((memberId: string) => void) | null = null;
@@ -1142,7 +1205,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         // 판정 표는 있는데 이 팀장의 줄이 아직 없다(업그레이드 첫 시작, 새 판으로 처음 보는 팀장): '이유 없는 대기'가 아니라 '판정 전'이다.
         // 판정할 펌프가 붙어 있을 때만 그렇게 본다(펌프 없는 저장소·읽기 전용 도구는 예전처럼 이유 없는 대기로 다룬다).
         const unjudged = this.verdictsReady && !verdict && !!this.judgeMember;
-        const progress = waiting ? delivery.createdAt : this.listDispatches(delivery.memberId).filter(d => d.items.some(i => i.deliveryId === delivery.id)).at(-1)?.updatedAt ?? delivery.createdAt;
+        // 0.2.10: 이 전달의 마지막 봉투만 색인으로 찾는다(예전에는 그 팀장의 봉투 이력 전체를 읽어 걸렀다. 값은 같다).
+        const progress = waiting ? delivery.createdAt : this.latestDispatchFor(delivery.memberId, delivery.id)?.updatedAt ?? delivery.createdAt;
         return { delivery, waiting, suspect, unjudged, stalled: this.deliveryStalled(delivery.id), progress };
       }));
       for (const { delivery, waiting, suspect, unjudged, stalled, progress } of observations) {
@@ -1195,7 +1259,16 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
    * 뒤 작업을 기다리는 동안 넣은 다른 업무의 보고가 이 실행의 보고 누락을 가리지 않게 한다.
    */
   hasExecutionReport(run: ExecutionJournal, opts: { ownTurnsOnly?: boolean } = {}): boolean {
-    if (this.row("SELECT 1 FROM decisions WHERE project_id = ? AND member_id = ? AND status = 'open' LIMIT 1", run.projectId, run.memberId)) return true;
+    return this.hasOpenDecisionBy(run) || this.hasReportMessage(run, opts);
+  }
+
+  /** 그 팀장이 연 결재가 아직 열려 있다(답하거나 닫으면 바뀐다). */
+  private hasOpenDecisionBy(run: ExecutionJournal): boolean {
+    return !!this.row("SELECT 1 FROM decisions WHERE project_id = ? AND member_id = ? AND status = 'open' LIMIT 1", run.projectId, run.memberId);
+  }
+
+  /** hasExecutionReport 의 글 쪽: 그 실행(과 그것이 잇는 앞 실행) 뒤에 그 팀장이 쓴 결과 보고 글이 있는가. 글은 지우지 않으므로 한 번 찾으면 그대로다. */
+  private hasReportMessage(run: ExecutionJournal, opts: { ownTurnsOnly?: boolean }): boolean {
     let since = run.createdAt, own = run.createdAt;
     const pending = [run], seen = new Set<string>();
     while (pending.length) {
@@ -1247,12 +1320,39 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return deliveries.some(d => d.wake && (d.kind === "user_message" || d.kind === "answer")) ? own : null;
   }
 
+  /**
+   * 0.2.10: 결과 보고 글을 이미 찾은 실행(run id). 글은 지우지 않으니 다시 판정해도 '있음'이다. 예전에는 동기화마다 해결된 안내까지 처음부터 다시
+   * 판정해(그 팀장의 실행 기록 전체를 json_each 로 펼침) 안내가 쌓일수록 제곱으로 느려졌다. 프로세스 메모리에만 두고, 커밋된 뒤에만 적는다.
+   * 열린 결재로 '있음'이 된 것은 적지 않는다(결재를 닫으면 다시 '누락'일 수 있다).
+   */
+  private readonly reportFound = new Map<string, true>();
+  /** 고아 보고 점검의 물높이(listWorkerReportsMissingDeliveries). 프로세스 메모리. */
+  private readonly reportScan = new Map<string, { through: number; epoch: number }>();
+  /** 이미 본 보고가 다시 넘길 글이 될 수 있는 쓰기(전달·팀장·프로젝트 삭제, 팀장 생성)마다 올린다. 물높이를 모두 버린다. */
+  private reportScanEpoch = 0;
+
   listMissingReportNotices(projectId: string): MissingReportNotice[] {
+    // 안내 글 id 는 'msg_missing_report_' + run_id 다. 안내 글(몇 개뿐)의 id 범위에서 출발한다(예전에는 그 프로젝트의 실행 기록 전체에서 출발했다).
+    // '`' 는 ASCII 에서 '_' 바로 다음 글자라 [prefix, prefix 끝 글자+1) 범위가 그 접두사로 시작하는 id 전부다. 짝은 예전 JOIN 조건과 같다.
     return this.rows(`SELECT e.run_id, e.member_id, m.id AS message_id, m.at
-      FROM execution_journal e JOIN messages m ON m.id = 'msg_missing_report_' || e.run_id
-      WHERE e.project_id = ? ORDER BY m.at, m.id`, projectId)
-      .filter(row => !this.hasExecutionReport(this.getExecutionJournal(row.run_id)!))
+      FROM messages m CROSS JOIN execution_journal e ON e.run_id = substr(m.id, ?)
+      WHERE m.id >= ? AND m.id < ? AND m.id = ? || e.run_id AND e.project_id = ? ORDER BY m.at, m.id`,
+      MISSING_REPORT_PREFIX.length + 1, MISSING_REPORT_PREFIX, MISSING_REPORT_END, MISSING_REPORT_PREFIX, projectId)
+      .filter(row => !this.executionReported(row.run_id))
       .map(row => ({ kind: "missing_report", runId: row.run_id, memberId: row.member_id, messageId: row.message_id, createdAt: row.at, title: "결과 보고 누락" }));
+  }
+
+  /** hasExecutionReport 와 같은 판정. 글로 찾은 것은 기억해 다시 보지 않는다(reportFound). */
+  private executionReported(runId: string): boolean {
+    if (this.reportFound.has(runId)) return true;
+    const run = this.getExecutionJournal(runId)!;
+    if (this.hasOpenDecisionBy(run)) return true;
+    if (!this.hasReportMessage(run, {})) return false;
+    // 지금 트랜잭션이 되돌려지면 그 안에서 본 글도 없던 것이 된다. 커밋된 뒤에만 기억한다(Store.transaction 밖의 트랜잭션 안이면 기억하지 않는다).
+    const remember = () => Store.remember(this.reportFound, runId, true, 50_000);
+    if (this.commitFrames.length) this.commitFrames.at(-1)!.push(remember);
+    else if (!this.db.inTransaction) remember();
+    return true;
   }
 
   private messageFrom(row: Row, includeDelivery = true): Message {
@@ -1266,7 +1366,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       } catch { /* Malformed legacy links are plain text, never cross-project references. */ }
     }
     message.supersedes = refs?.correctsMessageId ?? null;
-    message.supersededBy = this.deliveryRead?.projectId === message.projectId ? this.deliveryRead.superseded.get(message.id) ?? null : this.row("SELECT source_message_id FROM report_references WHERE project_id = ? AND corrects_message_id = ? ORDER BY sequence DESC, rowid DESC LIMIT 1", message.projectId, message.id)?.source_message_id ?? null;
+    const prefetched = this.deliveryRead?.projectId === message.projectId ? this.deliveryRead.superseded.get(message.id) : undefined;
+    message.supersededBy = prefetched !== undefined ? prefetched : this.row("SELECT source_message_id FROM report_references WHERE project_id = ? AND corrects_message_id = ? ORDER BY sequence DESC, rowid DESC LIMIT 1", message.projectId, message.id)?.source_message_id ?? null;
     if (!includeDelivery) return message;
     // Z(0.2.6): 대표 글에만 답 상태를 싣는다.
     const reply = message.mine ? this.messageReply(message) : null;
@@ -1329,13 +1430,10 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   /** 그 글의 가장 최근 대표 글 전달. 받는 이가 바뀌어(총괄에게 넘김) 여러 번 생겼으면 마지막 것이다. */
   private ownerDelivery(message: Message): Delivery | null {
     if (this.deliveryRead?.projectId === message.projectId) {
-      const latest = this.deliveryReadMemo("reply:owner-deliveries", () => {
-        const out = new Map<string, string>();
-        // rows 는 rowid 차례로 넣었다. 같은 글의 뒤 전달이 앞 것을 덮는다.
-        for (const row of this.deliveryRead!.rows.values()) if (row.kind === "user_message" && row.ref_type === "message" && row.ref_id) out.set(row.ref_id, row.id);
-        return out;
-      });
-      const id = latest.get(message.id);
+      // 묶음 안에서는 그 프로젝트의 전달만 본다(예전에 묶음이 프로젝트 전달 전체에서 고르던 것과 같다). 쪽의 글은 messagesFrom 이 미리 읽었다.
+      const read = this.deliveryRead;
+      if (!read.ownerDeliveries.has(message.id)) read.ownerDeliveries.set(message.id, this.row("SELECT id FROM deliveries WHERE ref_type = 'message' AND ref_id = ? AND kind = 'user_message' AND +project_id = ? ORDER BY rowid DESC LIMIT 1", message.id, message.projectId)?.id ?? null);
+      const id = read.ownerDeliveries.get(message.id);
       return id ? this.getDelivery(id) : null;
     }
     const row = this.row("SELECT * FROM deliveries WHERE ref_type = 'message' AND ref_id = ? AND kind = 'user_message' ORDER BY rowid DESC LIMIT 1", message.id);
@@ -1663,8 +1761,9 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     this.transaction(() => {
       const d = this.requireDelivery(id);
       if (actor.kind !== "conductor" || actor.projectId !== d.projectId || d.kind !== "instruction" || this.row("SELECT assigned_by FROM deliveries WHERE id = ?", id)?.assigned_by !== actor.id) throw new ApiError(403, "자신이 보낸 지시만 거둘 수 있습니다", "instruction_not_own");
-      if (!["queued", "held"].includes(d.status) || this.listDispatches(d.memberId).some(x => x.items.some(i => i.deliveryId === id) && ["write_started", "unknown", "accepted"].includes(x.transportState))) throw new ApiError(409, "이미 쓰기 시작한 지시는 거둘 수 없습니다", "instruction_started");
-      for (const dispatch of this.listDispatches(d.memberId)) if (dispatch.transportState === "prepared" && dispatch.items.some(i => i.deliveryId === id)) this.updateDispatch(dispatch.dispatchId, "prepared", "rejected");
+      const envelopes = this.listDispatchesFor(d.memberId, id);
+      if (!["queued", "held"].includes(d.status) || envelopes.some(x => ["write_started", "unknown", "accepted"].includes(x.transportState))) throw new ApiError(409, "이미 쓰기 시작한 지시는 거둘 수 없습니다", "instruction_started");
+      for (const dispatch of envelopes) if (dispatch.transportState === "prepared") this.updateDispatch(dispatch.dispatchId, "prepared", "rejected");
       const r = this.getDeliveryRecovery(id)!;
       this.updateDeliveryRecovery(id, r.version, { phase: "stopped", reason: "withdrawn", nextCheckAt: null });
       this.markFailed(id, "총괄이 미전달 지시를 거뒀습니다");
@@ -1692,7 +1791,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
         const d = toDelivery(row), r = this.getDeliveryRecovery(d.id)!;
         const stale = ["instruction", "system", "report"].includes(d.kind) && at - Date.parse(d.createdAt) > 3_600_000;
         this.patchDeliveryRetry(d.id, { retryReason: null, nextAttemptAt: null });
-        if (!this.listDispatches(d.memberId).some(x => x.items.some(i => i.deliveryId === d.id))) this.run("UPDATE deliveries SET attempts = 0 WHERE id = ?", d.id);
+        if (!this.listDispatchesFor(d.memberId, d.id).length) this.run("UPDATE deliveries SET attempts = 0 WHERE id = ?", d.id);
         this.updateDeliveryRecovery(d.id, r.version, { phase: stale ? "needs_owner" : "resolved", reason: stale ? "stale_instruction" : "not_received", nextCheckAt: null });
         this.setDeliveryStatus(d.id, stale ? "held" : "queued", { holdReason: stale ? "stale_instruction" : null });
       }
@@ -1778,6 +1877,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   private run(sql: string, ...params: SQLQueryBindings[]): void {
     if (this.deliveryRead) throw new Error("Cannot write inside a delivery read snapshot");
+    // 고아 보고 점검의 물높이를 버리는 쓰기(listWorkerReportsMissingDeliveries). 팀장·프로젝트 삭제는 그 전달을 연쇄로 지운다.
+    if (REPORT_SCAN_RESET.some(prefix => sql.startsWith(prefix))) this.reportScanEpoch++;
     this.db.query<Row, SQLQueryBindings[]>(sql).run(...params);
   }
 
@@ -2045,9 +2146,12 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   /** A negative result avoids hydrating ordinary queued deliveries for a summary count.
    * Positive candidates still use the full notice rules (including superseded sources). */
   hasDeliveryAttention(projectId: string): boolean {
-    return !!this.row(`SELECT 1 FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id
-      WHERE d.project_id = ? AND (r.phase = 'needs_owner' OR (r.phase IN ('none','resolved')
-        AND EXISTS (SELECT 1 FROM delivery_stalls s WHERE s.delivery_id = d.id AND s.resolved_at IS NULL))) LIMIT 1`, projectId);
+    // 0.2.10: 대표 판단을 기다리는 복구(phase 색인)와 풀리지 않은 정체 표시(몇 줄뿐인 표)에서 출발한다. 예전 한 문장은 그 프로젝트의 전달 이력을
+    // 하나씩 훑으며 복구·정체를 찾았다(찾을 것이 없을 때 가장 느렸다). 고르는 조건은 같다.
+    return !!this.row(`SELECT 1 FROM delivery_recovery r CROSS JOIN deliveries d ON d.id = r.delivery_id WHERE r.phase = 'needs_owner' AND d.project_id = ?
+      UNION ALL SELECT 1 FROM delivery_stalls s CROSS JOIN delivery_recovery r ON r.delivery_id = s.delivery_id CROSS JOIN deliveries d ON d.id = s.delivery_id
+        WHERE s.resolved_at IS NULL AND r.phase IN ('none','resolved') AND d.project_id = ?
+      LIMIT 1`, projectId, projectId);
   }
 
   projectSummaries(): ProjectSummary[] {
@@ -2072,7 +2176,7 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       connection: this.connectionOf(r.id, !!r.runner_enabled, !!r.archived),
       decisionCount: r.decision_count,
       todoCount: r.todo_count,
-      needsCount: r.decision_count + r.todo_count + r.attention_blocked_count + r.error_count + (this.needsOwnerCounter?.(r.id) ?? this.row("SELECT COUNT(*) AS n FROM delivery_recovery r JOIN deliveries d ON d.id = r.delivery_id WHERE d.project_id = ? AND r.phase = 'needs_owner'", r.id)!.n),
+      needsCount: r.decision_count + r.todo_count + r.attention_blocked_count + r.error_count + (this.needsOwnerCounter?.(r.id) ?? this.row("SELECT COUNT(*) AS n FROM delivery_recovery r CROSS JOIN deliveries d ON d.id = r.delivery_id WHERE r.phase = 'needs_owner' AND d.project_id = ?", r.id)!.n),
       needsDanger: r.error_count > 0,
       inboxCount: r.decision_count + r.todo_count,
       workingCount: r.working_count,
@@ -2889,7 +2993,22 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
 
   /** 글마다 출처·전달을 따로 묻지 않도록 프로젝트 읽기 스냅샷 안에서 조립한다. */
   private messagesFrom(projectId: string, rows: Row[]): Message[] {
-    return rows.length ? this.withDeliveryRead(projectId, () => rows.map(r => this.messageFrom(r))) : [];
+    return rows.length ? this.withDeliveryRead(projectId, () => {
+      this.prefetchMessageReads(projectId, rows);
+      return rows.map(r => this.messageFrom(r));
+    }) : [];
+  }
+
+  /**
+   * 0.2.10 인용 대조(MemberFlows.findQuoteSource)용: listMessages 와 같은 쪽(같은 정렬·같은 before·같은 limit 범위)을 오래된 → 최신으로 주되,
+   * 글을 조립하지 않고(전달·답 상태·보고 출처 없이) id·시각·본문·대표 글 여부만 준다.
+   */
+  listMessageBodies(projectId: string, opts: { before?: string; limit?: number } = {}): { id: string; at: string; body: string; mine: boolean }[] {
+    const limit = Math.min(Math.max(opts.limit ?? 200, 1), 500);
+    const rows = opts.before
+      ? this.rows("SELECT id, at, body, mine FROM messages WHERE project_id = ? AND at < ? ORDER BY at DESC, rowid DESC LIMIT ?", projectId, opts.before, limit)
+      : this.rows("SELECT id, at, body, mine FROM messages WHERE project_id = ? ORDER BY at DESC, rowid DESC LIMIT ?", projectId, limit);
+    return rows.reverse().map(row => ({ id: row.id, at: row.at, body: row.body, mine: !!row.mine }));
   }
 
   private messageScope(projectId: string, scope: MessageScope = { kind: "project" }): MessageScope {
@@ -3711,6 +3830,38 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
       ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, ...(projectId === undefined ? [] : [projectId])).map(r => this.messageFrom(r));
   }
 
+  /**
+   * 0.2.10 고아 보고 점검(30초 틱, OwnerFlows.repairSourceIntents): listReportsMissingDeliveries 가운데 부르는 쪽이 실제로 넘기는 글만.
+   * 그 쪽이 하던 작성자 거르기(작성자가 직원이고 지금 총괄이 아님)를 SQL 로 옮겨 넘길 글만 조립한다. 예전에는 총괄 자신의 보고(넘김이 영영 생기지
+   * 않는 글, 지금 거의 전부)까지 30초마다 모두 조립하고 버렸다. 작성자는 프로젝트를 따지지 않고 id 로 찾는다(getMember 와 같다).
+   * 총괄은 root·conductor 라 '직원' 조건이 '총괄이 아님'을 이미 담는다.
+   *
+   * 물높이(reportScan): 프로젝트마다 '이 rowid 까지는 넘길 글이 없다'를 기억하고 그 뒤의 글만 본다. 이미 본 글이 다시 넘길 글이 되는 길은
+   * 그 글의 보고 전달이 지워지거나(전달 행 삭제, 팀장·프로젝트 삭제의 연쇄) 작성자가 새로 직원이 되는 것(팀장 생성)뿐이다. 글의 작성자·종류·
+   * 대표 여부와 팀장의 종류는 바뀌지 않고, 글은 프로젝트를 지울 때만 지워진다(그때만 rowid 가 다시 쓰일 수 있다). 그 변화는 모두
+   * reportScanEpoch 를 올려(run) 물높이를 버리고 처음부터 다시 본다. 넘길 글이 남으면 물높이는 그중 가장 앞의 글 바로 앞에 둔다.
+   */
+  listWorkerReportsMissingDeliveries(projectId: string, leadId: string): Message[] {
+    const mark = this.reportScan.get(projectId);
+    const epoch = this.reportScanEpoch;
+    const from = mark && mark.epoch === epoch ? mark.through : 0;
+    const top = (this.row("SELECT MAX(rowid) AS top FROM messages")?.top as number | null) ?? 0;
+    // 물높이가 있으면 rowid 범위에서 출발하고(+m.project_id 로 프로젝트 색인을 고르지 않게 한다), 처음에는 프로젝트 색인에서 출발한다.
+    // rowid 하한은 하나로 합친다(MAX). 둘로 두면 SQLite 가 옛 경계 쪽을 범위로 골라 물높이가 있어도 끝까지 훑었다.
+    const rows = this.rows(`SELECT m.rowid AS report_scan_rowid, m.* FROM messages m WHERE m.mine = 0 AND m.member_id IS NOT NULL AND m.who <> '시스템' AND m.kind IN ('완료','진행','막힘','알림')
+      AND m.rowid > MAX(?, COALESCE((SELECT legacy_max_rowid FROM report_delivery_tracking WHERE id = 1), 0))
+      AND ${from ? "+m.project_id" : "m.project_id"} = ? AND m.member_id <> ?
+      AND EXISTS (SELECT 1 FROM members a WHERE a.id = m.member_id AND a.kind = 'worker')
+      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.ref_type = 'message' AND d.ref_id = m.id AND d.kind = 'report')
+      ORDER BY m.at COLLATE BINARY, m.id COLLATE BINARY`, from, projectId, leadId);
+    const through = rows.length ? Math.min(...rows.map(row => row.report_scan_rowid as number)) - 1 : Math.max(top, from);
+    // 이 트랜잭션이 되돌려지면 기억하지 않는다(그 사이 넣은 전달도 없던 것이 된다).
+    const remember = () => { if (this.reportScanEpoch === epoch) this.reportScan.set(projectId, { through, epoch }); };
+    if (this.commitFrames.length) this.commitFrames.at(-1)!.push(remember);
+    else if (!this.db.inTransaction) remember();
+    return rows.map(r => this.messageFrom(r));
+  }
+
   listAnswersMissingDeliveries(projectId?: string): Decision[] {
     return this.rows(`SELECT a.* FROM decisions a WHERE a.status = 'answered'
       ${projectId === undefined ? "" : "AND a.project_id = ?"}
@@ -3723,19 +3874,67 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
     return this.rows("SELECT * FROM decisions WHERE project_id = ? AND member_id = ? AND status = 'answered' AND delivered_at IS NULL ORDER BY answered_at, rowid", member.projectId, memberId).map(toDecision);
   }
 
+  /** 전달 이력 전체(만든 순서). 자주 도는 길은 쓰지 않는다: listLiveDeliveries·listDeliveriesByRef·listFenceCandidates 를 쓴다. */
   listDeliveries(projectId?: string): Delivery[] {
-    if (projectId !== undefined && this.deliveryRead?.projectId === projectId) return this.deliveryRead.deliveries;
+    if (projectId !== undefined && this.deliveryRead?.projectId === projectId) {
+      return this.deliveryRead.all ??= this.rows("SELECT * FROM deliveries WHERE project_id = ? ORDER BY rowid", projectId).map(toDelivery);
+    }
     return this.rows(`SELECT * FROM deliveries ${projectId === undefined ? "" : "WHERE project_id = ?"} ORDER BY rowid`, ...(projectId === undefined ? [] : [projectId])).map(toDelivery);
   }
 
-  /** Ordinary queued rows need no evidence scan. An unresolved physical write remains eligible even after logical resolution. */
+  /** 0.2.10: 프로젝트의 살아 있는 전달(LIVE_DELIVERIES_SQL, 만든 순서). 전달 알림·대표 판단 수·정체 점검이 쓴다. */
+  listLiveDeliveries(projectId: string): Delivery[] {
+    if (this.deliveryRead?.projectId === projectId) return this.deliveryRead.live;
+    return this.rows(LIVE_DELIVERIES_SQL, projectId, projectId).map(toDelivery);
+  }
+
+  /**
+   * 0.2.10: 한 원문(글·결재·할 일)에 딸린 전달(만든 순서). listDeliveries(projectId).filter(같은 ref_type·ref_id) 와 같다. projectId 를 빼면 모든 프로젝트.
+   * refId 를 빼면 그 종류 전부(ref_id 가 있는 것만).
+   */
+  listDeliveriesByRef(refType: string, refId?: string, projectId?: string): Delivery[] {
+    // +project_id: project_id 색인(rowid 차례)을 고르면 그 프로젝트의 이력 전체를 훑는다. ref 색인을 타게 한다.
+    const where = ["ref_type = ?", refId === undefined ? "ref_id IS NOT NULL" : "ref_id = ?", ...(projectId === undefined ? [] : ["+project_id = ?"])];
+    return this.rows(`SELECT * FROM deliveries WHERE ${where.join(" AND ")} ORDER BY rowid`, refType, ...(refId === undefined ? [] : [refId]), ...(projectId === undefined ? [] : [projectId])).map(toDelivery);
+  }
+
+  /**
+   * 0.2.10: 같은 팀장·같은 원문·같은 원문 판(source_revision)으로 이 전달보다 뒤에(rowid) 만든 전달이 같은 프로젝트에 있는가. 전달 알림이 앞선 실패를
+   * 숨길 때 쓴다(예전에는 프로젝트 전달 전체에서 키마다 마지막 것을 골랐다). 원문이나 판이 없으면 false.
+   */
+  hasLaterSameSource(delivery: Delivery): boolean {
+    const revision = this.getDeliveryRetry(delivery.id).sourceRevision;
+    if (!delivery.refType || !delivery.refId || !revision) return false;
+    return !!this.row(`SELECT 1 FROM deliveries o WHERE o.ref_type = ? AND o.ref_id = ? AND o.member_id = ? AND o.project_id = ? AND o.source_revision = ?
+      AND o.rowid > (SELECT rowid FROM deliveries WHERE id = ?) LIMIT 1`, delivery.refType, delivery.refId, delivery.memberId, delivery.projectId, revision, delivery.id);
+  }
+
+  /**
+   * 0.2.10: 이 팀장의 전달 가운데 논리 울타리(DeliveryRecovery.logicalFence)가 될 수 있는 것만(만든 순서): 넣는 중·보류이거나 확인이 끝나지 않은 것.
+   * 울타리는 phase 가 none·resolved·stopped 가 아니거나(→ 확인 중인 phase), phase 가 none 이면서 넣는 중이거나 수신 확인 보류인 전달뿐이라 그 밖은 볼 필요가 없다.
+   */
+  listFenceCandidates(memberId: string): Delivery[] {
+    const projectId = this.requireMember(memberId).projectId;
+    return this.rows(`SELECT * FROM deliveries WHERE rowid IN (
+        SELECT rowid FROM deliveries WHERE member_id = ? AND status IN ('delivering','held') AND +project_id = ?
+        UNION ALL SELECT d.rowid FROM delivery_recovery r CROSS JOIN deliveries d ON d.id = r.delivery_id
+          WHERE r.phase IN ('checking','waiting','retry_wait','needs_owner') AND d.member_id = ? AND d.project_id = ?)
+      ORDER BY rowid`, memberId, projectId, memberId, projectId).map(toDelivery);
+  }
+
+  /**
+   * Ordinary queued rows need no evidence scan. An unresolved physical write remains eligible even after logical resolution.
+   * 0.2.10: 조건마다 색인을 타는 SELECT 로 나눠 합친다(예전 한 문장의 OR 는 전달 이력 전체를 훑었다). 고르는 전달은 같다.
+   * phase 는 CHECK 로 일곱 값뿐이라 NOT IN ('none','resolved','stopped') 는 아래 IN 과 같다.
+   */
   listDeliveryRecoveryCandidates(): Delivery[] {
-    return this.rows(`SELECT d.* FROM deliveries d JOIN delivery_recovery r ON r.delivery_id = d.id
-      WHERE r.phase NOT IN ('none','resolved','stopped') OR d.status IN ('failed','delivering')
-        OR (d.status = 'held' AND d.hold_reason = 'delivery_unknown')
-        OR EXISTS (SELECT 1 FROM delivery_dispatch_items i JOIN delivery_dispatches p ON p.id = i.dispatch_id
-          WHERE i.delivery_id = d.id AND p.transport_state IN ('prepared','write_started','unknown'))
-      ORDER BY d.rowid`).map(toDelivery);
+    return this.rows(`SELECT * FROM deliveries WHERE rowid IN (
+        SELECT d.rowid FROM delivery_recovery r CROSS JOIN deliveries d ON d.id = r.delivery_id WHERE r.phase IN ('checking','waiting','retry_wait','needs_owner')
+        UNION SELECT d.rowid FROM deliveries d JOIN delivery_recovery r ON r.delivery_id = d.id WHERE d.status IN ('failed','delivering')
+        UNION SELECT d.rowid FROM deliveries d JOIN delivery_recovery r ON r.delivery_id = d.id WHERE d.status = 'held' AND d.hold_reason = 'delivery_unknown'
+        UNION SELECT d.rowid FROM delivery_dispatches p CROSS JOIN delivery_dispatch_items i ON i.dispatch_id = p.id CROSS JOIN deliveries d ON d.id = i.delivery_id
+          CROSS JOIN delivery_recovery r ON r.delivery_id = d.id WHERE p.transport_state IN ('prepared','write_started','unknown'))
+      ORDER BY rowid`).map(toDelivery);
   }
 
   deliveryRetryDue(memberId: string, backend: Backend): number {
@@ -3907,12 +4106,16 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
    * 같은 조건을 SQL 로 걸러 풀리지 않은 봉투만 읽는다.
    */
   private unresolvedDispatches(memberId: string): DeliveryDispatch[] {
-    return this.rows(`SELECT d.id FROM delivery_dispatches d WHERE d.member_id = ? AND (d.transport_state IN ('prepared','write_started','unknown') OR EXISTS (
-        SELECT 1 FROM delivery_dispatch_items i JOIN delivery_recovery r ON r.delivery_id = i.delivery_id WHERE i.dispatch_id = d.id
-          AND r.phase NOT IN ('none','resolved','stopped')
-          AND NOT (r.phase = 'waiting' AND COALESCE(r.reason, '') = 'input_busy')
-          AND NOT (r.phase = 'needs_owner' AND COALESCE(r.reason, '') = 'stale_instruction')))
-      ORDER BY d.created_at, d.rowid`, memberId).map(row => this.getDispatch(row.id)).filter((d): d is DeliveryDispatch => d !== null);
+    // 0.2.10: 두 조건을 각각 색인에서 출발하는 SELECT 로 나눠 합친다: 쓰기 결과를 모르는 봉투(delivery_dispatches_physical)와 확인이 끝나지 않은
+    // 항목을 담은 봉투(복구 phase 색인 → 항목 → 봉투). 예전 한 문장은 그 팀장의 봉투를 모두 훑었다. phase 는 CHECK 로 일곱 값뿐이라
+    // NOT IN ('none','resolved','stopped') 는 아래 IN 과 같다. 고르는 봉투와 차례는 같다.
+    return this.rows(`SELECT id FROM delivery_dispatches WHERE rowid IN (
+        SELECT rowid FROM delivery_dispatches WHERE member_id = ? AND transport_state IN ('prepared','write_started','unknown')
+        UNION SELECT d.rowid FROM delivery_recovery r CROSS JOIN delivery_dispatch_items i ON i.delivery_id = r.delivery_id CROSS JOIN delivery_dispatches d ON d.id = i.dispatch_id
+          WHERE r.phase IN ('checking','waiting','retry_wait','needs_owner')
+            AND NOT (r.phase = 'waiting' AND COALESCE(r.reason, '') = 'input_busy')
+            AND NOT (r.phase = 'needs_owner' AND COALESCE(r.reason, '') = 'stale_instruction') AND d.member_id = ?)
+      ORDER BY created_at, rowid`, memberId, memberId).map(row => this.getDispatch(row.id)).filter((d): d is DeliveryDispatch => d !== null);
   }
 
   /**
@@ -3921,10 +4124,40 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
    */
   latestDispatchFor(memberId: string, deliveryId: string): DeliveryDispatch | null {
     return this.deliveryReadMemo(`latest-dispatch:${memberId}:${deliveryId}`, () => {
-      const row = this.row(`SELECT d.id FROM delivery_dispatch_items i JOIN delivery_recovery r ON r.delivery_id = i.delivery_id JOIN delivery_dispatches d ON d.id = i.dispatch_id
+      // 0.2.10: CROSS JOIN 으로 이 전달의 항목에서 출발한다. 그냥 JOIN 이면 SQLite 가 그 팀장의 봉투를 최근 순으로 훑어 오래된 전달일수록 느렸다.
+      const row = this.row(`SELECT d.id FROM delivery_dispatch_items i CROSS JOIN delivery_recovery r ON r.delivery_id = i.delivery_id CROSS JOIN delivery_dispatches d ON d.id = i.dispatch_id
         WHERE i.delivery_id = ? AND d.member_id = ? ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1`, deliveryId, memberId);
       return row ? this.getDispatch(row.id) : null;
     });
+  }
+
+  /** 0.2.10: 이 전달이 들어 있는 그 팀장의 봉투(만든 순서). listDispatches(팀장).filter(이 전달을 담은 것) 과 같다. */
+  listDispatchesFor(memberId: string, deliveryId: string): DeliveryDispatch[] {
+    return this.rows(`SELECT d.id FROM delivery_dispatch_items i CROSS JOIN delivery_recovery r ON r.delivery_id = i.delivery_id CROSS JOIN delivery_dispatches d ON d.id = i.dispatch_id
+      WHERE i.delivery_id = ? AND d.member_id = ? ORDER BY d.created_at, d.rowid`, deliveryId, memberId).map(row => this.getDispatch(row.id)!);
+  }
+
+  /** 0.2.10: 쓰기 결과를 모르는 봉투(prepared·write_started·unknown)만(만든 순서). listDispatches(팀장)을 그 상태로 거른 것과 같다. 색인 delivery_dispatches_physical. */
+  listPhysicalDispatches(memberId: string): DeliveryDispatch[] {
+    return this.rows("SELECT id FROM delivery_dispatches WHERE member_id = ? AND transport_state IN ('prepared','write_started','unknown') ORDER BY created_at, rowid", memberId)
+      .map(row => this.getDispatch(row.id)!);
+  }
+
+  /**
+   * 0.2.10: 그 팀장의 봉투 가운데 쓰기 결과를 모르는 것과 주어진 전달 가운데 하나라도 담은 것(만든 순서). listDispatches(팀장)의 부분 집합이고,
+   * 빠진 봉투는 쓰기가 끝났고 그 전달들을 담지 않은 것뿐이다.
+   */
+  listDispatchesTouching(memberId: string, deliveryIds: string[]): DeliveryDispatch[] {
+    return this.rows(`SELECT id FROM delivery_dispatches WHERE rowid IN (
+        SELECT rowid FROM delivery_dispatches WHERE member_id = ? AND transport_state IN ('prepared','write_started','unknown')
+        UNION SELECT p.rowid FROM json_each(?) j CROSS JOIN delivery_dispatch_items i ON i.delivery_id = j.value CROSS JOIN delivery_dispatches p ON p.id = i.dispatch_id WHERE p.member_id = ?)
+      ORDER BY created_at, rowid`, memberId, JSON.stringify(deliveryIds), memberId).map(row => this.getDispatch(row.id)!);
+  }
+
+  /** 0.2.10: 그 팀장의 마지막 봉투(만든 순서로 마지막, listDispatches(팀장).at(-1))의 id 와 만든 시각. 없으면 null. */
+  lastDispatch(memberId: string): { dispatchId: string; createdAt: string } | null {
+    const row = this.row("SELECT id, created_at FROM delivery_dispatches WHERE member_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", memberId);
+    return row ? { dispatchId: row.id, createdAt: row.created_at } : null;
   }
 
   // ---- 전달 복구 CAS / 봉투 ----
@@ -4335,7 +4568,8 @@ export class Store implements MessageReadStore, ProjectPatchStore, RunnerRecover
   }
 
   getReportReferences(projectId: string, messageId: string): ReportReferences | null {
-    const r = this.deliveryRead?.projectId === projectId ? this.deliveryRead.reportRefs.get(messageId) : this.row("SELECT * FROM report_references WHERE project_id = ? AND source_message_id = ?", projectId, messageId);
+    const prefetched = this.deliveryRead?.projectId === projectId ? this.deliveryRead.reportRefs.get(messageId) : undefined;
+    const r = prefetched !== undefined ? prefetched : this.row("SELECT * FROM report_references WHERE project_id = ? AND source_message_id = ?", projectId, messageId);
     return r ? { sourceMessageId: r.source_message_id, fileIds: json(r.file_ids_json), decisionIds: json(r.decision_ids_json), authoredAt: r.authored_at, sequence: r.sequence, correctsMessageId: r.corrects_message_id } : null;
   }
 

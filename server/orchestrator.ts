@@ -1910,7 +1910,7 @@ export class Orchestrator implements OrchestratorApi {
       const abandoned = dispatch.transportState === "accepted" && dispatch.items.every(item => {
         const d = this.store.getDelivery(item.deliveryId);
         return !d || d.status !== "delivered" && (this.store.getDeliveryRecovery(d.id)?.phase === "stopped" ||
-          this.store.listDispatches(d.memberId).filter(other => other.items.some(i => i.deliveryId === d.id)).at(-1)?.dispatchId !== dispatch.dispatchId);
+          this.store.latestDispatchFor(d.memberId, d.id)?.dispatchId !== dispatch.dispatchId);
       });
       if (dispatch.transportState !== "rejected" && !abandoned) continue;
       const at = new Date().toISOString();
@@ -3589,7 +3589,7 @@ export class Orchestrator implements OrchestratorApi {
         // 재시작으로 꺼진 팀장을 재웠다: 스스로 다시 열지 않는다. 잠든 팀장은 그대로 잔다.
         this.settleRestartWake(memberId, "dropped");
         for (const d of this.store.listPending(memberId)) {
-          const history = this.store.listDispatches(memberId).filter(dispatch => dispatch.items.some(item => item.deliveryId === d.id));
+          const history = this.store.listDispatchesFor(memberId, d.id);
           const unwritten = history.length ? history.every(dispatch => dispatch.transportState === "rejected") : d.attempts === 0 && d.holdReason !== "delivery_unknown";
           if (opts.holdAs && !unwritten && (d.attempts > 0 || d.status === "held" && d.holdReason !== "archived")) continue;
           // 재우는 사이 새로 온 깨움은 '잠듦'으로 묻지 않는다. 잠든 직후 온 말처럼 곧바로 다시 깨운다.

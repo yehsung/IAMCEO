@@ -919,6 +919,7 @@ export class CoreRunner implements FullRunner {
    *   토큰 수와 함께 정확한 값으로 싣는다(자동 압축의 근거가 된다). 실측(헤드리스): 압축 뒤 첫 호출의 크기가 35,797 → 12,984 로 준다.
    *   1.5.14 실측(agy-real logs/trust/statusline.jsonl): 상태줄의 total_input_tokens(used_percentage 의 분자)는 누적이 아니라 압축 뒤 첫 모델 호출에서
    *   줄었다(16,552 → 15,070). 그러나 압축이 끝난 직후(쉬는 중이 된 순간)의 상태줄은 아직 압축 전 값이라(16,552 그대로) 기록을 먼저 쓴다.
+   * - 기록의 마지막 모델 호출 뒤에 압축(CHECKPOINT)이 있으면 재지 않는다: 압축 뒤 크기를 모르고 상태줄은 압축 전 값이다(다음 모델 호출이 있는 턴 끝에 잰다).
    * - 기록을 읽지 못하면 예전처럼 상태줄 기록의 context.usedPct·windowSize 다. 턴이 끝날 무렵의 기록(끝나기 2초 전 이후에 쓴 것)이면 창 크기와 함께
    *   정확한 % 로, 그보다 오래된 기록이면 % 만 싣는다(토큰 수는 싣지 않는다). 이 대화의 기록이 아니거나 % 가 없으면 재지 않는다.
    */
@@ -934,6 +935,10 @@ export class CoreRunner implements FullRunner {
     }
     if (this.closed || this.tracks.get(track.member.id) !== track || (track.sessionId || track.member.sessionId) !== sessionId || track.terminal.turn !== turn) return;
     const prompt = geminiPromptTokens(this.providerHome(track.member), sessionId);
+    // 마지막 모델 호출 뒤에 압축이 끝났다(압축 뒤 모델을 부르지 않고 끝난 턴: 장애·중단·한도, 또는 agy 가 턴 끝에 스스로 압축). 압축 뒤 크기는 아직 모르고,
+    // 상태줄의 % 는 압축 뒤 첫 모델 호출 전까지 압축 전 값이라 정확한 값으로도 % 로도 싣지 않는다(Claude 의 compactedAfterUsage 와 같은 뜻: 재지 않는다).
+    // 그래야 총괄의 '자동 압축 뒤 첫 측정'(geminiAutoOff)이 압축 뒤 실제 모델 호출이 있었던 측정으로만 정해진다.
+    if (prompt && "compacted" in prompt) return;
     const known = record && record.conversationId === sessionId ? record : null;
     const size = known?.context.windowSize ?? null;
     if (prompt && known && validWindow(size) && prompt.tokens <= size!) {

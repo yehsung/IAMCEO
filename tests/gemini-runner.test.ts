@@ -943,6 +943,32 @@ describe("문맥·서브에이전트·진전: 상태줄 기록에서", () => {
     expect(await until("문맥 사건", () => ofType(g.events, "context_usage").at(-1))).toMatchObject({ tokens: 20_000, model: "gemini-4-neon" });
     expect(g.core.runs()[0]!.argv).toContain("gemini-4-neon");
   });
+  test("압축 뒤 모델 호출이 없던 턴(장애·중단)은 상태줄의 압축 전 % 를 싣지 않는다(재지 않는다). 압축 뒤 첫 모델 호출이 있으면 그 크기로 다시 잰다", async () => {
+    // 1.5.14 실측(core.ts reportGeminiContext): 압축이 끝난 뒤에도 상태줄은 첫 모델 호출 전까지 압축 전 값을 그대로 다시 그린다(16,552 그대로).
+    // 그 % 를 정확한 값으로 내면 총괄이 '자동 압축 뒤에도 기준 이상'으로 읽어 그 세션의 자동 압축을 끈다(Claude 의 compactedAfterUsage 와 같은 뜻으로 막는다).
+    const store = compactStore();
+    const f = await setup({}, {}, { compactStore: store.port });
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    const id = await turn(f, live, "큰 일 @fake:usage=150000 @fake:window=200000");
+    expect(await until("문맥 사건", () => ofType(f.events, "context_usage").at(-1))).toMatchObject({ tokens: 150_000, exact: { window: 200_000, source: "statusline" } });
+    const known = { ...live, sessionId: id };
+    expect(await f.runner.compact(known, "", f.opts)).toMatchObject({ ok: true });
+    await until("압축 끝", () => ofType(f.events, "compacted").length === 1);
+    await until("묶임 풀림", () => !f.runner.isBusy("m_gem1"));
+    const measured = ofType(f.events, "context_usage").length;
+    // 압축 뒤의 턴이 모델 답 없이 장애로 끝난다. 그동안 agy 는 상태줄에 압축 전 75% 를 다시 그린다.
+    f.core.setOnTurn(() => { f.core.drawGeminiStatus("m_gem1", { context_window: { used_percentage: 75, context_window_size: 200_000, total_input_tokens: 150_000, total_output_tokens: 5 } }); return false; });
+    const ended = ofType(f.events, "turn_end").length;
+    expect(await f.runner.send(known, "다음 일 @fake:error=Model%20unavailable", f.opts)).toMatchObject({ ok: true });
+    await until("장애 턴 끝", () => ofType(f.events, "turn_end").length > ended);
+    expect(ofType(f.events, "turn_end").at(-1)).toMatchObject({ isError: true });
+    expect(ofType(f.events, "context_usage").slice(measured)).toEqual([]);
+    // 압축 뒤 첫 모델 호출이 있으면 그 호출의 크기가 정확한 값이다.
+    f.core.setOnTurn(null);
+    await turn(f, known, "그다음 일 @fake:usage=30000 @fake:window=200000");
+    expect(ofType(f.events, "context_usage").slice(measured)).toEqual([expect.objectContaining({ tokens: 30_000, shownPct: null, exact: { window: 200_000, source: "statusline" } })]);
+  });
   test("대화 기록을 읽지 못하면 예전처럼 상태줄이 알려 준 % 다(토큰 수 없이)", async () => {
     const f = await setup();
     const elsewhere = join(f.home, "other-gemini-home");

@@ -222,19 +222,25 @@ describe("대화 기록(transcript.jsonl)", () => {
     expect(isGeminiCheckpoint({ type: "CHECKPOINT", source: "SYSTEM", status: "DONE", content: "# Something else" })).toBe(false);
     expect(isGeminiCheckpoint(null)).toBe(false);
   });
-  test("마지막 모델 호출의 프롬프트 크기(input + cache_read). 압축 뒤 아직 모델을 부르지 않았으면 null", () => {
+  test("마지막 모델 호출의 프롬프트 크기(input + cache_read). 압축 뒤 아직 모델을 부르지 않았으면 { compacted: true }(기록이 없거나 답 줄이 없으면 null)", () => {
     const home = temp();
     const text = fixture("transcript-compact.jsonl");
     const lines = text.trim().split("\n");
     // 둘째 압축 뒤의 답(step 14): 10,219 + 0.
     place(home, `${lines.slice(0, 15).join("\n")}\n`);
     expect(geminiPromptTokens(home, CONV)).toEqual({ tokens: 10_219, model: "gemini-3.8-flash-low", at: "2026-11-22T07:50:26Z" });
-    // 끝이 압축(step 26)이면 압축 뒤 크기를 아직 모른다.
+    // 끝이 압축(step 26)이면 압축 뒤 크기를 아직 모른다('기록 없음'과 가른다: 부르는 쪽이 상태줄의 압축 전 % 를 쓰지 않게).
     place(home, text);
+    expect(geminiPromptTokens(home, CONV)).toEqual({ compacted: true });
+    // 압축 뒤 사용자 글만 있고 모델 답이 없어도 같다.
+    place(home, `${text}${JSON.stringify({ step_index: 27, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\n다음\n</USER_REQUEST>" })}\n`);
+    expect(geminiPromptTokens(home, CONV)).toEqual({ compacted: true });
+    // 모델 답 줄이 하나도 없는 기록은 null 이다.
+    place(home, `${lines[0]}\n`);
     expect(geminiPromptTokens(home, CONV)).toBeNull();
     // 반쯤 쓴 끝 줄은 버린다.
     place(home, `${lines.slice(0, 18).join("\n")}\n{"step_index": 18, "source": "MODEL", "input_tok`);
-    expect(geminiPromptTokens(home, CONV)?.tokens).toBe(2257 + 8175);
+    expect(geminiPromptTokens(home, CONV)).toMatchObject({ tokens: 2257 + 8175 });
     expect(geminiHasModelResponse(home, CONV)).toBe(true);
     place(home, `${lines[0]}\n`);
     expect(geminiHasModelResponse(home, CONV)).toBe(false);

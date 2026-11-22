@@ -62,7 +62,10 @@ export type GeminiEffectiveMode = "default" | "accept-edits" | "auto" | "fallbac
  * - 작업 공간 안 파일 쓰기: default 만 묻는다(diff 검토). 임시 폴더: auto·fallback 은 묻지 않는다. 그 밖의 폴더·IAMCEO 밖의 연결 도구·웹: 늘 묻는다.
  * 1.5.14 대화형 실측(agy-real, 훅 없이 agy 자기 창): default 는 run_command·write_file(새 파일)·edit_file 을 모두 물었고, accept-edits 는 새 파일을 묻지 않고
  * run_command 는 물었고, auto 는 새 파일·'ls && rm a.txt' 를 묻지 않았다(작업 공간 안). 표의 그 칸들과 같다.
- * UNVERIFIED-INTERACTIVE: auto·accept-edits 의 임시 폴더·작업 공간 밖·웹·연결 도구, auto 에서 묻는 명령(샌드박스 밖·되돌릴 수 없는 명령)은 유도하지 못했다.
+ * 1.5.14 격리 서버 대화형 실측(11-23, 결재함 훅이 붙은 실제 팀장): default 팀장의 run_command·write_file 은 카드로 떴고, auto 팀장(상태줄 cycle_mode auto)의
+ * 작업 폴더 안 write_file·명령은 카드 없이 돌았다. auto 에서 agy 의 평가기가 물은 명령 하나를 보았다: 이 Mac 의 서버로 가는 `curl -X POST …/agent/tool`
+ * (까닭 'sends a POST request to a pre-existing local … server that was not spawned by the agent'). 명령은 카드를 열지 않는 종류라 그 창(터미널 승인 대기)으로 남았다.
+ * UNVERIFIED-INTERACTIVE: auto·accept-edits 의 임시 폴더·작업 공간 밖·웹·연결 도구는 유도하지 못했다.
  * 대표가 agy 에 둔 허용 규칙(settings.json permissions.allow)은 보지 않는다: 그 규칙으로 agy 가 묻지 않을 도구에도 카드가 열릴 수 있다(허용하면 그대로 돈다).
  */
 const GEMINI_ASKS: Record<GeminiEffectiveMode, ReadonlySet<GeminiToolKind>> = {

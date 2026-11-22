@@ -19,7 +19,7 @@ import type { DeliveryDispatch } from "../server/service-contracts.ts";
 import type { RunnerEvent, RunnerMember, SendResult, StartOpts } from "../server/runner/types.ts";
 import { Store } from "../server/store.ts";
 import { ERROR_CODES } from "../shared/error-codes.ts";
-import { startFakeCore, type FakeCoreOptions } from "./fixtures/core-harness.ts";
+import { primesMcp, startFakeCore, type FakeCoreOptions } from "./fixtures/core-harness.ts";
 import { thrower } from "./fixtures/settle.ts";
 
 const FAKE_BIN = "/usr/bin/false";
@@ -121,7 +121,7 @@ describe("결과를 모르는 Gemini 전달: 대표가 중복 위험을 알고 �
     expect(f.member().sessionId).toBeNull();
     const d = f.store.enqueue({ projectId: f.project.id, memberId: f.id, kind: "instruction", text: "자료를 찾아 보고해 주세요" });
     // 넣는 호출이 답 없이 끝났다(엔진이 답하지 않았다): 들어갔는지 모른다. 실제로는 들어가지 않았다.
-    f.core.intercept(call => call.method === "terminal.send" ? "drop" : undefined);
+    f.core.intercept(call => call.method === "terminal.send" && !primesMcp(call) ? "drop" : undefined);
     const { dispatch, result } = await f.sendEnvelope(d.id);
     f.core.intercept(null);
     expect(result).toMatchObject({ ok: false, deliveryEffect: "unknown" });
@@ -184,7 +184,7 @@ describe("결과를 모르는 Gemini 전달: 대표가 중복 위험을 알고 �
     const f = await setup();
     const started = await f.runner.start(f.rm(), f.opts);
     const d = f.store.enqueue({ projectId: f.project.id, memberId: f.id, kind: "instruction", text: "첫 지시" });
-    f.core.intercept(call => call.method === "terminal.send" ? "drop" : undefined);
+    f.core.intercept(call => call.method === "terminal.send" && !primesMcp(call) ? "drop" : undefined);
     const { dispatch } = await f.sendEnvelope(d.id);
     f.core.intercept(null);
     expect(existsSync(join(geminiHookEventsDir(f.home), `${f.id}.jsonl`))).toBe(false);
@@ -211,7 +211,7 @@ describe("결과를 모르는 Gemini 전달: 대표가 중복 위험을 알고 �
     const f = await setup();
     const started = await f.runner.start(f.rm(), f.opts);
     const d = f.store.enqueue({ projectId: f.project.id, memberId: f.id, kind: "instruction", text: "첫 지시" });
-    f.core.intercept(call => call.method === "terminal.send" ? "drop" : undefined);
+    f.core.intercept(call => call.method === "terminal.send" && !primesMcp(call) ? "drop" : undefined);
     await f.sendEnvelope(d.id);
     f.core.intercept(null);
     await f.check(d.id);
@@ -241,7 +241,7 @@ describe("결과를 모르는 Gemini 전달: 대표가 중복 위험을 알고 �
     // 글은 들어갔는데 답이 끊겼다: 가짜 core 가 넣기를 처리한 뒤 답을 버린다.
     let dropped = false;
     f.core.intercept(call => {
-      if (call.method !== "terminal.send" || dropped) return undefined;
+      if (call.method !== "terminal.send" || primesMcp(call) || dropped) return undefined;
       dropped = true;
       f.core.typeDirectly(f.id, String(call.params.text));
       return "drop";
@@ -262,7 +262,7 @@ describe("결과를 모르는 Gemini 전달: 대표가 중복 위험을 알고 �
     const f = await setup();
     const started = await f.runner.start(f.rm(), f.opts);
     const d = f.store.enqueue({ projectId: f.project.id, memberId: f.id, kind: "instruction", text: "옛 터미널에 넣다 만 지시" });
-    f.core.intercept(call => call.method === "terminal.send" ? "drop" : undefined);
+    f.core.intercept(call => call.method === "terminal.send" && !primesMcp(call) ? "drop" : undefined);
     const { dispatch } = await f.sendEnvelope(d.id);
     f.core.intercept(null);
     // 대표가 직접 친 글로 대화가 생겼고, 그 뒤 터미널을 끝내고 같은 대화로 다시 열었다(재우기 → 깨우기).

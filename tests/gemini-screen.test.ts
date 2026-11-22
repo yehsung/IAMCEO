@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GEMINI_PLACEHOLDERS, GEMINI_SETUP_MESSAGES, geminiApprovalDialog, geminiDraft, geminiFolderTrust, geminiProgress, geminiRetry, geminiSetupBlocked, geminiTurnToStop } from "../server/runner/gemini-screen.ts";
+import { GEMINI_PLACEHOLDERS, GEMINI_SETUP_MESSAGES, geminiApprovalDialog, geminiDraft, geminiFolderTrust, geminiMcpPanel, geminiProgress, geminiRetry, geminiSetupBlocked, geminiTurnToStop } from "../server/runner/gemini-screen.ts";
 import { composerDraft, trustDialogLike, codexDraft } from "../server/runner/core.ts";
 import { inputText } from "../server/runner/claude-screen.ts";
 import { looksLikeFolderTrust } from "../server/runner/core-approval.ts";
@@ -298,3 +298,25 @@ describe("1.5.14 실측: 폴더 신뢰 창은 대표가 볼 창이다(멈춤 키
   });
 });
 
+
+describe("1.5.14 실측: MCP 관리 창(/mcp) 판독(첫 전달 앞에 MCP 를 띄울 때 core.ts primeGeminiMcp 가 쓴다)", () => {
+  const panel = (rows: string[], keys = "Keyboard: ↑/↓ Navigate  enter Actions  esc Exit") => [HISTORY, RULE, ">", RULE, "MCP Servers", "", "Plugins (~/.gemini/config/plugins)", ...rows, "", keys, "", OURS, ""].join("\n");
+  test("실측 두 화면(목록·동작 줄 펼침): 열려 있고 ✓ iamceo 가 보인다. 그동안 입력칸으로는 읽지 않는다", () => {
+    for (const name of ["mcp-panel-list", "mcp-panel-actions"]) {
+      expect([name, geminiMcpPanel(real(name))]).toEqual([name, { open: true, ready: true }]);
+      expect([name, geminiDraft(real(name))]).toEqual([name, null]);
+    }
+  });
+  test("빈 입력칸·명령 메뉴·승인 창·일하는 중은 관리 창이 아니다", () => {
+    for (const name of ["idle-default", "slash-menu", "approval-command", "srv-hook-wait", "working-first"]) expect([name, geminiMcpPanel(real(name))]).toEqual([name, { open: false, ready: false }]);
+  });
+  test("붙지 않은 서버(✓ 가 아님)·다른 서버만 붙음은 열렸지만 준비 안 됨. 지난 대화에 'MCP Servers' 글이 있어도 바닥 위 안내 줄이 없으면 닫힘", () => {
+    expect(geminiMcpPanel(panel([">  ✗ iamceo  Failed to connect"]))).toEqual({ open: true, ready: false });
+    expect(geminiMcpPanel(panel([">  ✓ github  Tools: create_issue", "   ○ iamceo  Connecting…"]))).toEqual({ open: true, ready: false });
+    expect(geminiMcpPanel(panel(["   ✓ iamceo-other  Tools: x"]))).toEqual({ open: true, ready: false });
+    expect(geminiMcpPanel(panel([">  ✓ iamceo  Tools: status, ask"], "Keyboard: ↑/↓ Navigate  ←/→ Action  enter Select  esc Cancel"))).toEqual({ open: true, ready: true });
+    expect(geminiMcpPanel(composer([">"], [OURS], "MCP Servers\n✓ iamceo\nKeyboard: esc\n"))).toEqual({ open: false, ready: false });
+    // 안내 줄이 있어도 그 위(가로줄까지)에 머리 줄이 없으면 아니다.
+    expect(geminiMcpPanel([HISTORY, RULE, ">", RULE, "✓ iamceo", "Keyboard: esc Exit", OURS, ""].join("\n"))).toEqual({ open: false, ready: false });
+  });
+});

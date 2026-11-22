@@ -14,7 +14,7 @@ import { codexBackgroundTerminals, codexDraft, trustDialogLike } from "../server
 import { readCodexTurnEnd } from "../server/runner/codex-turn.ts";
 import { parseCodexSessionMeta, readDeliveryEvidence, readJsonlRange } from "../server/runner/delivery-evidence.ts";
 import { observeCompactBoundary } from "../server/runner/core-context.ts";
-import { geminiApprovalDialog, geminiDraft, geminiFolderTrust, geminiProgress, geminiRetry, geminiSetupBlocked, geminiTurnToStop } from "../server/runner/gemini-screen.ts";
+import { geminiApprovalDialog, geminiDraft, geminiFolderTrust, geminiMcpPanel, geminiProgress, geminiRetry, geminiSetupBlocked, geminiTurnToStop } from "../server/runner/gemini-screen.ts";
 import { geminiStatusFromPayload } from "../server/runner/gemini-status.ts";
 import { GEMINI_HOOKS_NAME, geminiHookEventsDir, geminiHooksConfig, geminiTurnWatch, parseGeminiHookLine, readGeminiTurnStop } from "../server/runner/gemini-hooks.ts";
 import { geminiHasModelResponse, geminiPromptTokens, geminiTranscriptPath, geminiTranscriptRoot } from "../server/runner/gemini-transcript.ts";
@@ -102,6 +102,7 @@ function geminiScreenResults(screen: string, fixture: Fixture) {
   return {
     draft: geminiDraft(screen), turnToStop: geminiTurnToStop(osc, false), folderTrust: geminiFolderTrust(osc, screen), folderTrustFromScreen: geminiFolderTrust(null, screen),
     setupBlocked: geminiSetupBlocked(osc), approval: geminiApprovalDialog(screen), progress: geminiProgress(screen), retry: geminiRetry(screen), trustDialogLike: trustDialogLike(screen, "gemini"),
+    mcpPanel: geminiMcpPanel(screen),
   };
 }
 

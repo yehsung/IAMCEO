@@ -167,6 +167,37 @@ export function geminiRetry(screen: string): { attempt: number; max: number; sec
   return match ? { attempt: Number(match[1]), max: Number(match[2]), seconds: Number(match[3]) } : null;
 }
 
+/** MCP 관리 창의 머리 줄과 안내 줄(1.5.14 대화형 실측 11-23: `MCP Servers` … `Keyboard: ↑/↓ Navigate  enter Actions  esc Exit`). */
+export const GEMINI_MCP_PANEL_TITLE = "MCP Servers";
+const MCP_PANEL_KEYS = /^Keyboard: .*\besc\b/;
+/** 관리 창에서 그 서버가 붙은 줄(`>  ✓ iamceo  Tools: status, ask, post, …`, 고른 줄은 앞에 `>`). */
+const mcpServerReady = (server: string) => new RegExp(`^\\s*(?:>\\s*)?✓\\s+${server.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`);
+
+/**
+ * `/mcp` 로 여는 MCP 관리 창(1.5.14 대화형 실측 11-23). 입력칸 아래 가로줄과 바닥줄 사이에 `MCP Servers` / 빈 줄 / `Plugins (…)` / 서버 줄들 /
+ * (고른 서버의 `[Restart]   Disable` 줄) / 빈 줄 / `Keyboard: …` 로 그려진다. 맨 `/mcp` + Enter 는 모델을 부르지 않는다(OSC 는 쉬는 중 그대로, 훅 없음).
+ * 대화형 agy 는 MCP 서버를 프로세스의 첫 입력 때에야 띄워 그 첫 턴의 모델 호출에는 연결 도구가 없다(실측): 그래서 서버가 첫 전달 앞에 이 창을 열어
+ * MCP 를 띄운다(core.ts primeGeminiMcp). open: 바닥줄 바로 위 몇 줄 안에 안내 줄이 있고 그 위에 머리 줄이 있다. ready: 그 사이에 `✓ <서버>` 줄이 있다.
+ * Esc 는 서버 줄의 동작 줄을 접고(안내 `esc Cancel`), 한 번 더 누르면 창을 닫는다(`esc Exit`). 창이 닫히면 입력칸은 빈 칸 그대로다.
+ */
+export function geminiMcpPanel(screen: string, server = "iamceo"): { open: boolean; ready: boolean } {
+  const lines = linesOf(screen);
+  let at = lines.length - 1;
+  while (at >= 0 && !lines[at]) at--;
+  while (at >= 0 && (GEMINI_STATUS_OURS.test(lines[at]!) || GEMINI_STATUS_DEFAULT.test(lines[at]!))) at--;
+  while (at >= 0 && !lines[at]) at--;
+  if (at < 0 || !MCP_PANEL_KEYS.test(lines[at]!.trim())) return { open: false, ready: false };
+  const keys = at;
+  let title = -1;
+  for (let probe = keys - 1; probe >= 0 && keys - probe <= 40; probe--) {
+    if (ruleWidth(lines[probe])) break;
+    if (lines[probe]!.trim() === GEMINI_MCP_PANEL_TITLE) { title = probe; break; }
+  }
+  if (title < 0) return { open: false, ready: false };
+  const ready = mcpServerReady(server);
+  return { open: true, ready: lines.slice(title + 1, keys).some(line => ready.test(line)) };
+}
+
 /** 승인 창의 모양(안내용 판독). 키를 보내는 근거가 아니다: 서버는 이 창에 답하지 않는다(대표가 터미널에서 답하거나 결재함 카드가 훅으로 답한다). */
 export interface GeminiApprovalDialog { title: string | null; question: string; options: string[]; selected: number; hint: string }
 const OPTION_ROW = /^(>| ) (\d{1,2})\. (\S.*)$/;

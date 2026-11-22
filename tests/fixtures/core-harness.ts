@@ -42,6 +42,8 @@ export const composerScreen = (history = "", draft = "") => `${history}\n${RULE}
 /** 가짜 agy 터미널의 너비(전체 너비 가로줄)와 지난 입력 상자의 가로줄(1.5.14 실측: 60칸). */
 const GEMINI_RULE = "─".repeat(80);
 const GEMINI_BOX = "─".repeat(60);
+/** 가짜 agy 의 MCP 관리 창(1.5.14 대화형 실측 모양): 입력칸 아래 가로줄과 바닥줄 사이. */
+export const GEMINI_MCP_PANEL = "MCP Servers\n\nPlugins (~/.gemini/config/plugins)\n>  ✓ iamceo  Tools: status, ask, post, file, todo, +3 more\n\nKeyboard: ↑/↓ Navigate  enter Actions  esc Exit\n\n";
 /**
  * Antigravity CLI(agy)의 입력칸이 보이는 화면(1.5.14 실측 모양, tests/fixtures/cli/gemini/1.5.14): 전체 너비 가로줄 사이의 `> ` 줄과 그 아래 IAMCEO 상태줄.
  * 위에는 지난 입력 상자(60칸 가로줄 + `> 글`)와 답이 쌓이고, 일하는 중이면 입력칸 바로 위에 진행 줄(`⣻  Generating...`)이 붙는다.
@@ -62,6 +64,8 @@ export const isReportNudge = (turn: Pick<FakeTurn, "prompt">) => turn.prompt.sta
 export { rejection, thrower } from "./settle.ts";
 
 export interface FakeCoreCall { id: string | number; method: string; params: Record<string, any> }
+/** CoreRunner 가 Gemini 터미널의 첫 전달 앞에 넣는 맨 `/mcp`(MCP 띄우기, core.ts primeGeminiMcp)인가. 넣기를 가로채는 시험이 이것은 그대로 둔다. */
+export const primesMcp = (call: FakeCoreCall): boolean => call.method === "terminal.send" && String(call.params.text ?? "").trim() === "/mcp";
 /** RPC 하나를 가로챈 결과. 돌려주지 않으면(undefined) 평소대로 처리한다. */
 export type FakeCoreReply = { result: unknown } | { error: { kind: string; message: string } } | "drop" | undefined;
 
@@ -91,6 +95,8 @@ export interface FakeTurn {
   run: FakeRun;
   /** 이 턴에서 부른 도구와 그 답. */
   tools: { name: string; args: Record<string, unknown>; status: number; text: string }[];
+  /** 가짜 agy: 이 턴이 시작될 때 MCP 가 떠 있었는가(false 면 그 턴의 IAMCEO 도구는 서버에 닿지 않았다). Claude·Codex 턴에는 없다. */
+  mcp?: boolean;
 }
 /** 턴을 직접 짜는 손잡이(onTurn). 아무것도 하지 않고 돌아오면 그 턴은 조용히 끝난다. */
 export interface FakeTurnContext {
@@ -147,12 +153,22 @@ export interface FakeCoreOptions {
    * "hook_only": 훅만 남고 기록에는 CHECKPOINT 가 없다(기록 모양이 바뀐 판). "silent": 아무것도 남기지 않는다(압축이 돌지 않았다).
    */
   geminiCompact?: "checkpoint" | "hook_only" | "silent";
+  /**
+   * 가짜 agy 의 MCP(1.5.14 대화형 실측 11-23): 실제 agy 는 MCP 서버를 프로세스의 첫 입력 때에야 띄워, 그 첫 턴의 모델은 연결 도구를 모른다.
+   * "lazy"(기본): 이 터미널의 첫 입력이 모델 턴이면 그 턴의 IAMCEO 도구 호출은 서버에 닿지 않는다(turn.mcp false, 도구 답은 연결 안 됨 글).
+   * 맨 `/mcp` 는 턴 없이 MCP 를 띄우고 관리 창(`MCP Servers` … `✓ iamceo` … `Keyboard: …`)을 그린다. Esc 한 번에 닫힌다.
+   * "stuck": 관리 창이 Esc 로 닫히지 않는다. "no_panel": `/mcp` 가 창을 열지 않고 입력칸에 글로 남는다(backspace 로 지운다, MCP 는 뜨지 않는다).
+   * "eager": 띄울 때부터 MCP 가 붙어 있다(예전 가짜와 같다). 관리 창은 그대로 열린다.
+   */
+  geminiMcp?: "lazy" | "stuck" | "no_panel" | "eager";
 }
 interface Holder {
   terminal: CoreTerminal; run: FakeRun; history: string; screen: string | null; draft: string;
   abort: AbortController | null; turn: FakeTurn | null; sent: number;
   /** @fake:hold 로 잡혀 있는 턴을 놓아 주는 손잡이. */
   release: ((result: { error?: string }) => void) | null;
+  /** 가짜 agy: MCP 서버가 떴는가(FakeCoreOptions.geminiMcp), 관리 창이 열려 있는가. */
+  mcp: boolean; mcpPanel: boolean;
 }
 
 /**
@@ -169,6 +185,8 @@ export async function startFakeCore(options: FakeCoreOptions) {
   const runs: FakeRun[] = [];
   const turns: FakeTurn[] = [];
   const keys: { terminal: string; keys: string[] }[] = [];
+  /** 가짜 agy 에 맨 /mcp 가 들어온 터미널(차례대로). */
+  const mcpOpens: string[] = [];
   const state = { version: options.version ?? CORE_VERSION, directives: options.directives ?? "", script: options.script ?? [] as FakeScriptRule[], onTurn: options.onTurn ?? null, down: false,
     /** 가짜 agy 상태줄의 quota(묶음 id → { remaining_fraction, reset_time, reset_in_seconds }). setGeminiQuota 로 바꾼다. */
     geminiQuota: null as Record<string, unknown> | null };
@@ -181,7 +199,9 @@ export async function startFakeCore(options: FakeCoreOptions) {
   const decode = (value: string | undefined): string | undefined => { if (value === undefined) return undefined; try { return decodeURIComponent(value); } catch { return value; } };
 
   const flagOf = (argv: string[], name: string) => { const at = argv.indexOf(name); return at >= 0 ? argv[at + 1] ?? null : null; };
-  const render = (holder: Holder) => holder.screen ?? (holder.run.cli === "gemini" ? geminiComposerScreen(holder.history, holder.draft, undefined, holder.turn ? "⣻  Generating..." : null) : composerScreen(holder.history, holder.draft));
+  const render = (holder: Holder) => holder.screen ?? (holder.run.cli === "gemini"
+    ? geminiComposerScreen(holder.history, holder.draft, holder.mcpPanel ? `${GEMINI_MCP_PANEL}IAMCEO · fake-model` : undefined, holder.turn ? "⣻  Generating..." : null)
+    : composerScreen(holder.history, holder.draft));
   const conversationFile = (id: string) => options.geminiHome ? join(options.geminiHome, "conversations", `${id}.db`) : null;
   /**
    * 가짜 agy 의 상태줄: 실제 agy 가 상태줄 명령에 주는 JSON 을 서버와 같은 규칙(geminiStatusFromPayload)으로 기록 파일에 쓴다.
@@ -273,6 +293,8 @@ export async function startFakeCore(options: FakeCoreOptions) {
     let said: string | null = null;
     const tool = async (name: string, args: Record<string, unknown>): Promise<string> => {
       signal.throwIfAborted();
+      // 가짜 agy: 이 턴이 MCP 가 뜨기 전의 첫 입력이었으면 모델은 IAMCEO 도구를 모른다(실제로는 부르지도 않는다). 서버에 닿지 않게 한다.
+      if (turn.mcp === false) { turn.tools.push({ name, args, status: 0, text: "MCP server iamceo is not connected" }); return "MCP server iamceo is not connected"; }
       const { url, token } = bridge(holder);
       const id = `toolu_${crypto.randomUUID()}`;
       record(holder, { type: "assistant", message: { id: `msg_${crypto.randomUUID()}`, model: "fake-model", role: "assistant", content: [{ type: "tool_use", id, name: `mcp__iamceo__${name}`, input: args }] } });
@@ -376,7 +398,9 @@ export async function startFakeCore(options: FakeCoreOptions) {
     }
   }
   function begin(holder: Holder, prompt: string) {
-    const turn: FakeTurn = { index: turns.length, terminal: holder.terminal.address, memberId: holder.run.memberId, prompt, at: Date.now(), endedAt: null, outcome: "running", run: holder.run, tools: [] };
+    const turn: FakeTurn = { index: turns.length, terminal: holder.terminal.address, memberId: holder.run.memberId, prompt, at: Date.now(), endedAt: null, outcome: "running", run: holder.run, tools: [], ...(holder.run.cli === "gemini" ? { mcp: holder.mcp } : {}) };
+    // 가짜 agy: 어떤 입력이든 들어가면 MCP 서버를 띄운다(다음 턴부터 도구가 있다). "no_panel" 은 MCP 가 뜨지 않는 판이 아니라 창만 다른 판이다.
+    if (holder.run.cli === "gemini") holder.mcp = true;
     turns.push(turn);
     const abort = new AbortController();
     holder.turn = turn; holder.abort = abort; holder.sent++;
@@ -413,7 +437,7 @@ export async function startFakeCore(options: FakeCoreOptions) {
         sessionId: cli === "claude" ? sessionFlag ?? resumeFlag : cli === "gemini" ? resumed : null };
       const terminal: CoreTerminal = { address: run.terminal, argv: p.argv, cwd: p.cwd, labels, state: "live", cols: p.size?.cols ?? 160, rows: p.size?.rows ?? 50, turn: 0,
         status: options.startState === null ? null : { state: "idle", app: cli === "claude" ? "claude-code" : cli === "gemini" ? "antigravity" : "codex" }, reported: options.startState !== null, pid: 40_000 + counter };
-      const holder: Holder = { terminal, run, history: "", screen: null, draft: "", abort: null, turn: null, sent: 0, release: null };
+      const holder: Holder = { terminal, run, history: "", screen: null, draft: "", abort: null, turn: null, sent: 0, release: null, mcp: cli !== "gemini" || options.geminiMcp === "eager", mcpPanel: false };
       if (cli === "gemini") {
         // 실제 agy 는 없는 대화를 이어 열라고 해도 끝나지 않는다. 경고 한 줄을 찍고 새 대화를 연다.
         if (conversationFlag && !resumed) holder.history = `warning: conversation "${conversationFlag}" not found\n`;
@@ -441,11 +465,24 @@ export async function startFakeCore(options: FakeCoreOptions) {
       if (terminal.status?.state === "working" && p.if !== "working") return { error: { kind: "busy", message: "CLI is working" } };
       if (terminal.status?.state === "blocked" && !p.force) return { error: { kind: "blocked", message: "CLI dialog is open" } };
       const before = terminal.turn ?? 0;
+      // 가짜 agy 의 맨 /mcp: 턴 없이 MCP 를 띄우고 관리 창을 연다(1.5.14 대화형 실측). "no_panel" 이면 창 없이 입력칸에 글로 남는다.
+      if (holder.run.cli === "gemini" && String(p.text ?? "").trim() === "/mcp") {
+        mcpOpens.push(terminal.address);
+        if (options.geminiMcp === "no_panel") { holder.draft = "/mcp"; return { result: { turn: before, started: false } }; }
+        holder.mcp = true; holder.mcpPanel = true;
+        return { result: { turn: before, started: false } };
+      }
       begin(holder, String(p.text ?? ""));
       return { result: { turn: before, started: true } };
     }
     if (call.method === "terminal.keys") {
       keys.push({ terminal: terminal.address, keys: p.keys });
+      if (holder.run.cli === "gemini" && Array.isArray(p.keys)) {
+        for (const key of p.keys) {
+          if (key === "esc" && holder.mcpPanel && options.geminiMcp !== "stuck") holder.mcpPanel = false;
+          if (key === "backspace" && !holder.mcpPanel) holder.draft = holder.draft.slice(0, -1);
+        }
+      }
       onKeys?.(terminal, p.keys);
       return { result: { status: terminal.status?.state ?? null, turn: terminal.turn ?? 0 } };
     }
@@ -523,6 +560,10 @@ export async function startFakeCore(options: FakeCoreOptions) {
     events: () => turns.flatMap(t => [{ event: "start" as const, at: t.at, turn: t }, ...(t.endedAt !== null ? [{ event: "end" as const, at: t.endedAt, turn: t }] : [])]).sort((a, b) => a.at - b.at || (a.event === "end" ? -1 : 1)),
     /** terminal.keys 로 눌린 키. */
     keys,
+    /** 가짜 agy 에 맨 /mcp 가 들어온 터미널(차례대로, 턴이 아니다). */
+    mcpOpens,
+    /** 가짜 agy 의 MCP 관리 창이 지금 열려 있는가. */
+    mcpPanelOpen: (memberId: string) => need(memberId).mcpPanel,
     /** 이 직원의 지금 터미널(가장 나중에 띄운 것). 없으면 null. 돌려준 객체를 고치면 다음 조회부터 그대로 보인다. */
     terminalOf: (memberId: string) => holderOf(memberId)?.terminal ?? null,
     terminals: () => [...holders.values()].map(h => h.terminal),

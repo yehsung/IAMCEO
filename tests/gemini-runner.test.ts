@@ -16,7 +16,7 @@ import { geminiStatusLineLaunch } from "../server/runner/gemini-statusline.ts";
 import type { DeliveryDispatch } from "../server/service-contracts.ts";
 import type { DeliveryProbe, RunnerEvent, RunnerMember, StartOpts } from "../server/runner/types.ts";
 import type { AgentToolsImpl, PostInput } from "../server/orchestrator.ts";
-import { composerScreen, coreSetup, geminiComposerScreen, rejection, startFakeCore, type FakeCore, type FakeCoreCall, type FakeCoreOptions } from "./fixtures/core-harness.ts";
+import { composerScreen, coreSetup, geminiComposerScreen, primesMcp, rejection, startFakeCore, type FakeCore, type FakeCoreCall, type FakeCoreOptions } from "./fixtures/core-harness.ts";
 
 const ITEM = "#iamceo_AAAAAAAAAAAAAAAAAAAAAA";
 const ITEM2 = "#iamceo_CCCCCCCCCCCCCCCCCCCCCC";
@@ -330,7 +330,7 @@ describe("대화 id 의 둘째 근거: 훅 기록", () => {
     const started = await f.runner.start(f.member, f.opts);
     const live = { ...f.member, paneId: started.paneId };
     // 넣기가 엔진에서 거절됐다(글은 들어가지 않았다). 그 봉투의 묶음 표지는 이 터미널에 넣으려 한 것으로 남는다.
-    f.core.intercept(call => call.method === "terminal.send" ? { error: { kind: "busy", message: "CLI is working" } } : undefined);
+    f.core.intercept(call => call.method === "terminal.send" && !primesMcp(call) ? { error: { kind: "busy", message: "CLI is working" } } : undefined);
     expect(await f.runner.send(live, `전달 ${ITEM}\n\n${BUNDLE}`, { ...f.opts, marker: BUNDLE })).toMatchObject({ ok: false, deliveryEffect: "rejected" });
     f.core.intercept(null);
     putHookLine(f, { event: "SessionStart", conversationId: "conversation-session-start" });
@@ -363,7 +363,7 @@ describe("대화 id 의 둘째 근거: 훅 기록", () => {
     const f = await setup();
     const started = await f.runner.start(f.member, f.opts);
     const live = { ...f.member, paneId: started.paneId };
-    f.core.intercept(call => call.method === "terminal.send" ? { error: { kind: "busy", message: "CLI is working" } } : undefined);
+    f.core.intercept(call => call.method === "terminal.send" && !primesMcp(call) ? { error: { kind: "busy", message: "CLI is working" } } : undefined);
     await f.runner.send(live, `전달 ${ITEM}\n\n${BUNDLE}`, { ...f.opts, marker: BUNDLE });
     f.core.intercept(null);
     putHookLine(f, { event: "PreInvocation", conversationId: "conversation-from-hook", invocation: 0, markers: [BUNDLE], chars: 40 });
@@ -749,10 +749,16 @@ describe("입력칸: agy 판독기로만 읽는다", () => {
     f.core.setDraft("m_gem1", "대표가 쓰던 글");
     expect(await f.runner.send(live, "지시", f.opts)).toMatchObject({ ok: false, reason: "input_busy", deliveryEffect: "not_written", detail: "A user draft is present; IAMCEO leaves it untouched" });
     f.core.setDraft("m_gem1", "");
+    // 이 터미널의 첫 입력: 먼저 맨 /mcp 로 MCP 를 띄우고 관리 창을 Esc 로 닫은 뒤 넣는다(primeGeminiMcp). 쓰던 글이 있을 때는 /mcp 도 넣지 않았다.
+    expect(f.core.mcpOpens).toEqual([]);
+    expect(await f.runner.send(live, "첫 지시", f.opts)).toMatchObject({ ok: true });
+    await until("턴 끝", () => ofType(f.events, "turn_end").length === 1);
+    expect(f.core.mcpOpens).toEqual([started.paneId]);
+    expect(f.core.keys).toEqual([{ terminal: started.paneId, keys: ["esc"] }]);
     // 자리표시 글은 빈 칸이다.
     f.core.setScreen("m_gem1", geminiComposerScreen("앞 대화", "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)"));
     expect(await f.runner.send(live, "자리표시 글 위에 넣기", f.opts)).toMatchObject({ ok: true });
-    await until("턴 끝", () => ofType(f.events, "turn_end").length === 1);
+    await until("턴 끝", () => ofType(f.events, "turn_end").length === 2);
     // 승인 창: 상태 보고는 쉬는 중이어도 입력칸이 아니면 넣지 않는다.
     f.core.setScreen("m_gem1", "Accept this file edit?\n> 1. Yes, accept this change\n  2. No, reject this change\n\n  ↑/↓ Navigate · tab Amend · f full diff\nIAMCEO · fake-model\n");
     const known = { ...live, sessionId: f.runner.observationState("m_gem1")!.identity.sessionId };
@@ -762,8 +768,10 @@ describe("입력칸: agy 판독기로만 읽는다", () => {
       f.core.setScreen("m_gem1", screen);
       expect(await f.runner.send(known, "지시", f.opts)).toMatchObject({ ok: false, reason: "input_busy", detail: "Cannot identify an empty CLI composer" });
     }
-    expect(f.core.turns("m_gem1")).toHaveLength(1);
-    expect(f.core.keys).toEqual([]);
+    expect(f.core.turns("m_gem1")).toHaveLength(2);
+    // 키는 첫 입력 앞의 관리 창 닫기 하나뿐이다(MCP 띄우기는 터미널마다 한 번).
+    expect(f.core.keys).toEqual([{ terminal: started.paneId, keys: ["esc"] }]);
+    expect(f.core.mcpOpens).toEqual([started.paneId]);
     // 재우기도 같은 판독으로 지킨다: 쓰던 글이 있으면 끝내지 않는다.
     f.core.setScreen("m_gem1", null); f.core.setDraft("m_gem1", "남은 글");
     expect(String(await rejection(f.runner.stop(known, { whileWorking: false })))).toContain("user draft or unknown composer");
@@ -1360,4 +1368,71 @@ describe("시험 틀(coreSetup)의 Gemini 팀장", () => {
     await t.idle(member.id);
     expect(t.member(member.id).status).not.toBe("error");
   }, 40_000);
+});
+
+describe("첫 전달 앞에 MCP 를 띄운다(대화형 agy 는 MCP 서버를 프로세스의 첫 입력 때 띄운다, 1.5.14 실측 11-23)", () => {
+  // 실측: 입력 전의 agy 에는 MCP 다리 프로세스가 없고 첫 입력 시각에 뜬다. 그 첫 턴의 모델 호출에는 연결 도구가 없어, 대화형 IAMCEO 대화 여섯 개 모두
+  // 첫 턴에 call_mcp_tool 이 없었다(auto 총괄은 일을 나누지 못하고 열쇠 파일을 뒤졌다). 맨 /mcp 는 모델을 부르지 않고 MCP 를 띄운다.
+  // 가짜 agy(core-harness geminiMcp "lazy", 기본)는 MCP 가 뜨기 전의 첫 입력 턴에 turn.mcp=false 를 적고 그 턴의 도구는 서버에 닿지 않는다.
+  test("새 터미널의 첫 전달: 맨 /mcp → 관리 창의 ✓ iamceo → Esc 한 번으로 닫고 → 넣는다. 그 턴은 MCP 가 떠 있다. 둘째 전달에는 다시 하지 않는다", async () => {
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    const conversation = await turn(f, live, `첫 지시 ${ITEM}`);
+    expect(f.core.mcpOpens).toEqual([started.paneId]);
+    expect(f.core.keys).toEqual([{ terminal: started.paneId, keys: ["esc"] }]);
+    expect(f.core.mcpPanelOpen("m_gem1")).toBe(false);
+    // /mcp 는 턴이 아니다: 턴은 전달 하나이고, 그 턴이 시작될 때 MCP 가 떠 있었다.
+    expect(f.core.turns("m_gem1").map(t => [t.prompt.endsWith(`첫 지시 ${ITEM}`), t.mcp])).toEqual([[true, true]]);
+    await turn(f, { ...live, sessionId: conversation }, "둘째 지시");
+    expect(f.core.mcpOpens).toHaveLength(1);
+    expect(f.core.keys).toHaveLength(1);
+    expect(f.core.turns("m_gem1").map(t => t.mcp)).toEqual([true, true]);
+  });
+  test("이어 연 대화(--conversation)도 새 프로세스라 첫 전달 앞에 다시 띄운다", async () => {
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    const conversation = await turn(f, live, "첫 지시");
+    const known = { ...live, sessionId: conversation };
+    await f.runner.stop(known);
+    const resumed = await f.runner.start({ ...known, paneId: null }, { ...f.opts, resume: true });
+    expect(f.core.runs()[1]!.conversationFlag).toBe(conversation);
+    await turn(f, { ...known, paneId: resumed.paneId }, "이어 연 뒤 첫 지시");
+    expect(f.core.mcpOpens).toEqual([started.paneId, resumed.paneId]);
+    expect(f.core.turns("m_gem1").map(t => t.mcp)).toEqual([true, true]);
+  });
+  test("관리 창이 닫히지 않으면 넣지 않는다(input_busy, 창이 보일 때만 Esc). 두 번 닫지 못하면 그만두고, 창이 남아 입력칸을 알아보지 못하면 넣지 않는다", async () => {
+    const f = await setup({}, { geminiMcp: "stuck" }, { geminiMcpPrimeMs: 300 });
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    const stuck = { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written", detail: "The Antigravity MCP manager opened before the first delivery did not close" };
+    expect(await f.runner.send(live, "지시", f.opts)).toMatchObject(stuck);
+    // 둘째 시도는 /mcp 를 다시 넣지 않고(창이 이미 열려 있다) 닫기만 해 본다.
+    expect(await f.runner.send(live, "지시", f.opts)).toMatchObject(stuck);
+    expect(await f.runner.send(live, "지시", f.opts)).toMatchObject({ ok: false, reason: "input_busy", detail: "Cannot identify an empty CLI composer" });
+    expect(f.core.mcpOpens).toEqual([started.paneId]);
+    expect(f.core.keys.map(k => k.keys)).toEqual(Array(6).fill(["esc"]));
+    expect(f.core.turns("m_gem1")).toEqual([]);
+  }, 20_000);
+  test("창이 열리지 않고 /mcp 가 입력칸에 글로 남으면 IAMCEO 가 넣은 그 글만 지우고 넣는다(그 턴은 예전처럼 MCP 없이 돈다)", async () => {
+    const f = await setup({}, { geminiMcp: "no_panel" }, { geminiMcpPrimeMs: 300 });
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    await turn(f, live, "지시");
+    expect(f.core.keys).toEqual([{ terminal: started.paneId, keys: ["backspace", "backspace", "backspace", "backspace"] }]);
+    expect(f.core.turns("m_gem1").map(t => [t.prompt.endsWith("지시"), t.mcp])).toEqual([[true, false]]);
+  });
+  test("이미 입력이 들어간 터미널(사람이 직접 친 턴)에는 하지 않는다", async () => {
+    const f = await setup();
+    const started = await f.runner.start(f.member, f.opts);
+    const live = { ...f.member, paneId: started.paneId };
+    f.core.typeDirectly("m_gem1", "사람이 친 글");
+    await until("사람 턴 끝", () => f.core.turns("m_gem1")[0]?.outcome === "done" && f.runner.observationState("m_gem1")?.state === "done");
+    const conversation = await until("대화 id", () => f.runner.observationState("m_gem1")?.identity.sessionId);
+    await turn(f, { ...live, sessionId: conversation }, "서버 지시");
+    expect(f.core.mcpOpens).toEqual([]);
+    expect(f.core.keys).toEqual([]);
+    expect(f.core.turns("m_gem1").map(t => t.mcp)).toEqual([false, true]);
+  });
 });

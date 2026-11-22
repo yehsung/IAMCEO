@@ -14,7 +14,7 @@ import { cleanText, clipUtf16 } from "../text.ts";
 import { defaultGeminiHome } from "../config.ts";
 import { childEnv } from "./env.ts";
 import { claudeQuietScreen, inputText, screenContextPct } from "./claude-screen.ts";
-import { GEMINI_FOLDER_TRUST_CODE, GEMINI_SELECTED_OPTION, GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE, geminiDraft, geminiFolderTrust, geminiRetry, geminiSetupBlocked, geminiTurnToStop } from "./gemini-screen.ts";
+import { GEMINI_FOLDER_TRUST_CODE, GEMINI_SELECTED_OPTION, GEMINI_SETUP_CODE, GEMINI_SETUP_NOTE, geminiDraft, geminiFolderTrust, geminiMcpPanel, geminiRetry, geminiSetupBlocked, geminiTurnToStop } from "./gemini-screen.ts";
 import { geminiStatusPath, readGeminiStatus, type GeminiStatusRecord } from "./gemini-status.ts";
 import { clearGeminiTurn, geminiHookEventsDir, geminiHookLastWrite, geminiHooksRecordTurns, geminiTurnWatch, parseGeminiHookLine, readGeminiDeliveryEvidence, readGeminiHookConversation, readGeminiTurnStop, type GeminiHookConversationWatch, type GeminiHookRecord, type GeminiTurnWatch } from "./gemini-hooks.ts";
 import { geminiHasModelResponse, geminiPromptTokens, geminiTranscriptPath, geminiTranscriptRoot } from "./gemini-transcript.ts";
@@ -83,6 +83,8 @@ export interface CoreRunnerDeps {
   startQuietMs?: number;
   /** 시험에서만 줄인다. 기본 GEMINI_MODE_SETTLE_MS. */
   geminiModeSettleMs?: number;
+  /** 시험에서만 줄인다. 기본 GEMINI_MCP_PRIME_MS(primeGeminiMcp 가 MCP 관리 창에서 `✓ iamceo` 를 기다리는 시간). */
+  geminiMcpPrimeMs?: number;
   /** How long one inspection keeps reading a legacy (baseline-less) provider log before returning scan_pending. */
   evidenceScanMs?: number;
   readContext?: typeof capturedContext;
@@ -144,12 +146,21 @@ interface Track {
   geminiCompactHook: { id: string; reader: HookFileReader<GeminiHookRecord>; received: boolean; seen: boolean } | null;
   /** Antigravity CLI: 턴 끝(Stop)의 terminationReason·오류 글을 찾는 읽기(붙을 때의 사건 파일 끝부터). 훅을 넣지 않는 환경이면 null. */
   geminiTurn: GeminiTurnWatch | null;
+  /**
+   * Antigravity CLI: 이 터미널의 MCP 서버를 첫 전달 전에 띄웠는가(primeGeminiMcp). "needed": 아직 입력이 없었다(대화형 agy 는 MCP 를 첫 입력 때 띄운다).
+   * "done": 띄웠거나 이미 입력이 있었다(더 하지 않는다). 숫자: 창을 닫지 못한 횟수(두 번이면 그만둔다).
+   */
+  geminiMcp: "needed" | "done" | number;
   dispatches: DeliveryDispatch[]; evidence: Map<string, DeliveryEvidenceCursor>; lastError: string | null;
   nextPollAt: number; pollDelay: number;
   observedAt: string; failures: number; failure: string | null;
 }
 /** Antigravity CLI: 상태줄의 default 모드를 믿기까지 띄운 뒤 기다리는 시간(observeGeminiMode). */
 export const GEMINI_MODE_SETTLE_MS = 10_000;
+/** Antigravity CLI: 첫 전달 앞에 연 MCP 관리 창에서 IAMCEO MCP 서버가 붙기(`✓ iamceo`)를 기다리는 시간(primeGeminiMcp). 1.5.14 실측: 4초 안에 붙었다. */
+export const GEMINI_MCP_PRIME_MS = 15_000;
+/** primeGeminiMcp 가 넣는 글. 맨 `/mcp` 는 MCP 관리 창을 연다(모델을 부르지 않는다). */
+export const GEMINI_MCP_COMMAND = "/mcp";
 const REQUIRED_METHODS = ["terminal.run", "terminal.list", "terminal.get", "terminal.read", "terminal.send", "terminal.interrupt", "terminal.kill"];
 /** herdr-core actually sends permission, question and auth; the other words are legacy. */
 const BLOCKED_KINDS: Record<string, "permission" | "selection" | "setup"> = { permission: "permission", selection: "selection", setup: "setup", question: "selection", auth: "setup" };
@@ -554,7 +565,7 @@ export class CoreRunner implements FullRunner {
     if (this.closed) throw new CoreError("closed", "CoreRunner shut down while starting; terminal remains owned by core");
     const launch = terminal.labels["iamceo.operation"] ? this.deps.recoveryStore?.getLifecycleJournal?.(terminal.labels["iamceo.operation"]) : null;
     const launchedAt = launch?.memberId === member.id && launch.intent === "start" ? launch.createdAt : null;
-    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, restorePending: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, composerSeen: null, statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
+    const track: Track = { member: { ...member }, terminal, sessionId, pending: false, uncertain: false, controlUncertain: false, restorePending: false, lost: false, silentSince: null, settledAt: -Infinity, settleTries: 0, status: null, statusKey: null, composerEmpty: null, composerSeen: null, geminiMcp: providerFor(member) === "gemini" && (terminal.turn ?? 0) === 0 ? "needed" : "done", statusPublishedAt: 0, publishedStatus: null, pendingStatus: null, statusTimer: null, setupAttempted: null, setupError: null,
       epoch: 0, endedTurn: terminal.turn ?? 0, completing: false, refresh: null, nonce: terminal.labels["iamceo.binding"] || null, launch: terminal.labels[GEMINI_LAUNCH_LABEL] || null, bindingSince: terminal.labels["iamceo.startedAt"] || launchedAt || new Date().toISOString(), binding: null, compact: null, compactHook: null,
       geminiCompactHook: null, geminiTurn: providerFor(member) === "gemini" ? geminiTurnWatch(this.geminiHookEvents, member.id) : null,
       dispatches: [], evidence: new Map(), logFile: null, lastError: null, nextPollAt: 0, pollDelay: this.pollMs, observedAt: new Date().toISOString(), failures: 0, failure: null };
@@ -1007,6 +1018,59 @@ export class CoreRunner implements FullRunner {
     return watch;
   }
   /** 서버가 이 터미널에 넣으려는 전달 묶음의 표지를 적어 둔다(넣기 직전에 부른다: 결과를 모르게 끝나도 글은 들어갔을 수 있다). 최근 32개까지. */
+  /**
+   * Antigravity CLI(대화형, 1.5.14 실측 11-23 격리 서버): agy 는 MCP 서버를 프로세스의 첫 입력 때에야 띄운다(새 대화도, --conversation 으로 이어 연 대화도:
+   * 입력 전에는 MCP 다리 프로세스가 없고, 첫 입력 시각에 뜬다). 그 첫 입력의 모델 호출에는 연결 도구 목록이 없어 IAMCEO 도구(post·ask·team_add …)를 쓰지 못한다.
+   * 실측: 대화형 IAMCEO 대화 여섯 개 모두 첫 턴에 call_mcp_tool 이 없었고(팀장은 '보고 보완'을 한 번 더 받았다), auto 총괄은 일을 나누지 못한 채 열쇠 파일·소스를
+   * 뒤지다 curl 로 서버를 직접 부르려 했다. 헤드리스(-p)는 MCP 를 기다린 뒤 부른다(BlockOnMcpInit). 대화형에는 그 설정이 없다.
+   * 맨 `/mcp`(MCP 관리 창)는 모델을 부르지 않고 MCP 를 띄운다(실측: 그때 다리가 뜨고 창에 `✓ iamceo`, OSC 는 쉬는 중 그대로, 훅 없음). 그래서 첫 전달 앞에
+   * `/mcp` 를 넣고, `✓ iamceo` 가 보이거나 시간이 다 되면 창이 닫힐 때까지 Esc 를 하나씩 누른다(창이 보일 때만 누른다: 빈 화면의 Esc 는 뜻을 모른다).
+   * 창이 끝내 열리지 않고 입력칸에 IAMCEO 가 넣은 `/mcp` 가 남았으면 그 글만 지운다. 창을 닫지 못하면 넣지 않고 다음 시도가 다시 닫아 본다(두 번이면 그만둔다).
+   */
+  private async primeGeminiMcp(track: Track, terminal: CoreTerminal, current: string): Promise<{ ok: true; screen: string } | { ok: false; detail: string }> {
+    const read = async (): Promise<string> => { this.validateTrack(track); return (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text; };
+    const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+    let screen = current;
+    // 창을 닫을 키가 없으면 열지 않는다(오늘처럼 첫 턴은 연결 도구 없이 돈다).
+    if (!this.methods.has("terminal.keys")) { track.geminiMcp = "done"; return { ok: true, screen }; }
+    // 빈 입력칸일 때만 연다. 사람이 쓴 글·모르는 화면이면 아무것도 넣지 않는다(부르는 쪽의 입력칸 검사가 막고, 다음 전달이 다시 본다).
+    if (!geminiMcpPanel(screen).open && geminiDraft(screen) !== "") return { ok: true, screen };
+    if (!geminiMcpPanel(screen).open) {
+      this.bump(track);
+      await this.call("terminal.send", { terminal: terminal.address, text: GEMINI_MCP_COMMAND, if: "idle", force: false, wait: false }, this.sendTimeoutMs);
+      const limit = this.deps.geminiMcpPrimeMs ?? GEMINI_MCP_PRIME_MS;
+      const started = Date.now();
+      let opened = false;
+      for (;;) {
+        await pause(200);
+        screen = await read();
+        const panel = geminiMcpPanel(screen);
+        opened ||= panel.open;
+        if (panel.ready) break;
+        // 창이 열렸는데 서버가 붙지 않으면 시간까지 기다린다. 창이 열리지 않으면(모양이 다르거나 글이 입력칸에 남았다) 조금만 기다린다.
+        if (Date.now() - started >= (opened ? limit : Math.min(limit, 3000))) break;
+      }
+      if (!opened && geminiDraft(screen) === GEMINI_MCP_COMMAND && this.methods.has("terminal.keys")) {
+        this.bump(track);
+        await this.call("terminal.keys", { terminal: terminal.address, keys: Array(GEMINI_MCP_COMMAND.length).fill("backspace") }, this.sendTimeoutMs);
+        await pause(200);
+        screen = await read();
+      }
+    }
+    for (let presses = 0; presses < 3 && geminiMcpPanel(screen).open; presses++) {
+      this.bump(track);
+      await this.call("terminal.keys", { terminal: terminal.address, keys: ["esc"] }, this.sendTimeoutMs);
+      for (let reads = 0; reads < 6; reads++) { await pause(100); screen = await read(); if (!geminiMcpPanel(screen).open) break; }
+    }
+    if (geminiMcpPanel(screen).open) {
+      const failures = (typeof track.geminiMcp === "number" ? track.geminiMcp : 0) + 1;
+      // 두 번 닫지 못하면 그만둔다: 창이 남아 있으면 입력칸을 알아보지 못해(geminiDraft null) 넣지 않으니, 사람이 터미널에서 닫으면 이어진다.
+      track.geminiMcp = failures >= 2 ? "done" : failures;
+      return { ok: false, detail: "The Antigravity MCP manager opened before the first delivery did not close" };
+    }
+    track.geminiMcp = "done";
+    return { ok: true, screen };
+  }
   private noteGeminiSent(track: Track, bundleMarker: string | undefined): void {
     if (providerFor(track.member) !== "gemini" || !bundleMarker) return;
     const { sent } = this.geminiWatch(track);
@@ -1249,6 +1313,17 @@ export class CoreRunner implements FullRunner {
         this.publishStatus(track, { type: "status", memberId: member.id, status: "blocked", blockedReason: "usage_limit", usageLimit: usage,
           observation: { source: "core", observedAt: track.observedAt, freshness: "fresh", ownership: "verified", consecutiveFailures: 0, error: track.setupError } });
         return { ok: false, reason: "blocked", retryable: true, deliveryEffect: "not_written", detail: "사용 한도 메뉴는 확인 후 Esc로만 닫을 수 있습니다" };
+      }
+      // Antigravity CLI: 이 터미널의 첫 입력이면 먼저 MCP 를 띄운다(primeGeminiMcp: 모델을 부르지 않는 `/mcp` 와 Esc). 사람이 쓴 글이 있으면 아무것도 넣지 않고
+      // 아래 입력칸 검사가 막는다. 지난 시도에서 닫지 못한 관리 창이 입력칸을 가리고 있으면 여기서 다시 닫아 본다. 닫지 못했으면 이번에는 넣지 않는다.
+      if (providerFor(member) === "gemini" && track.geminiMcp !== "done") {
+        if (state !== "idle") track.geminiMcp = "done";
+        else {
+          const primed = await this.primeGeminiMcp(track, terminal, screen.text);
+          if (!primed.ok) return { ok: false, reason: "input_busy", retryable: true, deliveryEffect: "not_written", detail: primed.detail };
+          screen = { text: primed.screen };
+          inputEpoch = track.epoch;
+        }
       }
       // Never erase a person's draft or deliver through an unidentified dialog.
       // An empty composer never establishes readiness; only the OSC gate above can permit input.
@@ -1838,6 +1913,8 @@ export class CoreRunner implements FullRunner {
         return { ...unsupported("Submit key was sent once; await user-record evidence before further input"), deliveryEffect: "unknown" };
       }
       this.noteGeminiSent(track, dispatch.bundleMarker);
+      // 어떤 입력이든 들어가면 agy 가 MCP 를 띄운다(primeGeminiMcp 가 더 할 일이 없다).
+      track.geminiMcp = "done";
       // Same rule as send(): after any turn the CLI reports done until its next input, and core has no conditional for it.
       const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: latest.address, text: dispatch.wireText, ...(final.snapshot.status === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Invalid repair send receipt", true);
@@ -1915,6 +1992,7 @@ export class CoreRunner implements FullRunner {
         ...(hookMark !== undefined ? { hookMark } : {}), command });
       this.bump(track); track.pending = true; attempted = true;
       const result = await this.call<{ turn: number; started?: boolean }>("terminal.send", { terminal: current.address, text: command, ...(currentState === "idle" ? { if: "idle" } : {}), force: false, wait: false }, this.sendTimeoutMs);
+      if (provider === "gemini") track.geminiMcp = "done";
       if (!Number.isSafeInteger(result.turn)) throw new CoreError("protocol", "Invalid compact receipt", true);
       this.saveCompact(track, { ...track.compact!, phase: "running" });
       return { ok: true, started: result.started ?? null, turn: result.turn };
@@ -2474,7 +2552,7 @@ export class CoreRunner implements FullRunner {
       this.deps.recoveryStore?.saveLease(next); this.leases.set(member.id, next); this.bump(track);
       const compact = this.disarmManualResolution(track);
       try {
-        if (action.action === "input") await this.call("terminal.send", { terminal: terminal.address, text: cleanText(action.text!), force: true, wait: false }, this.sendTimeoutMs);
+        if (action.action === "input") { await this.call("terminal.send", { terminal: terminal.address, text: cleanText(action.text!), force: true, wait: false }, this.sendTimeoutMs); track.geminiMcp = "done"; }
         else await this.call("terminal.keys", { terminal: terminal.address, keys: [action.key] }, this.sendTimeoutMs);
       } catch (error) {
         if (!(error instanceof CoreError) || error.uncertain) track.uncertain = track.controlUncertain = true;

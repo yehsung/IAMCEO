@@ -1,7 +1,7 @@
 {
   "provider": "gemini",
   "version": "1.5.14",
-  "source": "2026-11-23 00:14~00:44 실측(대표가 첫 설정을 마친 이 Mac 의 agy 1.5.14). 격리 herdr-core 0.1.18(160x50, terminal.read lines 0)에 IAMCEO providers.ts geminiLaunch 모양의 인자(--add-dir <주입 폴더> --settings <geminiSettings 모양> --model gemini-3.8-flash --effort low)로 띄웠고 바닥줄은 IAMCEO 상태줄 래퍼 줄이다(입력 JSON 은 statusline-*.json 으로 따로 남김). srv-* 는 격리 IAMCEO 서버(wave12 2bcc677, 실제 agy)의 GET /api/members/:id/screen. hooks.jsonl 은 agy 가 훅 명령에 준 입력 원본({event, input})이다. osc7501.txt 는 agy 가 낸 OSC 7501 본문(ESC ] 7501 ; … BEL 의 가운데)이다. 바꾼 것: 작업 폴더 → /private/tmp/iamceo-cli-fixture/work, 홈 → /Users/user, 계정 메일 → user@example.com, agy 대화 id·오류 id → 가짜 UUID(aaaaaaaa-…·eeeeeeee-…), OSC msg 안의 임시 폴더 경로 → 견본 폴더(원래는 약 100자에서 …로 잘림). screen 의 osc 는 그 화면 때의 herdr-core terminal.get status(msg 는 풀린 글)다. srv-hook-wait.txt 는 같은 날 01:30 이 보정 브랜치(wave12-cal)로 띄운 격리 서버의 화면이다(작업 폴더 경로만 바꿈).",
+  "source": "2026-11-23 00:14~00:44 실측(대표가 첫 설정을 마친 이 Mac 의 agy 1.5.14). 격리 herdr-core 0.1.18(160x50, terminal.read lines 0)에 IAMCEO providers.ts geminiLaunch 모양의 인자(--add-dir <주입 폴더> --settings <geminiSettings 모양> --model gemini-3.8-flash --effort low)로 띄웠고 바닥줄은 IAMCEO 상태줄 래퍼 줄이다(입력 JSON 은 statusline-*.json 으로 따로 남김). srv-* 는 격리 IAMCEO 서버(wave12 2bcc677, 실제 agy)의 GET /api/members/:id/screen. hooks.jsonl 은 agy 가 훅 명령에 준 입력 원본({event, input})이다. osc7501.txt 는 agy 가 낸 OSC 7501 본문(ESC ] 7501 ; … BEL 의 가운데)이다. 바꾼 것: 작업 폴더 → /private/tmp/iamceo-cli-fixture/work, 홈 → /Users/user, 계정 메일 → user@example.com, agy 대화 id·오류 id → 가짜 UUID(aaaaaaaa-…·eeeeeeee-…), OSC msg 안의 임시 폴더 경로 → 견본 폴더(원래는 약 100자에서 …로 잘림). screen 의 osc 는 그 화면 때의 herdr-core terminal.get status(msg 는 풀린 글)다. srv-hook-wait.txt 는 같은 날 01:30 이 보정 브랜치(wave12-cal)로 띄운 격리 서버의 화면이다(작업 폴더 경로만 바꿈). mcp-panel-*.txt 는 같은 날 02:20 보정 브랜치(wave12-cal)로 띄운 격리 서버의 화면이다(작업 폴더 경로만 바꿈).",
   "fixtures": [
     {
       "file": "idle-default.txt",
@@ -19,7 +19,11 @@
         "retry": null,
         "folderTrust": false,
         "folderTrustFromScreen": false,
-        "approval": null
+        "approval": null,
+        "mcpPanel": {
+          "open": false,
+          "ready": false
+        }
       }
     },
     {
@@ -160,7 +164,11 @@
       "expect": {
         "draft": null,
         "approval": null,
-        "folderTrust": false
+        "folderTrust": false,
+        "mcpPanel": {
+          "open": false,
+          "ready": false
+        }
       }
     },
     {
@@ -269,7 +277,11 @@
         "folderTrust": false,
         "folderTrustFromScreen": false,
         "setupBlocked": false,
-        "trustDialogLike": false
+        "trustDialogLike": false,
+        "mcpPanel": {
+          "open": false,
+          "ready": false
+        }
       }
     },
     {
@@ -581,7 +593,11 @@
         "turnToStop": true,
         "progress": "Running command...",
         "approval": null,
-        "folderTrust": false
+        "folderTrust": false,
+        "mcpPanel": {
+          "open": false,
+          "ready": false
+        }
       }
     },
     {
@@ -788,6 +804,44 @@
           false,
           false
         ]
+      }
+    },
+    {
+      "file": "mcp-panel-list.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "격리 IAMCEO 서버(wave12-cal, 실제 agy, 2026-11-23 02:20)에서 이어 연 팀장(--conversation, 다시 연 뒤 아직 입력 없음 = MCP 다리 프로세스 없음)에 맨 '/mcp' 를 넣은 MCP 관리 창. 그때 다리가 떴고(02:20:10) 창에 '✓ iamceo' 가 보인다. 모델 호출·훅은 없고 OSC 는 idle 그대로다. 이 화면은 Esc 한 번(‘esc Exit’)으로 닫힌다. 입력칸 아래 가로줄과 바닥줄 사이에 창이 그려져 입력칸으로는 읽지 않는다.",
+      "expect": {
+        "draft": null,
+        "approval": null,
+        "folderTrust": false,
+        "mcpPanel": {
+          "open": true,
+          "ready": true
+        }
+      }
+    },
+    {
+      "file": "mcp-panel-actions.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "같은 관리 창에서 서버 줄을 Enter 로 고른 상태(동작 줄 '[Restart]   Disable', 안내 'esc Cancel'). Esc 한 번은 동작 줄을 접고(위 목록 상태), 한 번 더 누르면 닫힌다.",
+      "expect": {
+        "draft": null,
+        "approval": null,
+        "folderTrust": false,
+        "mcpPanel": {
+          "open": true,
+          "ready": true
+        }
       }
     }
   ]

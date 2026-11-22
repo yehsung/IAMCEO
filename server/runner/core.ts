@@ -1026,6 +1026,7 @@ export class CoreRunner implements FullRunner {
    * 맨 `/mcp`(MCP 관리 창)는 모델을 부르지 않고 MCP 를 띄운다(실측: 그때 다리가 뜨고 창에 `✓ iamceo`, OSC 는 쉬는 중 그대로, 훅 없음). 그래서 첫 전달 앞에
    * `/mcp` 를 넣고, `✓ iamceo` 가 보이거나 시간이 다 되면 창이 닫힐 때까지 Esc 를 하나씩 누른다(창이 보일 때만 누른다: 빈 화면의 Esc 는 뜻을 모른다).
    * 창이 끝내 열리지 않고 입력칸에 IAMCEO 가 넣은 `/mcp` 가 남았으면 그 글만 지운다. 창을 닫지 못하면 넣지 않고 다음 시도가 다시 닫아 본다(두 번이면 그만둔다).
+   * 값(격리 서버 실측): core 의 terminal.send 가 턴 시작을 기다려 `/mcp` 넣기에 약 5초가 걸리고(그동안 창이 보인다), Esc 한 번에 닫힌다. 터미널마다 첫 전달이 그만큼 늦다.
    */
   private async primeGeminiMcp(track: Track, terminal: CoreTerminal, current: string): Promise<{ ok: true; screen: string } | { ok: false; detail: string }> {
     const read = async (): Promise<string> => { this.validateTrack(track); return (await this.call<{ text: string }>("terminal.read", { terminal: terminal.address, lines: 0 })).text; };

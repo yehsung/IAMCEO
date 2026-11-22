@@ -37,7 +37,7 @@ import { doctorReport, serverDoctorFacts, type DoctorLang, type DoctorProbes } f
 import { createDiagnostics, type DiagnoseInput } from "./diagnose.ts";
 import { readVitals } from "./vitals.ts";
 import type { CliAccountsResponse, CliLogin, DiagnoseResult } from "../shared/types.ts";
-import { compatFields, readAppClient, SeenApps } from "./app-version.ts";
+import { appVersionAtLeast, compatFields, readAppClient, SeenApps } from "./app-version.ts";
 import { serverIdentity } from "./server-identity.ts";
 import { CliVersionMonitor, type CliVersionInfo, type CliVersionSource } from "./cli-version.ts";
 import { exportProjectZip, removeDeletedProjectFiles } from "./lifecycle/project-data.ts";
@@ -249,6 +249,9 @@ function bearer(req: Request): string | null {
  */
 const HERDR_UNUSED: HerdrInfo = Object.freeze({ installed: false, running: false, version: null, protocol: null, compatible: false, warning: null });
 
+/** Gemini(Antigravity CLI) 줄·로그인을 아는 첫 앱 버전. 이보다 낮다고 머리글로 밝힌 앱에는 계정 목록이 Gemini 줄을 기다리지 않는다. */
+const GEMINI_APP_VERSION = "0.2.10";
+
 /** 옛 herdr 실행기 전용이던 주소와 그 자리에 답할 안내. */
 const GONE_ROUTES: [method: string, path: string, message: string][] = [
   ["GET", "/api/herdr/agents", "herdr 세션 목록은 없어졌습니다. 서버는 herdr 를 보지 않고, 팀장은 모두 herdr-core 에서 띄웁니다"],
@@ -258,14 +261,25 @@ const GONE_ROUTES: [method: string, path: string, message: string][] = [
   ["POST", "/api/members/:id/reopen-with-tools", "'도구 붙여 다시 열기'는 없어졌습니다. 이전 실행기의 세션은 그 터미널에서 확인하고, 이어서 맡기려면 팀장을 새로 만드세요"],
 ];
 
+/** 오케스트레이터가 저장한 지금 Gemini 계정 세대(api_recovery_state 의 cli_accounts.gemini.epoch, Orchestrator.cliLoggedIn). 없거나 모양이 다르면 0. */
+function geminiAccountEpoch(store: Store): number {
+  try {
+    const epoch = store.loadApiRecovery<{ gemini?: { epoch?: unknown } }>("cli_accounts")?.gemini?.epoch;
+    return typeof epoch === "number" && Number.isInteger(epoch) && epoch > 0 ? epoch : 0;
+  } catch { return 0; }
+}
+
 /**
  * 0.2.10 AI 계정의 Gemini 줄에 보일 요금제: 떠 있는 Gemini 팀장들의 상태줄 기록(<홈>/context/gemini/<팀장>.json) 가운데 since(ms) 뒤에 쓰인 것의
- * 최신 plan_tier. 기록에는 계정 메일이 없다(상태줄 래퍼가 옮기지 않는다). 없으면 null.
+ * 최신 plan_tier. 지금 Gemini 계정 세대로 띄운(다시 연) 팀장의 기록만 본다: 다른 계정으로 바꾼 뒤에도 턴을 마칠 때까지 옛 세션(옛 계정)으로 도는 팀장의
+ * 요금제를 섞지 않는다. 기록에는 계정 메일이 없다(상태줄 래퍼가 옮기지 않는다). 없으면 null.
  */
 export function latestGeminiPlan(store: Store, home: string, since: number): string | null {
   let best: { at: number; plan: string } | null = null;
+  const epoch = geminiAccountEpoch(store);
   for (const member of store.listAllMembers()) {
     if (member.cli !== "gemini") continue;
+    if ((store.getAppliedConfig(member.id)?.account ?? 0) !== epoch) continue;
     const record = readGeminiStatus(home, member.id);
     const at = record ? Date.parse(record.at) : NaN;
     if (!record?.planTier || !Number.isFinite(at) || at <= since) continue;
@@ -899,11 +913,15 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
     // ---- 0.2.8: AI 계정 로그인. 새 경로라 옛 앱은 부르지 않고, 옛 서버는 404 를 준다(앱은 그 묶음을 숨긴다) ----
     // 0.2.10: Gemini(Antigravity CLI)의 줄·로그인은 새 칸 allAccounts·allLogins 에만 싣는다(agy 가 깔려 있거나 Gemini 로그인이 남아 있을 때만).
     // 옛 칸(accounts·logins)은 claude·codex 그대로다: 출시 앱(0.2.8·0.2.9)은 모르는 CLI 의 줄을 'Claude Code' 로 그린다.
-    route("GET", "/api/cli-accounts", async (_req, url) => {
+    // 옛 칸은 Gemini 줄 읽기(`agy models`, 느리면 15초)를 기다리지 않는다(CliLogins.geminiRow). 버전 머리글로 Gemini 를 모르는 출시 앱(0.2.10 아래)이면
+    // 기다리지 않고 마지막으로 읽은 값만 싣는다(그 앱은 새 칸을 읽지 않는다. 읽은 적이 없으면 새 칸 없이 0.2.9 와 같은 모양). 그 밖(새 앱·버전을 모르는 요청)은
+    // 처음 한 번만 끝까지 기다리고, 그 뒤로는 다시 읽기를 2초까지만 기다린 뒤 마지막 값을 싣는다.
+    route("GET", "/api/cli-accounts", async (req, url) => {
       strictQuery(url, ["refresh"]);
       const logins = requireLogins();
       const force = url.searchParams.get("refresh") === "1";
-      const [accounts, gemini] = await Promise.all([logins.accounts(force), logins.geminiAccount(force)]);
+      const geminiMode = appVersionAtLeast(readAppClient(req.headers), GEMINI_APP_VERSION) === false ? "cached" : "wait";
+      const [accounts, gemini] = await Promise.all([logins.accounts(force), logins.geminiRow(force, geminiMode)]);
       const all = logins.list();
       const body: CliAccountsResponse = { accounts, logins: all.filter(login => isLegacyLoginCli(login.cli)), ...(gemini ? { allAccounts: [...accounts, gemini], allLogins: all } : {}) };
       return Response.json(body, { headers: { "Cache-Control": "no-store" } });

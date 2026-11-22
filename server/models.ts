@@ -192,11 +192,24 @@ export type AgyModelsSpawn = (bin: string, timeoutMs: number) => Promise<AgyMode
  */
 export type GeminiModelsRefresh = { ok: true; count: number } | { ok: false; reason: "not_installed" | "timeout" | "failed" | "empty" | "write_failed" };
 
+/** agy 가 보면 로그인 토큰을 키체인이 아닌 <geminiHome>/antigravity-oauth-token 파일에 쓰고 읽는 환경 변수(원격 세션 판정, 실행 파일 역분석). */
+export const AGY_FILE_TOKEN_ENV = ["SSH_CLIENT", "SSH_TTY", "SSH_CONNECTION"] as const;
+
+/**
+ * agy 에 넘길 환경: AGY_FILE_TOKEN_ENV 를 뺀 나머지 그대로. 서버를 SSH 세션에서 띄웠어도 폰 로그인(cli-login.ts geminiCliEnv)·팀장 터미널과
+ * 같은 키체인의 로그인을 읽게 한다(넘기면 토큰 파일을 읽어, 없으면 인증 실패이고 남아 있으면 그 파일의 다른 계정을 본다). 값이 없는 칸은 버린다.
+ */
+export function agyEnvWithoutSsh(base: Record<string, string | undefined> = process.env): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) if (value !== undefined && !(AGY_FILE_TOKEN_ENV as readonly string[]).includes(key)) env[key] = value;
+  return env;
+}
+
 async function spawnAgyModels(bin: string, timeoutMs: number): Promise<AgyModelsRun> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    // 환경은 서버의 것을 그대로 쓴다(cli-version.ts 와 같다). 입력은 닫아 둔다: 물음이 뜨면 답하지 않고 제한 시간에 끊는다.
-    const child = Bun.spawn([bin, "models"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    // 환경은 서버의 것에서 SSH_* 만 뺀다(agyEnvWithoutSsh). 입력은 닫아 둔다: 물음이 뜨면 답하지 않고 제한 시간에 끊는다.
+    const child = Bun.spawn([bin, "models"], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: agyEnvWithoutSsh() });
     // 손주 프로세스가 출력 관을 쥐고 있으면 읽기가 끝나지 않는다. 읽기도 제한 시간과 겨룬다.
     const deadline = new Promise<AgyModelsRun>(resolve => {
       timer = setTimeout(() => { try { child.kill(); } catch { /* 이미 끝났다 */ } resolve({ exitCode: null, stdout: "" }); }, Math.max(1, timeoutMs));

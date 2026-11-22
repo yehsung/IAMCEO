@@ -5,7 +5,7 @@ import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { API_LEVEL, APP_HEADERS, MIN_APP_API_LEVEL, type AppClientInfo, type Bootstrap, type SeenAppClient, type SyncSnapshot } from "../shared/types.ts";
-import { compatFields, compatNotice, readAppClient, SeenApps } from "../server/app-version.ts";
+import { appVersionAtLeast, compatFields, compatNotice, readAppClient, SeenApps } from "../server/app-version.ts";
 import { Bus } from "../server/bus.ts";
 import { loadConfig, updateConfigFile, VERSION } from "../server/config.ts";
 import { openDb } from "../server/db.ts";
@@ -87,6 +87,13 @@ describe("머리글 읽기", () => {
     expect(ahead?.message).toContain("0.5.0");
     // 사용자 문구에 영어 약어·내부 용어가 없다.
     for (const message of [old!.message, oldMac!.message, ahead!.message]) expect(message).not.toMatch(/API|apiLevel|compat|header/i);
+  });
+
+  test("앱 버전 견주기: x.y.z 를 숫자로 견준다(0.2.10 > 0.2.9). 머리글이 없거나 숫자 버전이 아니면(개발 빌드 dev) 모른다(null)", () => {
+    expect(["0.2.8", "0.2.9", "0.2.10", "0.2.11", "0.3.0", "1.0.0", "0.2.10-beta", "0.1.99"].map(version => appVersionAtLeast(app({ version }), "0.2.10")))
+      .toEqual([false, false, true, true, true, true, true, false]);
+    expect(appVersionAtLeast(null, "0.2.10")).toBeNull();
+    for (const version of ["dev", "0.2", "x.2.10", "10"]) expect([version, appVersionAtLeast(app({ version }), "0.2.10")]).toEqual([version, null]);
   });
 
   test("머리글이 없으면 덧붙일 필드가 없다", () => {

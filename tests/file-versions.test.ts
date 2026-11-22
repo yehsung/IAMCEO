@@ -169,8 +169,35 @@ describe("자동 잇기 규칙(pickPrevious)", () => {
     const one = [file("a", "분기 실적 발표 v3 (오프닝 수정)", 0)];
     expect(pickPrevious(file("n", "분기 실적 발표 v4 (클로징 추가)", HOUR), one)).toMatchObject({ chain: true, to: { id: "a" }, basis: "marker+stem" });
     expect(pickPrevious(file("n", "결제 설계 v3 (화면)", HOUR), [file("a", "결제 설계 v2", 0)])).toMatchObject({ chain: true, basis: "marker+stem" });
+    // 줄기가 같아도 앞 판에 번호가 없으면 판 번호가 오르는 후보가 아니다: 둘이어도 '여럿(ambiguous)'이 아니라 different-tail.
     const two = [file("a", "분기 실적 발표 (영업)", 0), file("b", "분기 실적 발표 (개발)", HOUR)];
-    expect(pickPrevious(file("n", "분기 실적 발표 v2 (요약)", 2 * HOUR), two)).toMatchObject({ chain: false, why: "ambiguous" });
+    expect(pickPrevious(file("n", "분기 실적 발표 v2 (요약)", 2 * HOUR), two)).toMatchObject({ chain: false, why: "different-tail" });
+    // 판 번호가 오르는 후보가 둘 이상일 때만 ambiguous 이고, 그 후보만 싣는다.
+    const rising = [file("a", "분기 실적 발표 v1 (영업)", 0), file("b", "분기 실적 발표 v2 (개발)", HOUR), file("c", "분기 실적 발표 (메모)", HOUR)];
+    const verdict = pickPrevious(file("n", "분기 실적 발표 v3 (요약)", 2 * HOUR), rising);
+    expect(verdict).toMatchObject({ chain: false, why: "ambiguous" });
+    expect(verdict.chain ? [] : (verdict.candidates ?? []).map((c) => c.id).sort()).toEqual(["a", "b"]);
+  });
+
+  test("줄기 후보는 판 번호 조건부터 거른 뒤 센다: 새 제목에 번호가 없으면 후보가 몇이든 different-tail, 번호가 오르는 후보가 하나면 잇는다", () => {
+    // 검토자 재현(ambiguous.ts)의 네 경우와 정리 계획.
+    const one = [file("a", "경쟁사 분석 (토스) 초안", 0)];
+    const two = [...one, file("b", "경쟁사 분석 (카카오페이) 초안", HOUR)];
+    const naver = file("n", "경쟁사 분석 (네이버페이) 초안", 2 * HOUR);
+    expect(pickPrevious(naver, one)).toMatchObject({ chain: false, why: "different-tail" });
+    const verdict = pickPrevious(naver, two);
+    expect(verdict).toMatchObject({ chain: false, why: "different-tail" });
+    expect(verdict.chain ? undefined : verdict.candidates).toBeUndefined();
+    expect(planTidy([...two, naver]).skipped).toEqual({ "no-match": 1, "different-tail": 2 });
+    const mixed = [file("a", "결제 설계 v2 (서버)", 0), file("b", "결제 설계 (메모)", HOUR)];
+    const screen = file("n", "결제 설계 v3 (화면)", 2 * HOUR);
+    expect(pickPrevious(screen, mixed)).toMatchObject({ chain: true, to: { id: "a" }, basis: "marker+stem" });
+    expect(pickPrevious(screen, [mixed[0]!])).toMatchObject({ chain: true, to: { id: "a" }, basis: "marker+stem" });
+    // 오르는 후보가 없으면 예전 까닭 순서(번호가 내려감 → 같은 번호 → 알 수 없음)로 알린다.
+    expect(pickPrevious(screen, [file("a", "결제 설계 v4 (서버)", 0), file("b", "결제 설계 (메모)", HOUR)])).toMatchObject({ chain: false, why: "version-went-down" });
+    expect(pickPrevious(screen, [file("a", "결제 설계 v3 (서버)", 0), file("b", "결제 설계 (메모)", HOUR)])).toMatchObject({ chain: false, why: "same-number-different-tail" });
+    // 날짜가 맞지 않는 후보는 세지 않는다(날짜가 분명한 꼴이 아니면 번호가 올라도 다른 자료).
+    expect(pickPrevious(file("n", "강의 자료 v3 (1-3, 요약)", 2 * HOUR), [file("a", "강의 자료 v2 (1-2, 전체)", 0)])).toMatchObject({ chain: false, why: "different-date" });
   });
 
   test("판 번호가 계속 오르는 정상 판은 잇는다('결제 설계 v2'→'v3', '(요약) v1'→'(요약) v2')", () => {
@@ -198,17 +225,28 @@ describe("자동 잇기 규칙(pickPrevious)", () => {
     expect(planTidy([file("s", "사업계획서 (요약본) 최종", 0), file("t", "사업계획서 (전체본) 최종", HOUR)])).toMatchObject({ links: [], skipped: { "different-tail": 1 } });
   });
 
-  test("판 표시 없이 같은 제목으로 다시 올림: 사진·영상이 아니고 48시간 안이면 잇는다. 사진은 잇지 않는다", () => {
+  test("판 표시 없이 같은 제목으로 다시 올림: 사진·영상이 아니고 12시간 안(같은 작업 중)이면 잇는다. 사진은 잇지 않는다", () => {
     expect(pickPrevious(file("n", "결제 연동 설계", HOUR), [file("a", "결제 연동 설계", 0)])).toMatchObject({ chain: true, basis: "same-title" });
-    expect(pickPrevious(file("n", "결제 연동 설계", 48 * HOUR), [file("a", "결제 연동 설계", 0)])).toMatchObject({ chain: true, basis: "same-title" });
+    expect(pickPrevious(file("n", "결제 연동 설계", 12 * HOUR), [file("a", "결제 연동 설계", 0)])).toMatchObject({ chain: true, basis: "same-title" });
     expect(pickPrevious(file("n", "결제 연동 화면", HOUR, { kind: "image" }), [file("a", "결제 연동 화면", 0, { kind: "image" })])).toMatchObject({ chain: false, why: "no-marker" });
+    // 같은 작업 중에 여러 번 다시 올린 것은 정리 계획도 한 줄로 잇는다(창은 바로 앞 판에서 잰다).
+    const redo = [file("t1", "테스트 결과", 0, { order: 1 }), file("t2", "테스트 결과", 3 * HOUR, { order: 2 }), file("t3", "테스트 결과", 11 * HOUR, { order: 3 })];
+    expect(planTidy(redo).links.map((l) => `${l.previous.id}>${l.next.id}`)).toEqual(["t1>t2", "t2>t3"]);
   });
 
-  test("같은 이름으로 거듭 올리는 보고는 48시간이 지나면 잇지 않는다(판 표시가 있으면 14일 그대로)", () => {
-    expect(SAME_TITLE_WINDOW_MS).toBe(48 * HOUR);
-    expect(pickPrevious(file("n", "일일 보고", 49 * HOUR), [file("a", "일일 보고", 0)])).toMatchObject({ chain: false, why: "no-marker" });
+  test("같은 이름으로 거듭 올리는 보고는 12시간이 지나면 잇지 않는다: 하루 간격 '일일 보고'·'테스트 결과'는 따로 둔다(판 표시가 있으면 14일 그대로)", () => {
+    expect(SAME_TITLE_WINDOW_MS).toBe(12 * HOUR);
+    expect(pickPrevious(file("n", "일일 보고", 13 * HOUR), [file("a", "일일 보고", 0)])).toMatchObject({ chain: false, why: "no-marker" });
+    for (const title of ["일일 보고", "테스트 결과", "진행 상황 보고"]) {
+      expect({ title, verdict: pickPrevious(file("n", title, DAY), [file("a", title, 0)]) }).toMatchObject({ title, verdict: { chain: false, why: "no-marker" } });
+    }
     expect(pickPrevious(file("n", "테스트 결과", 3 * DAY), [file("a", "테스트 결과", 0)])).toMatchObject({ chain: false, why: "no-marker" });
     expect(pickPrevious(file("n", "결제 설계 v3", 10 * DAY), [file("a", "결제 설계 v2", 0)])).toMatchObject({ chain: true, basis: "marker+full" });
+    // 날짜 없는 '일일 보고' 14일치(24시간 간격)를 정리해도 판 묶음 하나로 접지 않는다(검토자 재현 daily.ts).
+    const days = Array.from({ length: 14 }, (_, i) => file(`d${i + 1}`, "일일 보고", i * DAY, { order: i + 1 }));
+    const plan = planTidy(days);
+    expect(plan.links).toEqual([]);
+    expect(plan.skipped).toEqual({ "no-marker": 14 });
   });
 
   test("잇지 않는다: 다른 팀장·다른 종류·이미 옛 판·14일 넘음·대표가 올림·종류 없는 옛 자료", () => {
@@ -424,15 +462,29 @@ describe("file 도구: 자동 잇기·new_item·find·unchain", () => {
     expect(await t.tool(t.worker, "file", { title: "가짜", content: "가짜", replaces: ownerFile.id })).toMatchObject({ isError: true, text: "직원은 자기가 올린 자료만 새 판으로 바꿀 수 있습니다" });
   });
 
-  test("같은 제목의 앞 판이 여럿이면 잇지 않고 후보를 알려 준다", async () => {
+  test("판 번호가 오르는 같은 줄기의 앞 판이 여럿이면 잇지 않고 그 후보만 알려 준다. 번호로 새 판임을 알 수 없는 다른 자료는 후보로 내밀지 않는다", async () => {
     const t = await setup();
-    const a = await t.publish(t.worker, { title: "분기 실적 발표 (영업)", content: "가짜" });
-    const b = await t.publish(t.worker, { title: "분기 실적 발표 (개발)", content: "가짜" });
-    const n = await t.publish(t.worker, { title: "분기 실적 발표 v2 (요약)", content: "가짜" });
+    const a = await t.publish(t.worker, { title: "분기 실적 발표 v1 (영업)", content: "가짜" });
+    const b = await t.publish(t.worker, { title: "분기 실적 발표 v2 (개발)", content: "가짜", new_item: true });
+    const memo = await t.publish(t.worker, { title: "분기 실적 발표 (메모)", content: "가짜" });
+    const n = await t.publish(t.worker, { title: "분기 실적 발표 v3 (요약)", content: "가짜" });
     expect(n.text).toContain("같은 제목의 앞 판이 여럿이라 잇지 않았습니다");
     expect(n.text).toContain(a.id);
     expect(n.text).toContain(b.id);
+    expect(n.text).not.toContain(memo.id);
     expect(t.store.getFile(n.id)!.replaces).toBeUndefined();
+    // 번호 없는 '(토스) 초안'·'(카카오페이) 초안' 뒤의 '(네이버페이) 초안': 후보가 둘이어도 다른 자료라 보통 답(예전 글 그대로).
+    await t.publish(t.worker, { title: "경쟁사 분석 (토스) 초안", content: "가짜" });
+    await t.publish(t.worker, { title: "경쟁사 분석 (카카오페이) 초안", content: "가짜" });
+    const naver = await t.publish(t.worker, { title: "경쟁사 분석 (네이버페이) 초안", content: "가짜" });
+    expect(naver.text).toBe(`자료를 올렸습니다 #${naver.id}. post 의 file_ids 에 ${naver.id} 를 넣으면 대화에 이어집니다`);
+    expect(t.store.getFile(naver.id)!.replaces).toBeUndefined();
+    // 번호가 오르는 후보가 하나면 번호 없는 같은 줄기 자료가 곁에 있어도 그 판에 잇는다.
+    const server = await t.publish(t.worker, { title: "결제 설계 v2 (서버)", content: "가짜" });
+    await t.publish(t.worker, { title: "결제 설계 (메모)", content: "가짜" });
+    const screen = await t.publish(t.worker, { title: "결제 설계 v3 (화면)", content: "가짜" });
+    expect(t.store.getFile(screen.id)!.replaces).toBe(server.id);
+    expect(screen.text).toContain(`앞 판 #${server.id}`);
   });
 
   test("find: 최신 판만, 제목 낱말이 모두 든 것, 새것부터. 내가 올린 것은 mine. 다른 인자와 함께 줄 수 없다", async () => {

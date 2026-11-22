@@ -251,6 +251,13 @@ describe("결재함 승인(스크립트를 실제로 돌리고, 서버는 가짜
       toolName: "run_command", toolInput: { CommandLine: "npm test", WaitMsBeforeAsync: 5000, Cwd: t.project }, sessionId: CONV, cwd: t.project,
       cli: "gemini", geminiKind: "command", toolCallId: "call_646705910486809191" } });
   });
+  test("모델이 준 BypassSandbox 는 요청의 toolInput 에 그대로 실린다(대신하는 모드에서 서버가 카드를 여는 근거)", async () => {
+    const server = fakeServer(() => ({ id: null, state: "closed" }));
+    const t = permissionLayout(server.url);
+    await runHook(t.command, preToolUse("run_command", { CommandLine: "npm install", BypassSandbox: true, WaitMsBeforeAsync: 5000 }, t.workspaces));
+    expect(server.seen).toHaveLength(1);
+    expect(server.seen[0]!.body).toMatchObject({ geminiKind: "command", toolInput: { CommandLine: "npm install", BypassSandbox: true, Cwd: t.project } });
+  });
   test("거절 → deny + 대표 메모(모델이 받는 까닭), 기다림(pending) 뒤의 답도 받는다", async () => {
     let polls = 0;
     const server = fakeServer((_body, path) => path === "/agent/permission" ? { id: "d2", state: "pending" } : ++polls < 2 ? { id: "d2", state: "pending" } : { id: "d2", state: "deny", message: "대표가 결재함에서 거절했습니다. 대표 메모: \"main 에 밀지 마세요\"" });

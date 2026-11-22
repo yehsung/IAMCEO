@@ -57,15 +57,18 @@ export type GeminiEffectiveMode = "default" | "accept-edits" | "auto" | "fallbac
 /**
  * 그 모드에서 agy 가 묻는 종류(문서 docs_permissions.md·docs_cli_modes.md, 1.5.14 헤드리스 실측). Claude 와 같은 뜻이 되게 한다:
  * Claude 의 PermissionRequest 는 CLI 가 승인 창을 띄우려 할 때만 오므로, agy 가 창을 띄울 종류만 카드로 연다.
- * - 명령: default·accept-edits 는 매번 묻는다(request-review). auto·fallback 은 샌드박스 안이면 묻지 않고 밖은 agy 의 평가기·창이 정한다:
- *   훅에서는 어느 쪽인지 모르므로 카드를 열지 않고 agy 에 맡긴다(위험한 명령은 오늘처럼 agy 의 창 = 터미널 승인 대기).
+ * - 명령: default·accept-edits 는 매번 묻는다(request-review). auto 는 샌드박스 안이면 묻지 않고, 밖은 agy 의 평가기가 위험한 것만 묻는다:
+ *   훅에서는 평가기가 물을지 모르므로 카드를 열지 않고 agy 에 맡긴다(위험한 명령은 오늘처럼 agy 의 창 = 터미널 승인 대기).
+ *   fallback 은 평가기가 없어 샌드박스 밖 명령을 늘 묻는다. 모델이 샌드박스 밖을 청한 호출(run_command 의 BypassSandbox: true, 훅이 인자 그대로 싣는다)이
+ *   그것이라 카드를 연다(geminiNeedsCard 의 toolInput). 그 칸이 없거나 false 면 샌드박스 안에서 돌아 묻지 않는다.
  * - 작업 공간 안 파일 쓰기: default 만 묻는다(diff 검토). 임시 폴더: auto·fallback 은 묻지 않는다. 그 밖의 폴더·IAMCEO 밖의 연결 도구·웹: 늘 묻는다.
  * 1.5.14 대화형 실측(agy-real, 훅 없이 agy 자기 창): default 는 run_command·write_file(새 파일)·edit_file 을 모두 물었고, accept-edits 는 새 파일을 묻지 않고
  * run_command 는 물었고, auto 는 새 파일·'ls && rm a.txt' 를 묻지 않았다(작업 공간 안). 표의 그 칸들과 같다.
  * 1.5.14 격리 서버 대화형 실측(11-23, 결재함 훅이 붙은 실제 팀장): default 팀장의 run_command·write_file 은 카드로 떴고, auto 팀장(상태줄 cycle_mode auto)의
  * 작업 폴더 안 write_file·명령은 카드 없이 돌았다. auto 에서 agy 의 평가기가 물은 명령 하나를 보았다: 이 Mac 의 서버로 가는 `curl -X POST …/agent/tool`
  * (까닭 'sends a POST request to a pre-existing local … server that was not spawned by the agent'). 명령은 카드를 열지 않는 종류라 그 창(터미널 승인 대기)으로 남았다.
- * UNVERIFIED-INTERACTIVE: auto·accept-edits 의 임시 폴더·작업 공간 밖·웹·연결 도구는 유도하지 못했다.
+ * UNVERIFIED-INTERACTIVE: auto·accept-edits 의 임시 폴더·작업 공간 밖·웹·연결 도구는 유도하지 못했다. fallback 의 BypassSandbox 명령도 대화형으로는 보지 못했다
+ * (근거는 헤드리스 실측과 훅 입력의 인자 목록이다. agy 가 그 호출을 묻지 않으면 대표가 허용한 카드가 같은 명령을 auto_approve 할 뿐이다).
  * 대표가 agy 에 둔 허용 규칙(settings.json permissions.allow)은 보지 않는다: 그 규칙으로 agy 가 묻지 않을 도구에도 카드가 열릴 수 있다(허용하면 그대로 돈다).
  */
 const GEMINI_ASKS: Record<GeminiEffectiveMode, ReadonlySet<GeminiToolKind>> = {
@@ -74,9 +77,20 @@ const GEMINI_ASKS: Record<GeminiEffectiveMode, ReadonlySet<GeminiToolKind>> = {
   auto: new Set<GeminiToolKind>(["edit_outside", "read_outside", "mcp", "web"]),
   fallback: new Set<GeminiToolKind>(["edit_outside", "read_outside", "mcp", "web"]),
 };
-/** 그 모드에서 이 종류의 도구에 결재함 카드를 열 것인가. 모르는 종류는 열지 않는다(agy 의 원래 창으로 둔다). */
-export function geminiNeedsCard(kind: string | null | undefined, mode: GeminiEffectiveMode): boolean {
-  return typeof kind === "string" && (GEMINI_TOOL_KINDS as readonly string[]).includes(kind) && GEMINI_ASKS[mode].has(kind as GeminiToolKind);
+/** run_command 가 샌드박스 밖에서 돌기를 청했는가(BypassSandbox, docs/spec.md 의 1.5.14 실측 인자). 글 "true" 도 같게 본다(카드를 여는 쪽이 안전하다). */
+function geminiBypassesSandbox(toolInput: unknown): boolean {
+  if (!toolInput || typeof toolInput !== "object" || Array.isArray(toolInput)) return false;
+  const value = (toolInput as Record<string, unknown>).BypassSandbox;
+  return value === true || typeof value === "string" && value.trim().toLowerCase() === "true";
+}
+/**
+ * 그 모드에서 이 종류의 도구에 결재함 카드를 열 것인가. 모르는 종류는 열지 않는다(agy 의 원래 창으로 둔다).
+ * toolInput 은 훅이 올린 인자다: fallback 에서 샌드박스 밖을 청한 명령(BypassSandbox)은 agy 가 묻는 것이라 연다.
+ */
+export function geminiNeedsCard(kind: string | null | undefined, mode: GeminiEffectiveMode, toolInput?: unknown): boolean {
+  if (typeof kind !== "string" || !(GEMINI_TOOL_KINDS as readonly string[]).includes(kind)) return false;
+  if (GEMINI_ASKS[mode].has(kind as GeminiToolKind)) return true;
+  return mode === "fallback" && kind === "command" && geminiBypassesSandbox(toolInput);
 }
 /**
  * Gemini 훅이 올린 도구를 카드에 보일 이름·입력으로 바꾼다. call_mcp_tool 은 Claude 와 같은 `mcp__<서버>__<도구>` 와 그 인자로 보인다(연결 도구 카드).
@@ -435,7 +449,7 @@ export class ToolPermissions {
     // Gemini: 훅은 모든 도구 호출에 온다. 지금 모드에서 agy 가 물을 종류일 때만 카드를 연다(아니면 훅은 판정 없이 끝나 agy 가 정한다).
     const gemini = input.cli === "gemini";
     if (gemini) {
-      if (member.cli !== "gemini" || !geminiNeedsCard(input.geminiKind, this.deps.geminiMode?.(member) ?? "default")) return { id: null, state: "closed" };
+      if (member.cli !== "gemini" || !geminiNeedsCard(input.geminiKind, this.deps.geminiMode?.(member) ?? "default", input.toolInput)) return { id: null, state: "closed" };
       input = { ...input, ...geminiToolForCard(input.toolName, input.toolInput) };
     }
     // Y: '무엇을'·대상은 보고 언어로 적는다(한국어면 예전과 같다). 카드의 글은 코드로 넘겨 저장소가 보고 언어로 그린다.

@@ -14,7 +14,7 @@ import type { OperationReceipt, ServerCapabilities } from "../shared/operations.
 import type { DeliveryRecoveryService } from "./service-contracts.ts";
 import { ARTIFACT_CSP, buildArtifactSrcdoc } from "../shared/artifact-kit.ts";
 import type { Bus } from "./bus.ts";
-import { VERSION, type Config } from "./config.ts";
+import { defaultGeminiHome, VERSION, type Config } from "./config.ts";
 import { FilePublication, prepareImport, MAX_ARTIFACT_BYTES, MAX_UPLOAD_BYTES, resolveInside, saveUpload, type SavedFile } from "./files.ts";
 import type { OrchestratorApi } from "./orchestrator-api.ts";
 import { ApiError, DONE_PAGE_MAX, STATE_WINDOW_DONE, STATE_WINDOW_RECENT_MS, type Store } from "./store.ts";
@@ -48,7 +48,8 @@ import { ERROR_CODES } from "../shared/error-codes.ts";
 import { USAGE_MAX_DAYS } from "../shared/types.ts";
 import { UsageCollector, usageReport, type UsageSource } from "./usage.ts";
 import { projectRules } from "./project-rules.ts";
-import { CLI_LOGIN_CLIS, CliLoginError, CliLogins } from "./cli-login.ts";
+import { CLI_LOGIN_CLIS, CliLoginError, CliLogins, isLegacyLoginCli } from "./cli-login.ts";
+import { readGeminiStatus } from "./runner/gemini-status.ts";
 export { safeEqual };
 
 export interface ServerContext {
@@ -256,6 +257,22 @@ const GONE_ROUTES: [method: string, path: string, message: string][] = [
   ["POST", "/api/members/:id/release", "편입 해제는 없어졌습니다. 이전 실행기의 세션이 남은 팀장은 팀 화면의 '새 세션으로 이어가기'로 옮겨 계속 쓸 수 있습니다. 명부에서 빼려면 총괄에게 그 팀장을 닫으라고 하세요"],
   ["POST", "/api/members/:id/reopen-with-tools", "'도구 붙여 다시 열기'는 없어졌습니다. 이전 실행기의 세션은 그 터미널에서 확인하고, 이어서 맡기려면 팀장을 새로 만드세요"],
 ];
+
+/**
+ * 0.2.10 AI 계정의 Gemini 줄에 보일 요금제: 떠 있는 Gemini 팀장들의 상태줄 기록(<홈>/context/gemini/<팀장>.json) 가운데 since(ms) 뒤에 쓰인 것의
+ * 최신 plan_tier. 기록에는 계정 메일이 없다(상태줄 래퍼가 옮기지 않는다). 없으면 null.
+ */
+export function latestGeminiPlan(store: Store, home: string, since: number): string | null {
+  let best: { at: number; plan: string } | null = null;
+  for (const member of store.listAllMembers()) {
+    if (member.cli !== "gemini") continue;
+    const record = readGeminiStatus(home, member.id);
+    const at = record ? Date.parse(record.at) : NaN;
+    if (!record?.planTier || !Number.isFinite(at) || at <= since) continue;
+    if (!best || at > best.at) best = { at, plan: record.planTier };
+  }
+  return best?.plan ?? null;
+}
 
 // ---- 요청 검증 ----
 const nonEmpty = z.string().trim().min(1);
@@ -876,15 +893,20 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       return Response.json(models.read());
     }),
     // ---- 0.2.8: AI 계정 로그인. 새 경로라 옛 앱은 부르지 않고, 옛 서버는 404 를 준다(앱은 그 묶음을 숨긴다) ----
+    // 0.2.10: Gemini(Antigravity CLI)의 줄·로그인은 새 칸 allAccounts·allLogins 에만 싣는다(agy 가 깔려 있거나 Gemini 로그인이 남아 있을 때만).
+    // 옛 칸(accounts·logins)은 claude·codex 그대로다: 출시 앱(0.2.8·0.2.9)은 모르는 CLI 의 줄을 'Claude Code' 로 그린다.
     route("GET", "/api/cli-accounts", async (_req, url) => {
       strictQuery(url, ["refresh"]);
       const logins = requireLogins();
-      const body: CliAccountsResponse = { accounts: await logins.accounts(url.searchParams.get("refresh") === "1"), logins: logins.list() };
+      const force = url.searchParams.get("refresh") === "1";
+      const [accounts, gemini] = await Promise.all([logins.accounts(force), logins.geminiAccount(force)]);
+      const all = logins.list();
+      const body: CliAccountsResponse = { accounts, logins: all.filter(login => isLegacyLoginCli(login.cli)), ...(gemini ? { allAccounts: [...accounts, gemini], allLogins: all } : {}) };
       return Response.json(body, { headers: { "Cache-Control": "no-store" } });
     }),
     route("POST", "/api/cli-login", async (req, url) => {
       strictQuery(url, []);
-      const body = await parseBody(req, z.strictObject({ cli: z.enum(CLI_LOGIN_CLIS as unknown as ["claude", "codex"]), restart: z.boolean().optional() }));
+      const body = await parseBody(req, z.strictObject({ cli: z.enum(CLI_LOGIN_CLIS as unknown as ["claude", "codex", "gemini"]), restart: z.boolean().optional() }));
       return loginResponse(() => requireLogins().start(body.cli, body.restart === true));
     }),
     route("GET", "/api/cli-login/:id", (_req, url, [id]) => {
@@ -1610,7 +1632,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   let ownUsage: UsageCollector | null = null;
   let ownLogins: CliLogins | null = null;
   if (!ctx.cliLogins && process.env.IAMCEO_TEST !== "1") {
-    ownLogins = new CliLogins({ claudeBin: config.claudeBin, codexBin: config.codexBin, claudeHome: config.claudeHome, codexHome: config.codexHome,
+    ownLogins = new CliLogins({ claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin: config.geminiBin, claudeHome: config.claudeHome, codexHome: config.codexHome,
+      geminiHome: config.geminiHome ?? defaultGeminiHome(), geminiPlan: since => latestGeminiPlan(store, config.home, since),
       runDir: join(config.home, "run"), onLoggedIn: (cli, after, before) => ctx.orch.cliLoggedIn?.(cli, after, before) ?? Promise.resolve(null) });
     ctx.cliLogins = ownLogins;
   }

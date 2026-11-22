@@ -1125,8 +1125,14 @@ export interface UsageReport {
 }
 
 // ---- 0.2.8: AI 계정 로그인 — 폰에서도 Claude Code·Codex 계정을 바꾸거나 다시 로그인한다(GET /api/cli-accounts, /api/cli-login) ----
-/** 로그인을 다루는 CLI. 팀장의 cli 값 가운데 claude·codex 만이다(gemini 는 브라우저 로그인뿐이라 여기서 다루지 않는다. 출시 앱이 모르는 값을 Claude 로 그린다). */
-export type CliAccountCli = "claude" | "codex";
+/**
+ * 로그인을 다루는 CLI. 0.2.10 부터 gemini(Antigravity CLI, `agy acp --login`)도 다룬다.
+ * 출시 앱(0.2.8·0.2.9)은 모르는 값의 계정 줄을 'Claude Code' 로 그리고 그 줄의 단추가 그 CLI 의 로그인을 시작한다:
+ * 응답의 옛 칸(accounts·logins)에는 claude·codex 만 싣고, gemini 는 새 칸(allAccounts·allLogins)에만 싣는다(LEGACY_CLI_ACCOUNT_CLIS).
+ */
+export type CliAccountCli = "claude" | "codex" | "gemini";
+/** 출시 앱(0.2.8·0.2.9)이 아는 CLI. GET /api/cli-accounts 의 accounts·logins 에는 이것만 싣는다. */
+export const LEGACY_CLI_ACCOUNT_CLIS: readonly CliAccountCli[] = ["claude", "codex"];
 /**
  * 이 Mac 의 CLI 가 지금 쓰는 계정. 서버가 CLI 의 기록(claude auth status, ~/.codex/auth.json)으로 읽는다.
  * loggedIn null: 읽지 못했다(problem 에 까닭). 메일·조직·요금제는 CLI 가 알려 준 그대로다(없으면 null).
@@ -1144,6 +1150,12 @@ export interface CliAccount {
   checkedAt: string;
   /** 읽지 못한 까닭(오류 코드). */
   problem?: string | null;
+  /**
+   * 0.2.10 Gemini 만: agy 의 첫 설정(색상·약관·데이터 수집 동의)이 이 Mac 에서 아직 끝나지 않았다(<geminiHome>/cache/onboarding.json 의 완료 표시가 모두 false).
+   * 로그인과 따로다: 로그인해도 팀장의 agy 는 첫 설정 화면에서 멈춘다. 대표가 이 Mac 의 터미널에서 `agy` 를 한 번 실행해 끝내야 한다(서버는 누르지 않는다).
+   * 모르면 칸이 없다. Claude·Codex 줄에는 싣지 않는다.
+   */
+  setupPending?: boolean;
 }
 /**
  * starting: CLI 를 띄우는 중 · waiting: 주소(·코드)가 나와 대표의 로그인을 기다린다 · verifying: 붙여넣은 코드를 CLI 가 확인하는 중 ·
@@ -1151,11 +1163,19 @@ export interface CliAccount {
  */
 export type CliLoginPhase = "starting" | "waiting" | "verifying" | "succeeded" | "failed" | "cancelled" | "expired";
 /** 로그인 뒤 떠 있는 팀장에게 새 계정을 적용한 것: 바로 다시 연 팀장 수, 다음 일을 받기 전에 다시 열 팀장 수. */
-export interface CliLoginApplied { reopenedNow: number; atNextTurn: number }
+export interface CliLoginApplied {
+  reopenedNow: number;
+  atNextTurn: number;
+  /**
+   * 0.2.10 Gemini 만: 로그인·첫 설정 화면에서 멈춘 Gemini 팀장 수(blockedCode gemini_setup). 서버는 그 화면에 키를 보내지도, 그 터미널을 끝내지도 않는다:
+   * 대표가 그 화면을 끝내면(쉬는 중이 되면) 같은 대화를 새 계정으로 다시 연다. Claude·Codex 로그인에는 없다.
+   */
+  setupBlocked?: number;
+}
 export interface CliLogin {
   id: string;
   cli: CliAccountCli;
-  /** paste_code: 주소에서 로그인한 뒤 나온 코드를 붙여넣는다(Claude) · device_code: 열린 페이지에 userCode 를 넣는다(Codex). */
+  /** paste_code: 주소에서 로그인한 뒤 나온 코드를 붙여넣는다(Claude·Gemini) · device_code: 열린 페이지에 userCode 를 넣는다(Codex). */
   flow: "paste_code" | "device_code";
   phase: CliLoginPhase;
   startedAt: string;
@@ -1168,13 +1188,20 @@ export interface CliLogin {
   /** Codex: 로그인 페이지에 넣는 일회용 코드. */
   userCode: string | null;
   error: { code: string; message: string } | null;
-  /** 성공한 뒤 다시 읽은 계정. */
+  /** 성공한 뒤 다시 읽은 계정. Gemini 는 CLI 가 끝에 알려 준 메일(`Logged in as …`)을 이 응답에만 싣는다(서버는 저장하지 않는다). */
   account: CliAccount | null;
   /** 로그인 전과 다른 계정인가. 전 계정을 몰랐으면 null. */
   accountChanged: boolean | null;
   applied: CliLoginApplied | null;
 }
-export interface CliAccountsResponse { accounts: CliAccount[]; logins: CliLogin[] }
+export interface CliAccountsResponse {
+  /** 출시 앱이 아는 claude·codex 줄(LEGACY_CLI_ACCOUNT_CLIS). */
+  accounts: CliAccount[];
+  logins: CliLogin[];
+  /** 0.2.10: Gemini(Antigravity CLI)까지 모든 줄. agy 가 이 Mac 에 깔려 있거나 Gemini 로그인이 남아 있을 때만 싣는다(아니면 응답이 예전 그대로다). */
+  allAccounts?: CliAccount[];
+  allLogins?: CliLogin[];
+}
 export interface StartCliLoginReq { cli: CliAccountCli; restart?: boolean }
 export interface CliLoginCodeReq { code: string }
 // ---- 끝 ----

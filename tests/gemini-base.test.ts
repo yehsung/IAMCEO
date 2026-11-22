@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { defaultGeminiHome, loadConfig, updateConfigFile } from "../server/config.ts";
 import type { DeliveryReceipt, RunnerMember } from "../server/runner/types.ts";
 import {
-  CLI_INFO, CLI_PROVIDERS, CODEX_EFFORTS, DEFAULT_CODEX_RANKS, DEFAULT_GEMINI_RANKS, DEFAULT_RANKS, EFFORTS, GEMINI_EFFORTS, memberConfig, ranksFor, ranksKey,
+  CLI_INFO, CLI_PROVIDERS, CODEX_EFFORTS, DEFAULT_CODEX_RANKS, DEFAULT_GEMINI_RANKS, DEFAULT_RANKS, EFFORTS, GEMINI_EFFORTS, LEGACY_CLI_ACCOUNT_CLIS, memberConfig, ranksFor, ranksKey,
   type CliAccountCli, type CliProvider, type DeliveryEvidence, type Ranks, type RuntimeInfo, type Settings, type SettingsPatch,
 } from "../shared/types.ts";
 
@@ -40,13 +40,14 @@ describe("CLI 표", () => {
     expect([...GEMINI_EFFORTS]).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 
-  test("타입: gemini 는 팀장의 CLI 이지만 로그인 대상은 아니고, 런타임 정보에는 깔렸을 때만 실린다", () => {
+  test("타입: gemini 는 팀장의 CLI 이고 0.2.10 부터 로그인 대상이다(응답의 옛 칸에는 싣지 않는다). 런타임 정보에는 깔렸을 때만 실린다", () => {
     const cli: CliProvider = "gemini";
     const member: Pick<RunnerMember, "cli"> = { cli };
     const receipt: DeliveryReceipt["source"] = "gemini_log";
     const evidence: DeliveryEvidence["source"] = "gemini_log";
-    // @ts-expect-error gemini 로그인은 다루지 않는다
+    // 0.2.10: Antigravity CLI 로그인(`agy acp --login`)도 다룬다. 출시 앱이 읽는 옛 칸(accounts·logins)은 claude·codex 그대로다.
     const account: CliAccountCli = "gemini";
+    expect([...LEGACY_CLI_ACCOUNT_CLIS]).toEqual(["claude", "codex"]);
     const without: RuntimeInfo["providers"] = { claude: { installed: true }, codex: { installed: false } };
     const withGemini: RuntimeInfo["providers"] = { ...without, gemini: { installed: true } };
     // @ts-expect-error claude·codex 는 늘 실린다

@@ -20,6 +20,7 @@ import { geminiToolHookSet } from "../server/runner/gemini-tool-hook.ts";
 import { startServer, type RunningServer, type ServerContext } from "../server/http.ts";
 import { PushStore } from "../server/push/store.ts";
 import { VERSION } from "../server/config.ts";
+import { rejection } from "./fixtures/settle.ts";
 
 /** 세션을 띄우지 않고 받은 것만 적는다. Gemini 는 실제 실행기처럼 새 세션을 대화 id 없이 띄운다(tests/gemini-orchestrator.test.ts 의 것과 같은 꼴). */
 class FakeRunner implements Runner {
@@ -422,8 +423,8 @@ describe("서브에이전트 단계: Gemini 는 모델 이름 대신 단계(flas
     const gemini = await t.add("자료 조사", "research", { cli: "gemini" });
     const claude = await t.add("결제 연동", "payments", { cli: "claude" });
     expect(t.runner.startsOf(gemini.id)[0]!.member.subagentModel).toBeNull();
-    await expect(t.orch.updateSettings({ geminiRanks: { staff: { model: "gemini-3.8-flash" } } })).rejects.toMatchObject({ status: 400, code: "gemini_staff_tier_unknown" });
-    await expect(t.orch.updateSettings({ geminiRanks: { staff: { model: "flash", effort: "low" } } })).rejects.toMatchObject({ status: 400, code: "effort_unsupported" });
+    expect(await rejection(t.orch.updateSettings({ geminiRanks: { staff: { model: "gemini-3.8-flash" } } }))).toMatchObject({ status: 400, code: "gemini_staff_tier_unknown" });
+    expect(await rejection(t.orch.updateSettings({ geminiRanks: { staff: { model: "flash", effort: "low" } } }))).toMatchObject({ status: 400, code: "effort_unsupported" });
     const saved = await t.orch.updateSettings({ geminiRanks: { staff: { model: "flash_lite" } } });
     expect(saved.geminiRanks.staff).toEqual({ model: "flash_lite", effort: null });
     // 말을 걸기 전의 Gemini 팀장은 곧바로 새 설정으로 다시 뜬다(적용 기록의 staffModel 이 달라졌다). Claude 팀장은 그대로다.

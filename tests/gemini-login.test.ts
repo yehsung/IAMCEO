@@ -19,6 +19,7 @@ import { Orchestrator } from "../server/orchestrator.ts";
 import { Store } from "../server/store.ts";
 import type { CliAccountsResponse, CliLogin, DecisionOption, Member } from "../shared/types.ts";
 import { coreSetup, type CoreEnv } from "./fixtures/core-harness.ts";
+import { rejection } from "./fixtures/settle.ts";
 
 const cleanups: (() => Promise<unknown> | unknown)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -219,8 +220,8 @@ describe("Gemini 로그인(`agy acp --login`)", () => {
     expect(readFileSync(env.IAMCEO_LOGIN_URL_FILE!, "utf8").trim()).toBe(AUTH_URL);
     // 같은 CLI 를 다시 시작하면 진행 중인 것을 돌려준다.
     expect((await t.logins.start("gemini")).id).toBe(started.id);
-    await expect(t.logins.submitCode(started.id, CALLBACK.replace(STATE, "otherstate123"))).rejects.toMatchObject({ status: 400, code: "cli_login_code_other" });
-    await expect(t.logins.submitCode(started.id, "그냥 글")).rejects.toMatchObject({ status: 400, code: "cli_login_code_invalid" });
+    expect(await rejection(t.logins.submitCode(started.id, CALLBACK.replace(STATE, "otherstate123")))).toMatchObject({ status: 400, code: "cli_login_code_other" });
+    expect(await rejection(t.logins.submitCode(started.id, "그냥 글"))).toMatchObject({ status: 400, code: "cli_login_code_invalid" });
     expect(existsSync(join(t.dir, "agy-pasted"))).toBe(false);
     const verifying = await t.logins.submitCode(started.id, ` ${CALLBACK}\n`);
     expect(verifying.phase).toBe("verifying");
@@ -233,7 +234,7 @@ describe("Gemini 로그인(`agy acp --login`)", () => {
     expect(t.calls).toEqual([{ cli: "gemini", after: accountIdentity("gemini", [EMAIL]), before: null }]);
     expect(t.calls[0]!.after).toMatch(/^[0-9a-f]{32}$/);
     // 끝난 뒤에는 코드를 받지 않는다. 주소 파일은 지운다. 로그에 코드·state·메일을 남기지 않는다.
-    await expect(t.logins.submitCode(started.id, CODE)).rejects.toMatchObject({ status: 409, code: "cli_login_not_waiting" });
+    expect(await rejection(t.logins.submitCode(started.id, CODE))).toMatchObject({ status: 409, code: "cli_login_not_waiting" });
     expect(existsSync(env.IAMCEO_LOGIN_URL_FILE!)).toBe(false);
     const logs = t.logs.join("\n");
     for (const secret of [CODE, STATE, EMAIL, "4/0A"]) expect([secret, logs.includes(secret)]).toEqual([secret, false]);
@@ -261,7 +262,7 @@ describe("Gemini 로그인(`agy acp --login`)", () => {
     const pid = Number(readFileSync(join(t.dir, "agy-pid"), "utf8"));
     await until("agy 끝남", () => !pidAlive(pid));
     expect(existsSync(join(t.dir, "agy-pasted"))).toBe(false);
-    await expect(t.logins.submitCode(started.id, CODE)).rejects.toMatchObject({ status: 409, code: "cli_login_not_waiting" });
+    expect(await rejection(t.logins.submitCode(started.id, CODE))).toMatchObject({ status: 409, code: "cli_login_not_waiting" });
     expect(t.calls).toEqual([]);
   }, 20_000);
 
@@ -301,7 +302,7 @@ describe("Gemini 로그인(`agy acp --login`)", () => {
 
   test("agy 가 없으면 409, Gemini 줄도 싣지 않는다", async () => {
     const t = fixture({ geminiBin: "/nonexistent/agy" });
-    await expect(t.logins.start("gemini")).rejects.toMatchObject({ status: 409, code: "cli_login_cli_missing" });
+    expect(await rejection(t.logins.start("gemini"))).toMatchObject({ status: 409, code: "cli_login_cli_missing" });
     expect(t.logins.geminiShown()).toBe(false);
     expect(await t.logins.geminiAccount()).toBeNull();
   });

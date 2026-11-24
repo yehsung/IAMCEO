@@ -36,10 +36,12 @@ import { TailnetHttps, type TailnetHttpsDeps } from "./tailnet-https.ts";
 import { doctorReport, serverDoctorFacts, type DoctorLang, type DoctorProbes } from "./doctor.ts";
 import { createDiagnostics, type DiagnoseInput } from "./diagnose.ts";
 import { readVitals } from "./vitals.ts";
-import type { CliAccountsResponse, CliLogin, DiagnoseResult } from "../shared/types.ts";
+import type { CliAccountsResponse, CliLogin, CliProvider, CliUpdateInfo, CliUpdatesResponse, DiagnoseResult } from "../shared/types.ts";
+import { CLI_INFO } from "../shared/types.ts";
 import { appVersionAtLeast, compatFields, readAppClient, SeenApps } from "./app-version.ts";
 import { serverIdentity } from "./server-identity.ts";
 import { CliVersionMonitor, type CliVersionInfo, type CliVersionSource } from "./cli-version.ts";
+import { CliUpdateError, CliUpdates, isCliVersion, type CliUpdateSource } from "./cli-update.ts";
 import { exportProjectZip, removeDeletedProjectFiles } from "./lifecycle/project-data.ts";
 import type { ProjectDeleteResult } from "../shared/types.ts";
 import { ACCESS_LOG_LIMITS, authenticate, DeviceKeys, principalKey, safeEqual, type AuthOutcome, type Principal } from "./devices.ts";
@@ -82,6 +84,39 @@ export interface ServerContext {
   usage?: UsageSource;
   /** 0.2.8: AI 계정 로그인(server/cli-login.ts). 없으면 서버가 만든다. 시험(IAMCEO_TEST)에서는 넣은 것만 쓴다: 진짜 CLI 로 로그인하지 않는다. */
   cliLogins?: CliLogins;
+  /**
+   * 0.2.11: CLI 새 판 확인·원클릭 업데이트(server/cli-update.ts). 없으면 서버가 만든다. 시험(IAMCEO_TEST)에서는 넣은 것만 쓴다:
+   * 공개 주소를 읽지 않고 진짜 업데이트 명령을 돌리지 않는다.
+   */
+  cliUpdates?: CliUpdateSource;
+}
+
+/**
+ * 0.2.11: 새 판을 처음 보았다(판마다 한 번, server/cli-update.ts 가 부른다). iPhone 푸시 사건(cli_update, 판마다 sourceKey 하나)과
+ * Mac 알림 한 줄(스크립트 알림을 켠 설치만. 앱이 Mac 알림을 맡으면 앱이 bootstrap.cliUpdates 로 스스로 띄운다). 앱 안의 띠는 bootstrap.cliUpdates 로 그린다.
+ */
+export function announceCliUpdate(ctx: Pick<ServerContext, "store" | "push" | "orch">, info: CliUpdateInfo): void {
+  if (!info.available || !isCliVersion(info.latest)) return;
+  const name = CLI_INFO[info.cli].name;
+  let en = false;
+  try { en = ctx.store.getSettings().reportLanguage === "en"; } catch { en = false; }
+  try {
+    ctx.orch.notifyOperations?.(en ? `IAMCEO · New ${name} version` : `IAMCEO · ${name} 새 판`,
+      en ? `${name} ${info.latest} update is available. Update it in Settings › AI models › Runtime.` : `${name} ${info.latest} 업데이트가 있습니다. 설정 › AI 모델 › 실행 환경에서 업데이트할 수 있습니다.`);
+  } catch (error) { console.warn("[cli-update] Mac 알림을 띄우지 못했습니다:", (error as Error).message); }
+  if (!ctx.push) return;
+  try {
+    const before = ctx.push.store.listEvents().length;
+    ctx.push.store.recordEvent({ sourceKey: `cli-update:${info.cli}:${info.latest}`, kind: "cli_update", projectId: null, memberId: null,
+      target: { screen: "home", cli: info.cli, version: info.latest }, occurredAt: ctx.push.store.timestamp() });
+    if (ctx.push.store.listEvents().length !== before) void Promise.resolve(ctx.push.wake?.()).catch(() => undefined);
+  } catch (error) { console.warn("[cli-update] iPhone 알림을 남기지 못했습니다:", (error as Error).message); }
+}
+
+/** 0.2.11: 대표가 누른 업데이트로 새 판이 깔렸다. 떠 있는 팀장에게 새 판을 적용하고(쉬는 때에 같은 대화로 다시 연다), 그 판의 아직 안 나간 알림을 거둔다. */
+export async function cliUpdateInstalled(ctx: Pick<ServerContext, "push" | "orch">, cli: CliProvider, version: string): Promise<void> {
+  try { ctx.push?.store.cancelSource(`cli-update:${cli}:${version}`); } catch { /* 이미 나갔거나 사건이 없다 */ }
+  await ctx.orch.cliUpdated?.(cli);
 }
 
 export interface HostBinding {
@@ -671,6 +706,14 @@ function engineField(orch: OrchestratorApi): { engine?: EngineStatus } {
   return engine ? { engine } : {};
 }
 
+/** 0.2.11: 설치된 CLI 마다의 지금 판·최신 판·업데이트 진행. 서비스가 없거나 아무것도 모르면 싣지 않는다. 기다리지 않는다. */
+function cliUpdatesField(ctx: ServerContext): { cliUpdates?: CliUpdateInfo[] } {
+  try {
+    const infos = ctx.cliUpdates?.list();
+    return infos?.length ? { cliUpdates: infos } : {};
+  } catch { return {}; }
+}
+
 /** D9: 마지막으로 읽은 CLI 버전. 아직 못 읽었으면 싣지 않는다. 기다리지 않는다(낡았으면 뒤에서 다시 읽는다). */
 function cliVersionsField(ctx: ServerContext): { cliVersions?: CliVersionInfo[] } {
   try {
@@ -729,6 +772,15 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
   const requireLogins = (): CliLogins => {
     if (!ctx.cliLogins) throw new ApiError(501, "AI 계정 로그인을 지원하지 않습니다", "not_found");
     return ctx.cliLogins;
+  };
+  // 0.2.11: CLI 새 판·원클릭 업데이트.
+  const requireUpdates = (): CliUpdateSource => {
+    if (!ctx.cliUpdates) throw new ApiError(501, "CLI 업데이트를 지원하지 않습니다", "not_found");
+    return ctx.cliUpdates;
+  };
+  const updateCli = (value: string): CliProvider => {
+    if (!(CLI_PROVIDERS as readonly string[]).includes(value)) throw new ApiError(404, ERROR_CODES.cli_update_unknown_cli.ko, "cli_update_unknown_cli");
+    return value as CliProvider;
   };
   const loginResponse = async (run: () => Promise<CliLogin>): Promise<Response> => {
     try { return Response.json(await run(), { headers: { "Cache-Control": "no-store" } }); }
@@ -944,6 +996,27 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
       strictQuery(url, []);
       return loginResponse(() => requireLogins().cancel(id!));
     }),
+    // ---- 0.2.11: AI 도구(CLI) 새 판과 원클릭 업데이트. 새 경로라 옛 앱은 부르지 않고, 옛 서버는 404 를 준다(앱은 그 묶음을 숨긴다) ----
+    route("GET", "/api/cli-updates", async (_req, url) => {
+      strictQuery(url, ["refresh"]);
+      const updates = requireUpdates();
+      const refresh = url.searchParams.get("refresh");
+      if (refresh !== null && refresh !== "1" && refresh !== "0") throw new ApiError(400, "조회 조건이 잘못되었습니다", "invalid_query");
+      // 앱의 '다시 확인': 최신 판을 다시 읽는다(같은 출처는 1분에 한 번까지, 한 주소에 10초 제한).
+      const body: CliUpdatesResponse = { updates: refresh === "1" ? await updates.check(true) : updates.list() };
+      return Response.json(body, { headers: { "Cache-Control": "no-store" } });
+    }),
+    route("GET", "/api/cli-updates/:cli", (_req, url, [cli]) => {
+      strictQuery(url, []);
+      return Response.json(requireUpdates().info(updateCli(cli!)), { headers: { "Cache-Control": "no-store" } });
+    }),
+    route("POST", "/api/cli-updates/:cli", async (req, url, [cli]) => {
+      strictQuery(url, []);
+      const provider = updateCli(cli!);
+      const body = req.body === null ? {} : await parseBody(req, z.strictObject({ to: z.string().refine(isCliVersion).optional() }));
+      try { return Response.json(requireUpdates().update(provider, body.to), { status: 202, headers: { "Cache-Control": "no-store" } }); }
+      catch (e) { if (e instanceof CliUpdateError) throw new ApiError(e.status, e.message, e.code); throw e; }
+    }),
     // T(F6): 팀장·프로젝트·날짜별 사용량(CLI 가 보고한 값 그대로). 새 경로라 옛 앱은 부르지 않고, 옛 서버는 404 를 준다(앱은 그 묶음을 숨긴다).
     route("GET", "/api/usage", (_req, url) => {
       strictQuery(url, ["days", "projectId"]);
@@ -979,7 +1052,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
           protocol: 2, requestedProjectId, projectStatus,
           bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr: HERDR_UNUSED,
             home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides, ...engineField(orch), ...tailnetField(), ...versionFields,
-            ...cliVersionsField(ctx) },
+            ...cliVersionsField(ctx), ...cliUpdatesField(ctx), ...cliUpdatesField(ctx) },
           // lite 면 자료 본문을 DB 에서 읽지도 않는다(아래 liteFile 이 빈 본문 칸을 뺀다). window 는 0.2.10 창 묶음.
           state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!, { lite, window }), ...snapshotNotices(requestedProjectId!) } : null,
           revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },
@@ -1014,7 +1087,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
         // V: 같은 머리글을 보낸 앱에만 서버 신원(server.id)도 싣는다.
         ...compatFields(readAppClient(req.headers), VERSION, { serverId: serverIdentity(ctx) }),
         // D9: 선택 필드. 출시된 앱은 모르는 칸을 건너뛴다.
-        ...cliVersionsField(ctx),
+        ...cliVersionsField(ctx), ...cliUpdatesField(ctx),
       };
       return Response.json(body);
     }),
@@ -1650,6 +1723,19 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   }
   /** 점검(A, cli_version)도 이 캐시를 쓴다: 실행 파일이 그대로면 --version 을 다시 부르지 않는다. 시험에서 넣지 않았으면 없다. */
   const cliVersions = ctx.cliVersions;
+  // 0.2.11: 새 판 확인(서버가 뜬 뒤 조금 있다 한 번, 그 뒤 6시간마다)과 대표가 누르는 원클릭 업데이트. 진행이 바뀌면 앱이 스냅샷을 다시 읽게 한다.
+  let ownUpdates: CliUpdates | null = null;
+  if (!ctx.cliUpdates && process.env.IAMCEO_TEST !== "1" && cliVersions) {
+    const geminiBin = process.env.NODE_ENV === "test" ? null : config.geminiBin;
+    ownUpdates = new CliUpdates({ home: config.home, versions: cliVersions, state: store, claudeHome: config.claudeHome,
+      bins: () => ({ claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin }),
+      onChange: () => store.touchSnapshot(),
+      onNotice: info => announceCliUpdate(ctx, info),
+      onInstalled: (cli, version) => cliUpdateInstalled(ctx, cli, version),
+      reopen: cli => ctx.orch.cliUpdateStatus?.(cli) ?? null });
+    ctx.cliUpdates = ownUpdates;
+    ownUpdates.start();
+  }
   // T(F6): 상태줄 기록과 Codex 세션 기록에서 CLI 가 보고한 사용량을 1분마다 모은다. 멈출 때 이 서버가 만든 것만 멈춘다.
   let ownUsage: UsageCollector | null = null;
   let ownLogins: CliLogins | null = null;
@@ -1865,6 +1951,8 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
       geminiMemberIds: store.listAllMembers().filter(member => activeProjects.has(member.projectId) && member.cli === "gemini").map(member => member.id),
       // D9 의 CLI 버전 캐시를 쓴다(실행 파일이 그대로면 --version 을 다시 부르지 않는다). 없으면(시험) 모른다.
       probes: { cliVersions: async () => (cliVersions ? await cliVersions.refresh() : null), ...ctx.doctorProbes },
+      // 0.2.11: 새 판이 있으면 그 CLI 줄에 '새 판 X'.
+      cliUpdates: (() => { try { return ctx.cliUpdates?.list() ?? null; } catch { return null; } })(),
     });
     return { facts, runtime };
   };
@@ -2222,6 +2310,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
         clearInterval(accessLogTimer);
         if (ownUsage) { ownUsage.stop(); if (ctx.usage === ownUsage) ctx.usage = undefined; }
         if (ownLogins) { await ownLogins.close().catch(() => undefined); if (ctx.cliLogins === ownLogins) ctx.cliLogins = undefined; }
+        if (ownUpdates) { await ownUpdates.stop(); if (ctx.cliUpdates === ownUpdates) ctx.cliUpdates = undefined; }
         unsubscribe();
         // Queue notice before the close frame, including legacy and lite realtime sockets.
         closedEpochSockets ||= sockets.size > 0;

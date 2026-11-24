@@ -317,7 +317,6 @@ export class CliUpdates {
   private readonly latest = new Map<string, Latest>();
   private readonly runs = new Map<CliProvider, CliUpdateRun>();
   private readonly active = new Map<CliProvider, Promise<void>>();
-  private readonly children = new Set<{ kill(signal?: number | NodeJS.Signals): void }>();
   private checking: Promise<CliUpdateInfo[]> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private pendingTimer: ReturnType<typeof setInterval> | null = null;
@@ -346,13 +345,15 @@ export class CliUpdates {
     schedule(firstDelayMs);
   }
 
+  /**
+   * 확인 타이머를 멈춘다. 도는 업데이트 명령은 끊지 않고 기다리지도 않는다: 서버를 다시 켜는 동안 brew·npm 을 중간에 죽이면
+   * 반쯤 깔린 판이 남는다(명령은 스스로 끝나고, 다음 서버가 판을 다시 읽는다).
+   */
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     if (this.pendingTimer) clearInterval(this.pendingTimer);
     this.timer = null; this.pendingTimer = null;
-    for (const child of this.children) { try { child.kill("SIGTERM"); } catch { /* 이미 끝났다 */ } }
-    await Promise.allSettled([...this.active.values()]);
   }
 
   private failedSources(): boolean { return [...this.latest.values()].some(entry => entry.failedAt !== null); }
@@ -547,7 +548,6 @@ export class CliUpdates {
       log.write(`# 실행하지 못했습니다: ${(error as Error).message}\n`);
       return { kind: "failed", code: "cli_update_spawn_failed" };
     }
-    this.children.add(child);
     let stopped: ErrorCode | null = null;
     const grace = this.options.killGraceMs ?? 2_000;
     const stop = (code: ErrorCode) => {
@@ -574,7 +574,7 @@ export class CliUpdates {
     const out = Promise.all([consume(child.stdout as ReadableStream<Uint8Array>), consume(child.stderr as ReadableStream<Uint8Array>)]).catch(() => undefined);
     let code: number | null = null;
     try { code = await child.exited; } catch { code = null; }
-    finally { clearTimeout(timer); this.children.delete(child); }
+    finally { clearTimeout(timer); }
     // 손주 프로세스가 출력 관을 쥐고 있으면 닫히지 않는다. 조금만 더 읽는다.
     await Promise.race([out, Bun.sleep(PIPE_DRAIN_MS)]);
     log.write(`\n# 종료 코드 ${code ?? "?"}\n`);

@@ -98,8 +98,10 @@ export interface ServerContext {
 export function announceCliUpdate(ctx: Pick<ServerContext, "store" | "push" | "orch">, info: CliUpdateInfo): void {
   if (!info.available || !isCliVersion(info.latest)) return;
   const name = CLI_INFO[info.cli].name;
-  let en = false;
-  try { en = ctx.store.getSettings().reportLanguage === "en"; } catch { en = false; }
+  let en = false, quiet = false;
+  try { const settings = ctx.store.getSettings(); en = settings.reportLanguage === "en"; quiet = settings.notifyCliUpdates === false; } catch { en = false; }
+  // 대표가 설정 › 알림에서 'AI 도구 새 판 알림'을 껐다. 그 판은 알린 것으로 친다(켜도 이 판을 뒤늦게 알리지 않는다). 점검표·업데이트는 그대로.
+  if (quiet) { console.info(`[cli-update] ${name} ${info.latest} 새 판 — 알림을 꺼 두어 알리지 않습니다`); return; }
   try {
     ctx.orch.notifyOperations?.(en ? `IAMCEO · New ${name} version` : `IAMCEO · ${name} 새 판`,
       en ? `${name} ${info.latest} update is available. Update it in Settings › AI models › Runtime.` : `${name} ${info.latest} 업데이트가 있습니다. 설정 › AI 모델 › 실행 환경에서 업데이트할 수 있습니다.`);
@@ -432,6 +434,8 @@ const SettingsSchema = z
     permissionAcknowledged: z.boolean(),
     // B1: 대표에게 쓰는 글의 언어. 서버 머리말([대표]·[총괄])은 언어와 상관없이 그대로다.
     reportLanguage: z.enum(REPORT_LANGUAGES),
+    // 0.2.11: AI 도구 새 판 알림(끄면 새 판 푸시·Mac 알림·앱 띠를 내지 않는다).
+    notifyCliUpdates: z.boolean(),
   })
   .partial()
   .strict();
@@ -522,7 +526,7 @@ function operationResponse(receipt: OperationReceipt): Response {
       const { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt } = receipt.result;
       result = { memberId, action, claimId, sessionGeneration, inputSequence, leaseId, expiresAt }; break;
     }
-    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "geminiRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged", "reportLanguage"]), revision: receipt.result.revision }; break;
+    case "settings": result = { settings: publicFields(receipt.result.settings, ["backend", "permissionMode", "ranks", "codexRanks", "geminiRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault", "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged", "reportLanguage", "notifyCliUpdates"]), revision: receipt.result.revision }; break;
     case "member_config": result = { member: receiptMember(receipt.result.member), configRevision: receipt.result.configRevision, sessionGeneration: receipt.result.sessionGeneration }; break;
     case "todo_done": result = { todo: publicFields(receipt.result.todo, ["id", "projectId", "memberId", "who", "title", "detail", "done", "doneAt", "createdAt", "outcome", "closeReason", "closedBy"]), revision: receipt.result.revision }; break;
   }

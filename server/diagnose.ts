@@ -94,7 +94,7 @@ function safeRows<T>(read: () => T, fallback: T): T {
 }
 
 const SETTINGS_KEYS = ["backend", "permissionMode", "ranks", "codexRanks", "geminiRanks", "maxConcurrentTurns", "compactAtPct", "contextWindowDefault",
-  "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged", "reportLanguage"];
+  "contextWindows", "maxAwakeWorkers", "notifyMac", "macScriptNotifications", "boardTidyHours", "permissionAcknowledged", "reportLanguage", "notifyCliUpdates"];
 
 function databaseSummary(db: Database): Record<string, unknown> {
   const all = (sql: string) => db.query<Record<string, unknown>, []>(sql).all();

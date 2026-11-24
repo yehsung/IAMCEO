@@ -156,6 +156,29 @@ import XCTest
         XCTAssertNil(CLIUpdateText.oneClickTarget([]))
     }
 
+    // MARK: 'AI 도구 새 판 알림' 칸(설정 › 알림, 서버 설정 notifyCliUpdates)
+
+    func testNotifySettingIsReadOnlyFromServersThatKnowIt() throws {
+        XCTAssertNil(try decode(Settings.self, "{}").notifyCliUpdates, "옛 서버는 이 칸을 보내지 않는다(칸을 그리지 않는다)")
+        XCTAssertEqual(try decode(Settings.self, #"{"notifyCliUpdates":false}"#).notifyCliUpdates, false)
+        XCTAssertEqual(try decode(Settings.self, #"{"notifyCliUpdates":"x","compactAtPct":60}"#).compactAtPct, 60, "틀린 형 하나로 설정 전체를 버리지 않는다")
+        // 옛 서버에 통째로 보내는 저장(PUT)에 그 서버가 모르는 칸이 실리지 않는다.
+        let encoded = String(decoding: try JSONEncoder().encode(Settings()), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("notifyCliUpdates"))
+        XCTAssertTrue(CLIUpdateNotify.enabled(nil))
+        XCTAssertTrue(CLIUpdateNotify.enabled(Settings()))
+        var off = Settings(); off.notifyCliUpdates = false
+        XCTAssertFalse(CLIUpdateNotify.enabled(off))
+    }
+
+    func testTurningNotificationsOffHidesTheStripButNotTheRow() {
+        let seen = CLIUpdateSeen(defaults: nil)
+        var off = Settings(); off.notifyCliUpdates = false
+        XCTAssertEqual(seen.strip(server: "s", [claude], settings: off), [], "꺼 두면 띠를 내지 않는다")
+        XCTAssertEqual(seen.strip(server: "s", [claude], settings: Settings()).map(\.cli), ["claude"])
+        XCTAssertTrue(claude.canStart, "점검표 줄의 업데이트 단추는 알림 칸과 상관없다")
+    }
+
     func testSeenVersionsAreNotShownAgain() {
         let seen = CLIUpdateSeen(defaults: nil)
         let codex = CLIUpdateInfo(cli: "codex", current: "0.166.0", latest: "0.172.0", available: true)
@@ -194,6 +217,11 @@ import XCTest
         // 서버가 스크립트 알림을 맡는 동안 본 판은 띄우지 않는다.
         let codex = CLIUpdateInfo(cli: "codex", current: "0.166.0", latest: "0.172.0", available: true)
         XCTAssertNil(service.noteCLIUpdates([codex], serverID: server, appOwnsNotifications: false))
+        XCTAssertEqual(delivery.notices.count, 1)
+        // 'AI 도구 새 판 알림'을 꺼 두면 앱이 알림을 맡아도 띄우지 않고, 그 판은 처리한 것으로 적는다(켜도 뒤늦게 띄우지 않는다).
+        let gemini = CLIUpdateInfo(cli: "gemini", current: "1.5.16", latest: "1.5.17", available: true)
+        XCTAssertNil(service.noteCLIUpdates([gemini], serverID: server, appOwnsNotifications: true, notify: false))
+        XCTAssertNil(service.noteCLIUpdates([gemini], serverID: server, appOwnsNotifications: true))
         XCTAssertEqual(delivery.notices.count, 1)
     }
     #endif

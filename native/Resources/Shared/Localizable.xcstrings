@@ -22664,6 +22664,39 @@
         }
       }
     },
+    "AI 도구" : {
+      "comment" : "0.2.11 설정 › 알림의 'AI 도구 새 판 알림' 묶음 제목",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AI tools"
+          }
+        }
+      }
+    },
+    "AI 도구 새 판 알림" : {
+      "comment" : "0.2.11 설정 › 알림의 켜고 끄는 칸(서버 설정 notifyCliUpdates)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "New AI tool versions"
+          }
+        }
+      }
+    },
+    "Claude Code·Codex·Antigravity CLI에 새 판이 나오면 iPhone 알림, Mac 알림, 앱 위쪽 띠로 알립니다. 꺼도 실행 환경의 새 판 표시와 업데이트 단추는 그대로 있습니다." : {
+      "comment" : "0.2.11 설정 › 알림의 'AI 도구 새 판 알림' 설명",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When a new version of Claude Code, Codex or the Antigravity CLI comes out, tells you with an iPhone notification, a Mac notification and a strip at the top of the app. Turning it off keeps the new-version note and the Update button in Runtime."
+          }
+        }
+      }
+    },
     "server.text.chat.member_error" : {
       "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
       "localizations" : {

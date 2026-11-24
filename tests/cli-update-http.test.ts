@@ -14,7 +14,7 @@ import { Orchestrator } from "../server/orchestrator.ts";
 import { PushStore } from "../server/push/store.ts";
 import { Store } from "../server/store.ts";
 import { DEFAULT_PUSH_BUNDLE_ID } from "../shared/push.ts";
-import type { Bootstrap, CliProvider, CliUpdateInfo, CliUpdateRun, CliUpdatesResponse, DoctorReport, SyncSnapshot } from "../shared/types.ts";
+import type { Bootstrap, CliProvider, CliUpdateInfo, CliUpdateRun, CliUpdatesResponse, DoctorReport, Settings, SyncSnapshot } from "../shared/types.ts";
 
 const cleanups: (() => Promise<unknown> | unknown)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -144,5 +144,38 @@ describe("알림과 적용 잇기", () => {
     await cliUpdateInstalled(installedCtx as unknown as ServerContext, "codex", "0.172.0");
     expect(applied).toEqual(["codex"]);
     expect(push.listDeliveries(events[0]!.id).map(d => d.state)).toEqual(["cancelled"]);
+  });
+});
+
+describe("AI 도구 새 판 알림 칸(설정 › 알림, 서버 설정, 기본 켬)", () => {
+  test("설정에 늘 실리고(앱이 이 서버가 안다고 안다) 기본은 켬. PUT 으로 끄고 켠다. 형이 틀리면 400", async () => {
+    const { call } = await boot();
+    expect((await call<Bootstrap>("/api/bootstrap")).body.settings.notifyCliUpdates).toBe(true);
+    const off = await call<Settings>("/api/settings", { method: "PUT", body: JSON.stringify({ notifyCliUpdates: false }) });
+    expect(off.status).toBe(200);
+    expect(off.body.notifyCliUpdates).toBe(false);
+    expect((await call<SyncSnapshot>("/api/sync")).body.bootstrap.settings.notifyCliUpdates).toBe(false);
+    expect((await call("/api/settings", { method: "PUT", body: JSON.stringify({ notifyCliUpdates: "no" }) })).status).toBe(400);
+    // 설정을 통째로 돌려보내는 옛 앱(이 칸을 모른다)의 저장은 이 칸을 바꾸지 않는다.
+    expect((await call<Settings>("/api/settings", { method: "PUT", body: JSON.stringify({ notifyMac: true }) })).body.notifyCliUpdates).toBe(false);
+  });
+  test("꺼 두면 새 판의 iPhone 푸시와 Mac 알림을 내지 않는다(점검표·업데이트 단추에 쓰는 cliUpdates 는 그대로)", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-cli-update-quiet-")));
+    const store = new Store(openDb(join(home, "db.sqlite")), new Bus());
+    cleanups.push(() => store.db.close());
+    const providers = () => [{ environment: "sandbox" as const, bundleId: DEFAULT_PUSH_BUNDLE_ID, state: "ready" as const, lastError: null }];
+    const push = new PushStore(store.db, { providers });
+    const device = push.registerDevice(randomUUID(), { expectedRevision: null, platform: "ios", bundleId: DEFAULT_PUSH_BUNDLE_ID, environment: "sandbox", deviceToken: "ab", authorization: "authorized" });
+    push.patchDevice(device.id, { expectedRevision: device.revision, enabled: true });
+    const notes: [string, string][] = [];
+    const ctx = { store, push: { store: push, providers }, orch: { notifyOperations: (title: string, body: string) => { notes.push([title, body]); return true; } } };
+    store.patchSettings({ notifyCliUpdates: false });
+    announceCliUpdate(ctx as unknown as ServerContext, CODEX);
+    expect(push.listEvents().filter(e => e.kind === "cli_update")).toEqual([]);
+    expect(notes).toEqual([]);
+    store.patchSettings({ notifyCliUpdates: true });
+    announceCliUpdate(ctx as unknown as ServerContext, CODEX);
+    expect(push.listEvents().filter(e => e.kind === "cli_update")).toHaveLength(1);
+    expect(notes).toHaveLength(1);
   });
 });

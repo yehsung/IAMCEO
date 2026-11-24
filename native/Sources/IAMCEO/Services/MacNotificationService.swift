@@ -296,9 +296,10 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
 
     /// 0.2.11: CLI 새 판. 서버는 스크립트 알림을 맡는 동안(macScriptNotifications 가 false 가 아님) 자기 알림을 낸다. 이 앱이 Mac 알림을
     /// 맡으면 같은 글을 여기서 판마다 한 번 띄운다. 맡지 않는 동안 본 판은 처리한 것으로 적어, 나중에 맡아도 옛 판을 다시 알리지 않는다.
+    /// notify: 설정 › 알림의 'AI 도구 새 판 알림'(꺼 두면 띄우지 않고, 그 판은 처리한 것으로 적는다).
     @discardableResult
-    func noteCLIUpdates(_ updates: [CLIUpdateInfo]?, serverID: String, appOwnsNotifications: Bool) -> Task<Void, Never>? {
-        let fresh = cliUpdateNotices.take(updates, serverID: serverID, appOwnsNotifications: enabled && appOwnsNotifications)
+    func noteCLIUpdates(_ updates: [CLIUpdateInfo]?, serverID: String, appOwnsNotifications: Bool, notify: Bool = true) -> Task<Void, Never>? {
+        let fresh = cliUpdateNotices.take(updates, serverID: serverID, appOwnsNotifications: enabled && appOwnsNotifications && notify)
         guard !fresh.isEmpty else { return nil }
         return Task { [weak self] in
             guard let self else { return }
@@ -326,7 +327,8 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
             // 0.2.11: 서버의 말이 지금 것일 때만(연결됨) 본다. 다른 Mac 의 서버는 그 Mac 의 앱이 알린다.
             if store.serverIsThisMac, store.connectionStatus == .connected, !store.showsOffline, !store.isRestarting {
                 noteCLIUpdates(store.bootstrap?.cliUpdates, serverID: serverID,
-                               appOwnsNotifications: store.bootstrap?.settings.macScriptNotifications == false)
+                               appOwnsNotifications: store.bootstrap?.settings.macScriptNotifications == false,
+                               notify: CLIUpdateNotify.enabled(store.bootstrap?.settings))
             }
         }
         let badgeSignature = store.projects.map { "\($0.id):\($0.needsCount ?? -1):\($0.inboxCount):\($0.blockedCount)" }.joined(separator: ",")

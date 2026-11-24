@@ -610,6 +610,9 @@ struct Settings: Codable, Sendable, Equatable {
     var permissionAcknowledged: Bool? = nil
     /// Language the lead and staff write to the owner in ("ko" | "en"). nil from older servers: the row is hidden there.
     var reportLanguage: String? = nil
+    /// 0.2.11: AI 도구(CLI) 새 판 알림(설정 › 알림). 끄면 새 판의 iPhone 푸시·Mac 알림·앱 띠를 내지 않는다. nil 이면 이 칸을 모르는 옛 서버다:
+    /// 칸을 그리지 않고, nil 을 그대로 두어 그 서버에 보내는 저장(PUT)에 실리지 않게 한다.
+    var notifyCliUpdates: Bool? = nil
 }
 extension Settings {
     init(from decoder: Decoder) throws {
@@ -629,6 +632,7 @@ extension Settings {
         contextWindows = try c.decodeIfPresent([String: Int].self, forKey: ModelKey("contextWindows"))
         permissionAcknowledged = c.lenient(Bool.self, forKey: ModelKey("permissionAcknowledged"))
         reportLanguage = c.lenient(String.self, forKey: ModelKey("reportLanguage"))
+        notifyCliUpdates = c.lenient(Bool.self, forKey: ModelKey("notifyCliUpdates"))
     }
 
     /// Gemini 직급표를 다른 CLI 의 표와 같은 모양으로(RankSettingsCLI.ranksKeyPath). 없으면 빈 표(전부 CLI 기본값)로 읽는다.

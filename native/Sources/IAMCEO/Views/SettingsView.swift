@@ -1171,7 +1171,7 @@ struct SettingsView: View {
         switch section {
         case .general: return Self.generalEdited(draft, base)
         case .ai: return RankSettingsEditing.signature(draft) != RankSettingsEditing.signature(base) || pendingEmptyCustom
-        case .notifications: return draft.notifyMac != base.notifyMac || macAlerts != baseMacAlerts
+        case .notifications: return draft.notifyMac != base.notifyMac || draft.notifyCliUpdates != base.notifyCliUpdates || macAlerts != baseMacAlerts
         case .connection: return false
         }
     }
@@ -1911,6 +1911,22 @@ struct SettingsView: View {
             macNotifyGroup
             PushSettingsView()
             #endif
+            cliUpdateNotifyGroup
+        }
+    }
+
+    /// 0.2.11: 'AI 도구 새 판 알림'(서버 설정이라 이 서버에 붙은 모든 기기에 같다). 이 칸을 모르는 옛 서버(nil)에서는 그리지 않는다.
+    @ViewBuilder private var cliUpdateNotifyGroup: some View {
+        if draft.notifyCliUpdates != nil {
+            SettingsGroup(String(localized: "AI 도구")) {
+                SettingsRow(String(localized: "AI 도구 새 판 알림"),
+                            hint: String(localized: "Claude Code·Codex·Antigravity CLI에 새 판이 나오면 iPhone 알림, Mac 알림, 앱 위쪽 띠로 알립니다. 꺼도 실행 환경의 새 판 표시와 업데이트 단추는 그대로 있습니다.")) {
+                    Toggle("AI 도구 새 판 알림", isOn: Binding(get: { draft.notifyCliUpdates ?? true },
+                                                          set: { draft.notifyCliUpdates = $0 }))
+                        .labelsHidden().settingsSwitch()
+                }
+            }
+            .disabled(!editable || saving)
         }
     }
 
@@ -2174,6 +2190,8 @@ struct SettingsView: View {
         if mine.compactAtPct != previous.compactAtPct { next.compactAtPct = mine.compactAtPct }
         if mine.maxAwakeWorkers != previous.maxAwakeWorkers { next.maxAwakeWorkers = mine.maxAwakeWorkers }
         if mine.notifyMac != previous.notifyMac { next.notifyMac = mine.notifyMac }
+        // 0.2.11: 새 서버만 이 칸을 안다(옛 서버의 값은 nil 이라 고칠 것이 없다).
+        if mine.notifyCliUpdates != previous.notifyCliUpdates, next.notifyCliUpdates != nil { next.notifyCliUpdates = mine.notifyCliUpdates }
         if mine.boardTidyHours != previous.boardTidyHours { next.boardTidyHours = mine.boardTidyHours }
         if mine.reportLanguage != previous.reportLanguage { next.reportLanguage = mine.reportLanguage }
         next = RankSettingsEditing.rebase(previous: previous, mine: mine, onto: next)
@@ -2298,7 +2316,8 @@ struct SettingsView: View {
     /// Compares only what this screen edits, with model names normalized the way they are saved.
     /// B1: the report language is part of it, so changing only the language can be saved and another device's change shows up here.
     static func signature(_ settings: Settings) -> String {
-        var parts = [settings.permissionMode, "\(settings.maxConcurrentTurns)", "\(settings.compactAtPct)", "\(settings.maxAwakeWorkers)", "\(settings.notifyMac)", "\(Int(settings.boardTidyHours.rounded()))", settings.reportLanguage ?? ""]
+        var parts = [settings.permissionMode, "\(settings.maxConcurrentTurns)", "\(settings.compactAtPct)", "\(settings.maxAwakeWorkers)", "\(settings.notifyMac)", "\(Int(settings.boardTidyHours.rounded()))", settings.reportLanguage ?? "",
+                     settings.notifyCliUpdates.map { "\($0)" } ?? ""]
         parts += RankSettingsEditing.signature(settings)
         return parts.joined(separator: "|")
     }

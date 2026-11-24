@@ -258,6 +258,14 @@ enum CLIUpdateMerge {
     }
 }
 
+// MARK: - 알림 칸
+
+/// 설정 › 알림의 'AI 도구 새 판 알림'(서버 설정 notifyCliUpdates, 기본 켬). 끄면 띠·Mac 알림을 내지 않는다(서버는 푸시를 내지 않는다).
+/// 점검표 줄의 새 판 표시와 '업데이트' 단추는 이 칸과 상관없다.
+enum CLIUpdateNotify {
+    static func enabled(_ settings: Settings?) -> Bool { settings?.notifyCliUpdates != false }
+}
+
 // MARK: - Seen (이 기기에서 본 새 판)
 
 /// 상태 띠의 '보기'를 누른 판. 서버·CLI·판마다 한 번 보면 다시 띄우지 않는다. 저장소를 못 쓰면 이번 실행 동안만 기억한다.
@@ -288,6 +296,11 @@ enum CLIUpdateMerge {
     /// 띠에 보일 새 판들(이 기기에서 아직 보지 않은 것).
     func unseen(server: String, _ updates: [CLIUpdateInfo]?) -> [CLIUpdateInfo] {
         (updates ?? []).filter { $0.announces && !contains(server: server, info: $0) }
+    }
+
+    /// 앱 위쪽 띠에 실을 새 판들. 'AI 도구 새 판 알림'을 꺼 두었으면 없다.
+    func strip(server: String, _ updates: [CLIUpdateInfo]?, settings: Settings?) -> [CLIUpdateInfo] {
+        CLIUpdateNotify.enabled(settings) ? unseen(server: server, updates) : []
     }
 }
 

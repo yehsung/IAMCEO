@@ -131,8 +131,9 @@ struct ChatMineRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // 작업대 (flat): my message is a full-width block like the report lines, not a bubble on the right.
-            Spacer(minLength: CE.style.bubble == .flat ? 0 : isMac ? 96 : 40)
+            // 작업대 (flat): my message is a full-width block at the leading edge like the report lines, not a bubble on
+            // the right.
+            if CE.style.bubble != .flat { Spacer(minLength: isMac ? 96 : 40) }
             VStack(alignment: .trailing, spacing: 4) {
                 bubble
                 footer
@@ -168,7 +169,7 @@ struct ChatMineRow: View {
         }
         .foregroundStyle(CE.palette.onOwnerBubble)
         .tint(ChatPalette.bubbleLink)
-        .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, 11)
+        .padding(.horizontal, CESpace.scaled(15)).padding(.top, CESpace.scaled(10)).padding(.bottom, CESpace.scaled(11))
         .frame(maxWidth: CE.style.bubble == .flat ? .infinity : nil, alignment: .leading)
         .background(ChatPalette.bubble, in: shape)
         .overlay { ChatOwnerBubbleEdge(shape: shape) }
@@ -367,7 +368,7 @@ struct ChatReportRow: View {
                 }
                 jumps
             }
-            .padding(.top, 13).padding(.horizontal, 16).padding(.bottom, 14)
+            .padding(.top, CESpace.scaled(13)).padding(.horizontal, CESpace.scaled(16)).padding(.bottom, CESpace.scaled(14))
             .frame(maxWidth: .infinity, alignment: .leading)
             .environment(\.ceInsideGlass, true)
             .modifier(ChatCardSurface())
@@ -711,7 +712,7 @@ private struct ChatConversation: View {
                     let replies = replyMessageIDs
                     ForEach(chatThreadRows(displayed)) { row in
                         switch row {
-                        case .day(_, let label, let gap): ChatDaySeparator(label: label).padding(.top, gap)
+                        case .day(_, let label, let gap): ChatDaySeparator(label: label).padding(.top, CESpace.scaled(gap))
                         case .message(let message, let gap):
                             ChatMessageRow(message: message, isLatestProblem: scope.unresolvedIDs.contains(message.id), showsTarget: scope.isProjectThread,
                                            hidesWaits: replies.contains(message.id))
@@ -723,7 +724,8 @@ private struct ChatConversation: View {
                                 }
                                 .chatScrollRow(id: row.id, coordinateSpace: scopeID)
                                 .id(row.id)
-                                .padding(.top, gap)
+                                // Roomier themes (말랑, 또렷) widen the gaps; never under the web's 10.
+                                .padding(.top, CESpace.scaled(gap))
                         }
                     }
                     if !replies.isEmpty {

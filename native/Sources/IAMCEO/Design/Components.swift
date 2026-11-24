@@ -410,7 +410,8 @@ struct StatusDot: View {
     }
 
     static func pulses(pulsing: Bool, reduceMotion: Bool, tabVisible: Bool) -> Bool {
-        pulsing && !reduceMotion && tabVisible
+        // The bar themes (작업대, 또렷) mark work with the bar itself: no round pulse around it.
+        pulsing && !reduceMotion && tabVisible && CE.style.statusShape != .bar
     }
 }
 

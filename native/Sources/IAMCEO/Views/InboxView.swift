@@ -1677,9 +1677,9 @@ private struct InboxSegmentItem: View {
             .frame(maxWidth: stretch ? .infinity : nil, minHeight: isMac ? 40 : 44)
             .background {
                 if selected {
-                    CECapsule().fill(CE.violet.opacity(0.42))
-                        .overlay { CECapsule().strokeBorder(CE.violet.opacity(0.9)) }
-                        .shadow(color: CE.violet.opacity(0.45), radius: 10, y: 2)
+                    CECapsule().fill(CE.violet.opacity(CE.isStandard || CE.style.dark ? 0.42 : 0.16))
+                        .overlay { CECapsule().strokeBorder(CE.violet.opacity(0.9), lineWidth: CE.borderWidth) }
+                        .shadow(color: CE.isStandard ? CE.violet.opacity(0.45) : .clear, radius: 10, y: 2)
                         .matchedGeometryEffect(id: "drop", in: drop)
                 }
             }

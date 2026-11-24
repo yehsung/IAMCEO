@@ -3007,7 +3007,9 @@ private struct ThemePickerGrid: View {
     let store: ThemeStore
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: isMac ? 104 : 96), spacing: 10, alignment: .top)], alignment: .leading, spacing: 10) {
+        // Mac: the five in one row. iPhone: three and two.
+        LazyVGrid(columns: isMac ? Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: ThemeID.allCases.count)
+                                 : [GridItem(.adaptive(minimum: 96), spacing: 10, alignment: .top)], alignment: .leading, spacing: 10) {
             ForEach(ThemeID.allCases) { id in tile(id) }
         }
         .padding(.bottom, 2)
@@ -3026,8 +3028,9 @@ private struct ThemePickerGrid: View {
                     Text(id.title)
                         .font(CEFont.meta.weight(selected ? .semibold : .medium))
                         .foregroundStyle(selected ? CE.ink : CE.ink2)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
+                        // Never shrunk under the meta size: a long English name takes a second line instead.
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     if selected {
                         Image(systemName: "checkmark").font(.ceSystem(size: 11, weight: .bold)).foregroundStyle(CE.accent)

@@ -865,6 +865,8 @@ struct IOSComposerTextView: UIViewRepresentable {
     let textRevision: () -> Int
     var drafts: DraftStore? = nil
     var draftKey: String? = nil
+    /// The theme on screen when this was made (read in the parent's body): a new theme updates the text colours.
+    var themeKey = CE.style.key
 
     /// Web .cmp__input: 15px text with 22pt lines (4pt extra leading).
     static func attributes(_ font: UIFont?) -> [NSAttributedString.Key: Any] {
@@ -897,6 +899,12 @@ struct IOSComposerTextView: UIViewRepresentable {
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.connect(view)
+        if context.coordinator.themeKey != themeKey {
+            context.coordinator.themeKey = themeKey
+            view.textColor = UIColor(CE.ink)
+            view.tintColor = UIColor(CE.accent)
+            view.typingAttributes = Self.attributes(view.font)
+        }
         view.isEditable = context.environment.isEnabled
         view.isSelectable = context.environment.isEnabled
         view.accessibilityLabel = placeholder
@@ -920,6 +928,8 @@ struct IOSComposerTextView: UIViewRepresentable {
     @MainActor final class Coordinator: NSObject, UITextViewDelegate {
         let editorID = UUID()
         var parent: IOSComposerTextView
+        /// The theme the editor's colours were last set for (makeUIView sets the first).
+        var themeKey = CE.style.key
         private var lastRevision: Int?
         private var lastObservedText: String?
         init(_ parent: IOSComposerTextView) { self.parent = parent }

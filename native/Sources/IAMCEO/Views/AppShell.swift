@@ -216,6 +216,15 @@ struct AppShell: View {
                 if sheet.hasPrefix("terminal:") { router.terminalMemberID = String(sheet.dropFirst("terminal:".count)) }
             }
         }
+        // Review hook (0.2.11, sample only): `--theme-switch <theme id>:<light|dark>` changes the theme 4 s after launch
+        // without saving it, so a screenshot shows the screens redrawn in place (no relaunch).
+        .task {
+            guard store.isDemo, let value = LaunchOptions.value(after: "--theme-switch") else { return }
+            let parts = value.split(separator: ":").map(String.init)
+            guard let id = parts.first.flatMap(ThemeID.init(rawValue:)) else { return }
+            try? await Task.sleep(for: .seconds(4))
+            ThemeStore.shared.preview(id, dark: parts.count < 2 || parts[1] != "light")
+        }
         // Review hook (0.2.6): `--send <text>` [`--send-delay <seconds>`, default 2] writes <text> into the open chat's
         // composer and sends it the way the send button does, so screenshots can catch the reply line after a send.
         .task {

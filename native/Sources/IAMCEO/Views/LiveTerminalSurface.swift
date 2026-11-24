@@ -290,7 +290,7 @@ final class TerminalSurfaceHost: NSScrollView {
         drawsBackground = true; backgroundColor = NSColor(red: 11/255, green: 9/255, blue: 24/255, alpha: 1)
         hasVerticalScroller = true; hasHorizontalScroller = true; autohidesScrollers = true
         terminal.nativeBackgroundColor = backgroundColor
-        terminal.nativeForegroundColor = NSColor(CE.ink); terminal.caretColor = NSColor(CE.accent)
+        terminal.nativeForegroundColor = NSColor(TerminalColors.ink); terminal.caretColor = NSColor(TerminalColors.caret)
         terminal.terminalDelegate = coordinator; terminal.surface = self
         canvas.wantsLayer = true
         canvas.addSubview(terminal); documentView = canvas
@@ -577,7 +577,7 @@ final class TerminalSurfaceHost: UIScrollView, UIScrollViewDelegate {
         super.init(frame: frame)
         backgroundColor = UIColor(red: 11/255, green: 9/255, blue: 24/255, alpha: 1)
         terminal.nativeBackgroundColor = backgroundColor!
-        terminal.nativeForegroundColor = UIColor(CE.ink); terminal.caretColor = UIColor(CE.accent)
+        terminal.nativeForegroundColor = UIColor(TerminalColors.ink); terminal.caretColor = UIColor(TerminalColors.caret)
         terminal.terminalDelegate = coordinator; terminal.surface = self
         // The app's key bar (separate chips, dark) instead of SwiftTerm's plain grey default.
         inputAccessory = TerminalKeyBar(terminal: terminal)

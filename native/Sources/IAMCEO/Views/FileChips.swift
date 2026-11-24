@@ -86,13 +86,13 @@ struct LinkChip: View {
                 if let dot {
                     StatusDot(tone: dot, size: 7)
                 } else if let icon {
-                    Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(CE.ink3)
+                    Image(systemName: icon).font(.ceSystem(size: 11, weight: .semibold)).foregroundStyle(CE.ink3)
                 }
                 Text(label).foregroundStyle(highlighted ? CE.accent : CE.ink2)
                 Text(shortTitle).foregroundStyle(CE.ink).lineLimit(1)
-                Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(CE.ink3)
+                Image(systemName: "chevron.right").font(.ceSystem(size: 9, weight: .bold)).foregroundStyle(CE.ink3)
             }
-            .font(isMac ? .system(size: 13, weight: .medium) : CEFont.secondary.weight(.medium))
+            .font(isMac ? .ceSystem(size: 13, weight: .medium) : CEFont.secondary.weight(.medium))
             .padding(.horizontal, 12)
         }
         // Same family as the filter chips and viewer buttons on this screen: 30 tall, lightens on hover.
@@ -121,8 +121,8 @@ struct LinkChipStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .frame(height: isMac ? 30 : 34)
-                .background(fill, in: Capsule())
-                .overlay { Capsule().strokeBorder(highlighted ? CE.violet.opacity(0.55) : CE.line) }
+                .background(fill, in: CECapsule())
+                .overlay { CECapsule().strokeBorder(highlighted ? CE.violet.opacity(0.55) : CE.line) }
                 .padding(.vertical, isMac ? 0 : 5)
                 .contentShape(Rectangle())
                 .onHover { hovering = $0 }
@@ -130,7 +130,7 @@ struct LinkChipStyle: ButtonStyle {
         }
         private var fill: Color {
             if highlighted { return CE.violet.opacity(configuration.isPressed ? 0.42 : hovering ? 0.36 : 0.28) }
-            return Color.white.opacity(configuration.isPressed ? 0.13 : hovering ? 0.10 : 0.05)
+            return CE.wash.opacity(configuration.isPressed ? 0.13 : hovering ? 0.10 : 0.05)
         }
     }
 }
@@ -147,6 +147,6 @@ struct ViewedFileContextChip: View {
                 .buttonStyle(.plain).accessibilityLabel("보던 자료 빼기")
         }
         .font(CEFont.meta).foregroundStyle(CE.ink2).padding(.horizontal, 8).padding(.vertical, 5)
-        .background(CE.accent.opacity(0.1), in: Capsule())
+        .background(CE.accent.opacity(0.1), in: CECapsule())
     }
 }

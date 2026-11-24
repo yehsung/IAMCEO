@@ -292,7 +292,7 @@ struct PushSettingsView: View {
         Button { withAnimation(.snappy(duration: 0.22)) { showDetails.toggle() } } label: {
             HStack(spacing: 4) {
                 Text("자세히")
-                Image(systemName: showDetails ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .bold))
+                Image(systemName: showDetails ? "chevron.up" : "chevron.down").font(.ceSystem(size: 9, weight: .bold))
             }
         }
         .ceGhostButton()
@@ -324,7 +324,7 @@ struct PushSettingsView: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
+        .background(CE.wash.opacity(0.035), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
     }
 
@@ -516,7 +516,7 @@ private struct PushDeviceRow: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
-            Image(systemName: "iphone").font(.system(size: 16)).foregroundStyle(CE.ink2).frame(width: 20)
+            Image(systemName: "iphone").font(.ceSystem(size: 16)).foregroundStyle(CE.ink2).frame(width: 20)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -541,7 +541,7 @@ private struct PushDeviceRow: View {
                 Divider()
                 Button("알림 등록 해지…", role: .destructive) { confirmRevoke = true }.disabled(!enabled)
             } label: {
-                Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold)).foregroundStyle(CE.ink2)
+                Image(systemName: "ellipsis").font(.ceSystem(size: 13, weight: .semibold)).foregroundStyle(CE.ink2)
                     .frame(width: 28, height: 28)
                     .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
                     .contentShape(Rectangle())

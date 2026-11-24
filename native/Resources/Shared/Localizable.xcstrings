@@ -1,6 +1,149 @@
 {
   "sourceLanguage" : "ko",
   "strings" : {
+    "서리 유리" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Frosted Glass"
+          }
+        }
+      }
+    },
+    "작업대" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Workbench"
+          }
+        }
+      }
+    },
+    "말랑" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Marshmallow"
+          }
+        }
+      }
+    },
+    "또렷" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "High Contrast"
+          }
+        }
+      }
+    },
+    "테마" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Theme"
+          }
+        }
+      }
+    },
+    "밝기" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Brightness"
+          }
+        }
+      }
+    },
+    "테마 기본" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Theme default"
+          }
+        }
+      }
+    },
+    "시스템 따라가기" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Match system"
+          }
+        }
+      }
+    },
+    "밝게" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Light"
+          }
+        }
+      }
+    },
+    "어둡게" : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dark"
+          }
+        }
+      }
+    },
+    "이 기기에만 저장되고 바로 바뀝니다." : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Saved on this device only and applied right away."
+          }
+        }
+      }
+    },
+    "기본 테마는 어두운 화면만 있어 밝기를 바꿀 수 없습니다." : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Default theme comes in dark only, so its brightness can't be changed."
+          }
+        }
+      }
+    },
+    "테마마다 정해진 밝기로 엽니다." : {
+      "comment" : "0.2.11 기기별 화면 테마(설정 › 일반 › 이 기기)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Each theme opens in its own brightness."
+          }
+        }
+      }
+    },
     "로그인·첫 설정 필요" : {
       "comment" : "0.2.10 Gemini(Antigravity CLI) 지원. 로그인·첫 설정에서 막힌 팀장의 안내",
       "localizations" : {

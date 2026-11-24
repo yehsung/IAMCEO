@@ -466,7 +466,7 @@ struct CLILoginSheet: View {
                 .padding(.horizontal, 12)
                 .frame(minHeight: 44)
                 .background(CE.bgDeep.opacity(0.5), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(codeFocused ? CE.accent.opacity(0.85) : Color.white.opacity(0.12)) }
+                .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(codeFocused ? CE.accent.opacity(0.85) : CE.wash.opacity(0.12)) }
                 .disabled(working)
                 .accessibilityLabel(String(localized: "로그인 코드"))
             #if os(iOS)
@@ -492,7 +492,7 @@ struct CLILoginSheet: View {
         if let userCode = login.userCode {
             HStack(spacing: 12) {
                 Text(userCode)
-                    .font(.system(size: isMac ? 26 : 24, weight: .semibold, design: .monospaced))
+                    .font(.ceSystem(size: isMac ? 26 : 24, weight: .semibold, design: .monospaced))
                     .tracking(2)
                     .foregroundStyle(CE.ink)
                     .textSelection(.enabled)
@@ -543,7 +543,7 @@ struct CLILoginSheet: View {
         if awaitingConfirm {
             Button { confirmed = true; Task { await begin(restart: false) } } label: {
                 HStack(spacing: 6) {
-                    if working { ProgressView().controlSize(.small).tint(.white) }
+                    if working { ProgressView().controlSize(.small).tint(CE.onAccent) }
                     Text(String(localized: "로그인 시작"))
                 }
             }
@@ -560,7 +560,7 @@ struct CLILoginSheet: View {
         } else if let login, !login.active {
             Button { Task { await begin(restart: true) } } label: {
                 HStack(spacing: 6) {
-                    if working { ProgressView().controlSize(.small).tint(.white) }
+                    if working { ProgressView().controlSize(.small).tint(CE.onAccent) }
                     Text(String(localized: "처음부터 다시"))
                 }
             }
@@ -568,7 +568,7 @@ struct CLILoginSheet: View {
         } else if let login, login.phase == "waiting", login.pastesCode {
             Button { Task { await submit() } } label: {
                 HStack(spacing: 6) {
-                    if working { ProgressView().controlSize(.small).tint(.white) }
+                    if working { ProgressView().controlSize(.small).tint(CE.onAccent) }
                     Text(String(localized: "로그인 마치기"))
                 }
             }

@@ -85,7 +85,7 @@ struct ArchiveLibraryView: View {
     /// One archived project: name and folder open its read-only record (hover-lit like a list row); 꺼내기 sits in sight
     /// at the right (web .st-pj: name 14.5/620, folder in code 12.5 ink-2, a visible 꺼내기), 이름 바꾸기 in the ⋯ menu.
     private func row(_ project: Project) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous)
         let canManage = !(store.isDemo || store.connectionStatus != .connected || store.isRevalidating)
         return HStack(alignment: .center, spacing: 8) {
             Button {
@@ -96,7 +96,7 @@ struct ArchiveLibraryView: View {
                 }
             } label: {
                 HStack(spacing: 11) {
-                    Image(systemName: "archivebox").font(.system(size: 14, weight: .medium)).foregroundStyle(CE.ink2).frame(width: 20)
+                    Image(systemName: "archivebox").font(.ceSystem(size: 14, weight: .medium)).foregroundStyle(CE.ink2).frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(project.name).font(CEFont.rowTitle).foregroundStyle(CE.ink).lineLimit(1)
                         Text(project.cwd).font(CEFont.mono).foregroundStyle(CE.ink2)
@@ -109,7 +109,7 @@ struct ArchiveLibraryView: View {
                 .padding(.horizontal, 10).padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(RowButtonStyle(radius: 10))
+            .buttonStyle(RowButtonStyle(radius: CERadius.r(10)))
             .help("기록 읽기")
             .accessibilityLabel("\(project.name) 기록 읽기")
             Button("꺼내기") { management = ProjectManagementSelection(projectID: project.id, mode: .restore) }
@@ -133,7 +133,7 @@ struct ArchiveLibraryView: View {
             } label: {
                 Group {
                     if exporting == project.id || deleting == project.id { ProgressView().controlSize(.small) }
-                    else { Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold)).foregroundStyle(canManage ? CE.ink2 : CE.ink3) }
+                    else { Image(systemName: "ellipsis").font(.ceSystem(size: 13, weight: .semibold)).foregroundStyle(canManage ? CE.ink2 : CE.ink3) }
                 }
                     .frame(width: 30, height: 30)
                     .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
@@ -145,8 +145,8 @@ struct ArchiveLibraryView: View {
             .accessibilityLabel("\(project.name) 관리")
         }
         .padding(.leading, 4).padding(.trailing, 8).padding(.vertical, 4)
-        .background(Color.white.opacity(0.04), in: shape)
-        .overlay { shape.strokeBorder(Color.white.opacity(0.09)) }
+        .background(CE.wash.opacity(0.04), in: shape)
+        .overlay { shape.strokeBorder(CE.wash.opacity(0.09)) }
     }
 }
 
@@ -176,19 +176,19 @@ struct EmptyTile<Actions: View>: View {
             if loading {
                 ProgressView().controlSize(.small).frame(height: 26)
             } else if let icon {
-                Image(systemName: icon).font(.system(size: 22, weight: .regular)).foregroundStyle(CE.ink3)
+                Image(systemName: icon).font(.ceSystem(size: 22, weight: .regular)).foregroundStyle(CE.ink3)
                     .frame(height: 26)
                     .accessibilityHidden(true)
             }
             // web .empty: title 16/600 ink-1, body 14 ink-2 at 1.55, generous room.
             Text(title)
-                .font(loading ? .system(size: 14) : .system(size: 16, weight: .semibold))
+                .font(loading ? .ceSystem(size: 14) : .ceSystem(size: 16, weight: .semibold))
                 .tracking(loading ? 0 : -0.16)
                 .foregroundStyle(loading ? CE.ink2 : CE.ink)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             if let detail, !detail.isEmpty {
-                Text(detail).font(.system(size: 14)).foregroundStyle(CE.ink2).lineSpacing(CELeading.spacing(14, 1.55))
+                Text(detail).font(.ceSystem(size: 14)).foregroundStyle(CE.ink2).lineSpacing(CELeading.spacing(14, 1.55))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 440)
                     .fixedSize(horizontal: false, vertical: true)
@@ -199,7 +199,7 @@ struct EmptyTile<Actions: View>: View {
         }
         .padding(.horizontal, 24).padding(.vertical, isMac ? 40 : 32)
         .frame(maxWidth: .infinity)
-        .background(tile ? Color.white.opacity(0.03) : .clear, in: shape)
+        .background(tile ? CE.wash.opacity(0.03) : .clear, in: shape)
         .overlay { if tile { shape.strokeBorder(CE.line, style: StrokeStyle(lineWidth: 1, dash: [4, 4])) } }
         .accessibilityElement(children: .contain)
     }

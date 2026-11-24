@@ -50,7 +50,7 @@ struct FolderPickerView: View {
                             if let listing {
                                 if listing.entries.isEmpty && !loading && !newFolder {
                                     VStack(spacing: 6) {
-                                        Image(systemName: "folder").font(.system(size: 22)).foregroundStyle(CE.ink3)
+                                        Image(systemName: "folder").font(.ceSystem(size: 22)).foregroundStyle(CE.ink3)
                                             .frame(height: 26)
                                             .accessibilityHidden(true)
                                         Text("하위 폴더가 없습니다").font(CEFont.rowTitle).foregroundStyle(CE.ink2)
@@ -62,13 +62,13 @@ struct FolderPickerView: View {
                                     let folder = row.folder
                                     Button { Task { await navigate(folder.path) } } label: {
                                         HStack(spacing: 11) {
-                                            Image(systemName: "folder.fill").font(.system(size: 14)).foregroundStyle(CE.accent.opacity(0.85))
+                                            Image(systemName: "folder.fill").font(.ceSystem(size: 14)).foregroundStyle(CE.accent.opacity(0.85))
                                                 .frame(width: 18)
                                             Text(folder.name).font(CEFont.body).foregroundStyle(CE.ink).lineLimit(1)
                                             Spacer(minLength: 0)
-                                            Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(CE.ink3)
+                                            Image(systemName: "chevron.right").font(.ceSystem(size: 10, weight: .semibold)).foregroundStyle(CE.ink3)
                                         }.padding(.horizontal, 12).padding(.vertical, 10).contentShape(Rectangle())
-                                    }.buttonStyle(RowButtonStyle(radius: 9)).disabled(loading)
+                                    }.buttonStyle(RowButtonStyle(radius: CERadius.r(9))).disabled(loading)
                                 }
                                 if listing.truncated == true {
                                     Text("처음 500개만 보입니다").font(CEFont.meta).foregroundStyle(CE.ink2).padding(.horizontal, 12).padding(.vertical, 8)
@@ -76,7 +76,7 @@ struct FolderPickerView: View {
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(5)
                     }
-                    .background(Color.white.opacity(0.025), in: shape)
+                    .background(CE.wash.opacity(0.025), in: shape)
                     .overlay { shape.strokeBorder(CE.line) }
                 }
                 if let error {
@@ -133,8 +133,8 @@ struct FolderPickerView: View {
         // As tall as the 새 폴더 button beside it.
         .padding(.horizontal, 12)
         .frame(minHeight: 32)
-        .background(CE.bgDeep.opacity(0.45), in: Capsule())
-        .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
+        .background(CE.bgDeep.opacity(0.45), in: CECapsule())
+        .overlay { CECapsule().strokeBorder(CE.wash.opacity(0.1)) }
         .accessibilityLabel(String(localized: "현재 폴더: ") + listing.path)
     }
 
@@ -162,7 +162,7 @@ struct FolderPickerView: View {
     private var creationRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
-                Image(systemName: "folder.badge.plus").font(.system(size: 15)).foregroundStyle(CE.accent).frame(width: 20)
+                Image(systemName: "folder.badge.plus").font(.ceSystem(size: 15)).foregroundStyle(CE.accent).frame(width: 20)
                     .accessibilityHidden(true)
                 TextField("새 폴더 이름", text: $newName, prompt: Text("새 폴더 이름")).labelsHidden().font(SetupFont.input).focused($nameFocused)
                     .onSubmit { Task { await createFolder() } }.autocorrectionDisabled()
@@ -171,7 +171,7 @@ struct FolderPickerView: View {
                 Button("만들기") { Task { await createFolder() } }.ceSecondaryButton().controlSize(.regular).fixedSize()
                     .disabled(loading || newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button { newFolder = false; nameError = nil } label: {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                    Image(systemName: "xmark").font(.ceSystem(size: 10, weight: .bold))
                 }
                 .buttonStyle(RoundQuietStyle())
                 .help("새 폴더 취소")
@@ -250,8 +250,8 @@ private struct RoundQuietStyle: ButtonStyle {
             configuration.label
                 .foregroundStyle(!isEnabled ? CE.ink3 : hovering ? CE.ink : CE.ink2)
                 .frame(width: 26, height: 26)
-                .background(Color.white.opacity(configuration.isPressed ? 0.14 : hovering && isEnabled ? 0.1 : 0.06), in: Circle())
-                .overlay { Circle().strokeBorder(Color.white.opacity(0.07)) }
+                .background(CE.wash.opacity(configuration.isPressed ? 0.14 : hovering && isEnabled ? 0.1 : 0.06), in: Circle())
+                .overlay { Circle().strokeBorder(CE.wash.opacity(0.07)) }
                 .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
                 .contentShape(Rectangle())
                 .onHover { hovering = $0 }

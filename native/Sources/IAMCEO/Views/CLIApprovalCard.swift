@@ -109,7 +109,7 @@ struct CLIApprovalCard: View {
     @ViewBuilder private func window(_ prompt: CLIApprovalPrompt) -> some View {
         if !prompt.title.isEmpty {
             Text(prompt.title)
-                .font(isMac ? .system(size: 15.5, weight: .semibold) : CEFont.rowTitle)
+                .font(isMac ? .ceSystem(size: 15.5, weight: .semibold) : CEFont.rowTitle)
                 .tracking(-0.16)
                 .lineSpacing(CELeading.spacing(15.5, 1.4))
                 .foregroundStyle(CE.ink)
@@ -117,7 +117,7 @@ struct CLIApprovalCard: View {
                 .textSelection(.enabled)
         }
         if !prompt.body.isEmpty {
-            let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
             ScrollView(.vertical) {
                 Text(prompt.body)
                     .font(CEFont.mono)
@@ -136,7 +136,7 @@ struct CLIApprovalCard: View {
         }
         if !prompt.question.isEmpty {
             Text(prompt.question)
-                .font(isMac ? .system(size: 14.5, weight: .semibold) : CEFont.rowTitle)
+                .font(isMac ? .ceSystem(size: 14.5, weight: .semibold) : CEFont.rowTitle)
                 .lineSpacing(CELeading.spacing(14.5, 1.45))
                 .foregroundStyle(CE.ink)
                 .fixedSize(horizontal: false, vertical: true)
@@ -260,16 +260,16 @@ private struct CLIOptionTile: View {
     @State private var hovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous)
         Button(action: action) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text("\(option.n).")
-                    .font(.system(size: 13, design: .monospaced)).monospacedDigit()
+                    .font(.ceSystem(size: 13, design: .monospaced)).monospacedDigit()
                     .foregroundStyle(CE.ink3)
                     .frame(minWidth: 19, alignment: .leading)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(option.label)
-                        .font(isMac ? .system(size: 14.5, weight: .semibold) : CEFont.rowTitle)
+                        .font(isMac ? .ceSystem(size: 14.5, weight: .semibold) : CEFont.rowTitle)
                         .lineSpacing(CELeading.spacing(14.5, 1.45))
                         .foregroundStyle(isEnabled || picked ? CE.ink : CE.ink2)
                         .multilineTextAlignment(.leading)
@@ -283,7 +283,7 @@ private struct CLIOptionTile: View {
                 }
                 Spacer(minLength: 0)
                 if picked {
-                    Image(systemName: "checkmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                    Image(systemName: "checkmark").font(.ceSystem(size: 13, weight: .bold)).foregroundStyle(CE.onSelection)
                         .accessibilityHidden(true)
                 }
             }
@@ -310,11 +310,11 @@ private struct CLIOptionTile: View {
 
     private var fill: Color {
         if picked { return option.reject ? CE.danger.opacity(0.2) : CE.violet.opacity(0.5) }
-        return Color.white.opacity(hovering && isEnabled ? 0.11 : 0.06)
+        return CE.wash.opacity(hovering && isEnabled ? 0.11 : 0.06)
     }
 
     private var stroke: (color: Color, width: CGFloat) {
         if picked { return (option.reject ? CE.danger : CE.accent, 2) }
-        return (Color.white.opacity(0.14), 1)
+        return (CE.wash.opacity(0.14), 1)
     }
 }

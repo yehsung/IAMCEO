@@ -216,6 +216,15 @@ struct AppShell: View {
                 if sheet.hasPrefix("terminal:") { router.terminalMemberID = String(sheet.dropFirst("terminal:".count)) }
             }
         }
+        // Review hook (0.2.11, sample only): `--theme-switch <theme id>:<light|dark>` changes the theme 4 s after launch
+        // without saving it, so a screenshot shows the screens redrawn in place (no relaunch).
+        .task {
+            guard store.isDemo, let value = LaunchOptions.value(after: "--theme-switch") else { return }
+            let parts = value.split(separator: ":").map(String.init)
+            guard let id = parts.first.flatMap(ThemeID.init(rawValue:)) else { return }
+            try? await Task.sleep(for: .seconds(4))
+            ThemeStore.shared.preview(id, dark: parts.count < 2 || parts[1] != "light")
+        }
         // Review hook (0.2.6): `--send <text>` [`--send-delay <seconds>`, default 2] writes <text> into the open chat's
         // composer and sends it the way the send button does, so screenshots can catch the reply line after a send.
         .task {
@@ -350,14 +359,14 @@ struct AppShell: View {
                 .overlay { MacAttachmentDropSurface(intake: attachmentIntake, policy: attachmentPolicy) }
                 .overlay {
                     if attachmentIntake.targeted {
-                        let shape = RoundedRectangle(cornerRadius: 22)
+                        let shape = RoundedRectangle(cornerRadius: CERadius.r(22))
                         VStack(spacing: 12) {
                             Image(systemName: attachmentPolicy.canAccept ? "paperclip.circle" : "lock.circle")
-                                .font(.system(size: 32))
+                                .font(.ceSystem(size: 32))
                             Text(attachmentPolicy.reason ?? (attachmentIntake.receive == nil
                                 ? String(localized: "입력칸을 준비 중입니다. 잠시 뒤 다시 놓아 주세요")
                                 : String(localized: "여기에 놓으면 \(attachmentRecipient)에게 보낼 첨부로 올립니다")))
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.ceSystem(size: 15, weight: .semibold))
                                 .multilineTextAlignment(.center)
                         }
                         .foregroundStyle(CE.accent)
@@ -397,7 +406,7 @@ struct AppShell: View {
     /// situation lives on 홈.
     private var headline: some View {
         let name = store.currentProjectName
-        return Text(name).font(.system(size: 17, weight: .semibold)).tracking(-0.25)
+        return Text(name).font(.ceSystem(size: 17, weight: .semibold)).tracking(-0.25)
             .foregroundStyle(CE.ink).lineLimit(1).truncationMode(.tail)
         .frame(width: headlineWidth, alignment: .leading)
         .help(name)
@@ -424,7 +433,8 @@ struct AppShell: View {
             .background {
                 // Violet light behind the glass (web .shell__bottom::after): an ellipse min(760, 110%) wide from the
                 // bar's top to 30pt below the window, violet .3 → .12 at 55% → 0, brightest behind the panel's middle.
-                GeometryReader { geo in
+                // The default theme's light; the other themes fade the content out under the bar instead.
+                if CE.isStandard { GeometryReader { geo in
                     let width = geo.size.width - leading
                     EllipticalGradient(stops: [
                         .init(color: CE.violet.opacity(0.3), location: 0),
@@ -435,7 +445,13 @@ struct AppShell: View {
                     .position(x: leading + width / 2, y: (geo.size.height + 30) / 2)
                 }
                 .allowsHitTesting(false)
-                .accessibilityHidden(true)
+                .accessibilityHidden(true) } else {
+                    LinearGradient(stops: [.init(color: CE.bg.opacity(0), location: 0), .init(color: CE.bg.opacity(0.9), location: 0.55)],
+                                   startPoint: .top, endPoint: .bottom)
+                        .padding(.top, -16)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
             }
             // Under the light (web ::before under ::after): a dark fade before macOS 26, where there is no
             // scroll-edge effect under the bar.
@@ -631,7 +647,7 @@ struct ProjectSidebar: View {
                 }
                 if !others.isEmpty {
                     Text("프로젝트")
-                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(CE.ink3)
+                        .font(.ceSystem(size: 12, weight: .semibold)).foregroundStyle(CE.ink3)
                         .padding(.horizontal, 12).padding(.top, 14).padding(.bottom, 6)
                         .accessibilityAddTraits(.isHeader)
                 }
@@ -646,13 +662,14 @@ struct ProjectSidebar: View {
         }
         .scrollIndicators(.never)
         .ceBar(.bottom) { footer }
+        .background { SidebarSurface() }
         .sheet(isPresented: $showArchive) { ArchiveLibraryView() }
     }
 
     private var brand: some View {
         HStack(spacing: 9) {
             BrandMark(size: 22)
-            Text("IAMCEO").font(.system(size: 13.5, weight: .bold)).tracking(0.8).foregroundStyle(CE.ink)
+            Text("IAMCEO").font(.ceSystem(size: 13.5, weight: .bold)).tracking(0.8).foregroundStyle(CE.ink)
         }
         .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 12)
         .accessibilityElement(children: .combine)
@@ -670,7 +687,7 @@ struct ProjectSidebar: View {
             HStack(spacing: 10) {
                 // web .pj__main: name 14.5/600 and sub 12, both at line-height 1.3, 1px apart (≈ 3pt here).
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(project.name).font(.system(size: 14.5, weight: .semibold)).tracking(-0.15)
+                    Text(project.name).font(.ceSystem(size: 14.5, weight: .semibold)).tracking(-0.15)
                         .foregroundStyle(CE.ink).lineLimit(1)
                     Text(line).font(CEFont.caption).foregroundStyle(CE.ink2).lineLimit(1)
                 }
@@ -697,8 +714,8 @@ struct ProjectSidebar: View {
     /// web .pj--foot / .pj--add: icon column 16, label 14/500; ink-2, ink-1 on hover (RailRowStyle quiet).
     private func quietRow(_ title: String, icon: String, minHeight: CGFloat = 40) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: icon).font(.system(size: 13, weight: .medium)).frame(width: 16)
-            Text(title).font(.system(size: 14, weight: .medium)).lineLimit(1)
+            Image(systemName: icon).font(.ceSystem(size: 13, weight: .medium)).frame(width: 16)
+            Text(title).font(.ceSystem(size: 14, weight: .medium)).lineLimit(1)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12).frame(minHeight: minHeight)
@@ -730,7 +747,7 @@ struct ProjectSidebar: View {
             HStack(spacing: 7) {
                 Circle().fill(state.color).frame(width: 7, height: 7)
                     .shadow(color: state.glow ? state.color.opacity(0.7) : .clear, radius: 4)
-                Text(state.text).font(.system(size: 12.5)).foregroundStyle(state.danger ? CE.danger : CE.ink2).lineLimit(1)
+                Text(state.text).font(.ceSystem(size: 12.5)).foregroundStyle(state.danger ? CE.danger : CE.ink2).lineLimit(1)
                 Spacer(minLength: 4)
                 if store.isLoading { ProgressView().controlSize(.mini) }
             }
@@ -772,14 +789,14 @@ private struct RailBadge: View {
     let danger: Bool
     var body: some View {
         if count > 0 {
-            Text("\(count)").font(.system(size: 12, weight: .semibold)).monospacedDigit()
-                .foregroundStyle(danger ? CE.danger : Color.white)
+            Text("\(count)").font(.ceSystem(size: 12, weight: .semibold)).monospacedDigit()
+                .foregroundStyle(danger ? CE.danger : CE.onAccent)
                 .padding(.horizontal, 7).frame(minWidth: 20, minHeight: 20)
                 .background {
                     if danger {
-                        Capsule().fill(CE.bg.opacity(0.72)).overlay { Capsule().fill(CE.danger.opacity(0.16)) }
+                        CECapsule().fill(CE.isStandard ? CE.bg.opacity(0.72) : CE.surface).overlay { CECapsule().fill(CE.danger.opacity(CE.isStandard ? 0.16 : 0.12)) }
                     } else {
-                        Capsule().fill(CE.accentFill)
+                        CECapsule().fill(CE.accentFill)
                     }
                 }
                 .fixedSize()
@@ -800,34 +817,62 @@ private struct RailRowStyle: ButtonStyle {
         @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: CERadius.r(13), style: .continuous)
             let lit = isEnabled && (hovering || configuration.isPressed)
+            let themedSelection = selected && !CE.isStandard
             configuration.label
                 .foregroundStyle(quiet && !lit && !selected ? CE.ink2 : CE.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(shape)
                 .background {
-                    if selected {
+                    if themedSelection {
+                        ThemedSelection(shape: shape)
+                    } else if selected {
                         // web [aria-current]: violet .32 → .2, a 1px white .05 ring and a half-point white .45 line
                         // along the top edge only (inset 0 1px .5px −.5px), not a bright ring down the sides.
                         shape.fill(LinearGradient(colors: [CE.violet.opacity(0.32), CE.violet.opacity(0.2)], startPoint: .top, endPoint: .bottom))
-                            .overlay { shape.strokeBorder(Color.white.opacity(0.05)) }
+                            .overlay { shape.strokeBorder(CE.wash.opacity(0.05)) }
                             .overlay {
-                                shape.strokeBorder(Color.white.opacity(0.45), lineWidth: 0.5)
+                                shape.strokeBorder(CE.wash.opacity(0.45), lineWidth: 0.5)
                                     .mask(alignment: .top) {
-                                        LinearGradient(colors: [.white, .white.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 10)
+                                        LinearGradient(colors: [.white, CE.wash.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 10)
                                     }
                             }
                     } else if configuration.isPressed {
-                        shape.fill(Color.white.opacity(0.09))
+                        shape.fill(CE.wash.opacity(0.09))
                     } else if hovering && isEnabled {
-                        shape.fill(Color.white.opacity(0.06))
+                        shape.fill(CE.wash.opacity(0.06))
                     }
                 }
                 .animation(.linear(duration: 0.12), value: lit)
                 .opacity(isEnabled ? 1 : 0.5)
                 .onHover { hovering = $0 }
         }
+    }
+}
+
+/// The sidebar column's own surface in the themes other than the default (whose sidebar is the system's floating glass
+/// over the aurora): 서리 유리 leaves the glass clear over its faint lights, 말랑 tints it with its pink, 작업대·또렷 paint
+/// it a solid colour with a line at its trailing edge. Reduce Transparency: solid in every theme.
+private struct SidebarSurface: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    var body: some View {
+        let style = CE.style
+        Group {
+            if style.isStandard {
+                Color.clear
+            } else if style.sidebar == .solid || reduceTransparency {
+                CE.palette.sidebar
+                    .overlay(alignment: .trailing) { Rectangle().fill(CE.line).frame(width: style.borderWidth) }
+            } else if style.sidebar == .tinted {
+                CE.palette.sidebar.opacity(0.88)
+            } else {
+                CE.palette.sidebar.opacity(style.dark ? 0.35 : 0.3)
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -860,8 +905,8 @@ struct DestinationSwitcher: View {
             .padding(4)
             // A little darker than a card: content scrolls under the toolbar.
             .cardPill(tint: 0.62)
-            // web .gtabs-glow: a violet light behind the pill that follows the selected tab.
-            .background(alignment: .leading) { glow }
+            // web .gtabs-glow: a violet light behind the pill that follows the selected tab (the default theme's light).
+            .background(alignment: .leading) { if CE.isStandard { glow } }
             .animation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.78), value: router.destination)
             .fixedSize()
             .onChange(of: router.destination) { old, new in
@@ -884,13 +929,13 @@ struct DestinationSwitcher: View {
         // ink-2, ink-1 on hover.
         return Button { router.go(tab) } label: {
             HStack(spacing: 6) {
-                Text(tab.title).font(.system(size: 14.5, weight: .semibold)).tracking(-0.15)
+                Text(tab.title).font(.ceSystem(size: 14.5, weight: .semibold)).tracking(-0.15)
                 CountBadge(count: count, tone: store.navBadgeDanger(for: tab) ? .danger : .accent)
             }
-            .foregroundStyle(selected ? Color.white : hovered == tab ? CE.ink : CE.ink2)
+            .foregroundStyle(selected ? CE.onSelection : hovered == tab ? CE.ink : CE.ink2)
             .animation(.linear(duration: 0.2), value: hovered)
             .frame(width: tabWidth, height: Self.tabHeight)
-            .contentShape(Capsule())
+            .contentShape(CECapsule())
         }
         .buttonStyle(.plain)
         .onHover { inside in
@@ -961,7 +1006,7 @@ private struct MemberDrawerHost: View {
                 // A light veil only: clicks go through to the screen, so another member's row (팀, 사무실, 홈) switches
                 // the drawer to that member in one click (A-64) instead of closing it. Esc, 닫기 or a tab closes it.
                 // Stops at the toolbar: the tabs stay live (switching screens closes the drawer), so they stay undimmed.
-                Color.black.opacity(0.08)
+                Color.black.opacity(CE.isStandard ? 0.08 : CE.style.dark ? 0.16 : 0.06)
                     .allowsHitTesting(false)
                     .transition(.opacity)
                     .accessibilityHidden(true)
@@ -983,7 +1028,7 @@ private struct MemberDrawer: View {
     let onClose: () -> Void
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(20), style: .continuous)
         // Fresh state per member: switching member in place must not show the previous one's activity.
         MemberDetailView(memberID: memberID, onClose: onClose)
             .id(memberID)
@@ -1024,7 +1069,12 @@ private struct DrawerSurface<S: InsettableShape>: ViewModifier {
     static var glassBacking: Color { Color(hex: 0x21203C) }
 
     func body(content: Content) -> some View {
-        if #available(macOS 26.0, *), !reduceTransparency {
+        if !CE.isStandard {
+            // Other themes: the theme's opaque surface, its line and a soft shadow (a reading panel; nothing shows through).
+            content
+                .background { shape.fill(CE.surface).shadow(color: CE.shadow.opacity(CE.style.dark ? 0.5 : 0.18), radius: 24, y: 10) }
+                .overlay { shape.strokeBorder(CE.line, lineWidth: CE.borderWidth).allowsHitTesting(false) }
+        } else if #available(macOS 26.0, *), !reduceTransparency {
             content
                 .glassEffect(.clear.tint(CE.glassTint.opacity(0.4)), in: shape)
                 .background { backing(Self.glassBacking) }
@@ -1043,7 +1093,7 @@ private struct DrawerSurface<S: InsettableShape>: ViewModifier {
     }
 
     private var rim: some View {
-        shape.strokeBorder(Color.white.opacity(0.08)).allowsHitTesting(false)
+        shape.strokeBorder(CE.wash.opacity(0.08)).allowsHitTesting(false)
     }
 }
 
@@ -1070,7 +1120,7 @@ private struct StageLights: View {
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width, h = geo.size.height
-            if !reduceTransparency {
+            if !reduceTransparency && CE.isStandard {
                 ZStack {
                     light(CE.violet, strength: 0.34, width: min(980, w * 0.8), aspect: 0.42)
                         .position(x: w * 0.6, y: 0)
@@ -1277,9 +1327,9 @@ struct StatusStrips: View {
     private struct Palette {
         let warm: Bool
         let tone: Tone
-        var text: Color { warm ? Color(hex: 0xFFE3BC) : CE.ink }
-        var action: Color { warm ? Color(hex: 0xFFF3E2) : CE.ink }
-        var ring: Color { warm ? CE.warn.opacity(0.34) : tone.color.opacity(0.34) }
+        var text: Color { warm && CE.isStandard ? Color(hex: 0xFFE3BC) : CE.ink }
+        var action: Color { warm && CE.isStandard ? Color(hex: 0xFFF3E2) : CE.ink }
+        var ring: Color { warm ? (CE.isStandard ? CE.warn : CE.attention).opacity(CE.isStandard ? 0.34 : 0.5) : tone.color.opacity(CE.isStandard ? 0.34 : 0.45) }
     }
 
     private func strip(_ item: Strip) -> some View {
@@ -1292,7 +1342,7 @@ struct StatusStrips: View {
                 if item.busy {
                     ProgressView().controlSize(.small).tint(item.tone.color).frame(width: 14, height: 14)
                 } else {
-                    Image(systemName: item.icon).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(item.tone.color)
+                    Image(systemName: item.icon).font(.ceSystem(size: 12.5, weight: .semibold)).foregroundStyle(item.tone.color)
                 }
                 // web 13.5px at line-height 1.35.
                 Text(item.text).font(CEFont.note).foregroundStyle(item.id == "connection-check" ? CE.ink2 : palette.text)
@@ -1315,16 +1365,20 @@ struct StatusStrips: View {
         .background {
             ZStack {
                 if palette.warm {
-                    shape.fill(Color(red: 58 / 255, green: 28 / 255, blue: 16 / 255).opacity(0.94))
-                } else {
+                    shape.fill(CE.palette.warmFill)
+                } else if CE.isStandard {
                     shape.fill(CE.bg.opacity(0.9))
                     shape.fill(item.tone.color.opacity(0.13))
+                } else {
+                    // Opaque in the other themes: the surface, lightly tinted by the strip's tone.
+                    shape.fill(CE.surface)
+                    shape.fill(item.tone.color.opacity(0.08))
                 }
             }
             // web 0 8px 24px −12px rgb(4 2 14 / .8): lifts the plate off the content passing under it.
-            .shadow(color: Color(red: 4 / 255, green: 2 / 255, blue: 14 / 255).opacity(0.55), radius: 10, y: 8)
+            .shadow(color: CE.shadow.opacity(CE.isStandard ? 0.55 : CE.style.dark ? 0.45 : 0.12), radius: 10, y: 8)
         }
-        .overlay { shape.strokeBorder(palette.ring) }
+        .overlay { shape.strokeBorder(palette.ring, lineWidth: CE.borderWidth) }
         .help(full)
         .accessibilityElement(children: .contain)
     }
@@ -1340,11 +1394,11 @@ private struct StripActionStyle: ButtonStyle {
         @State private var hovering = false
         var body: some View {
             configuration.label
-                .font(isMac ? .system(size: 13, weight: .semibold) : CEFont.secondary.weight(.semibold))
+                .font(isMac ? .ceSystem(size: 13, weight: .semibold) : CEFont.secondary.weight(.semibold))
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .padding(.horizontal, 12).frame(height: 32)
-                .background(Color.white.opacity(configuration.isPressed ? 0.22 : hovering ? 0.17 : 0.1), in: Capsule())
+                .background(CE.wash.opacity(configuration.isPressed ? 0.22 : hovering ? 0.17 : 0.1), in: CECapsule())
                 .animation(.linear(duration: 0.12), value: hovering)
                 .frame(minHeight: isMac ? nil : 44)
                 .contentShape(Rectangle())
@@ -1431,15 +1485,15 @@ private struct PhoneDockedComposer: View {
             Spacer(minLength: 0)
             Button { expanded = true } label: {
                 HStack(spacing: 7) {
-                    Image(systemName: "square.and.pencil").font(.system(size: 14, weight: .semibold))
+                    Image(systemName: "square.and.pencil").font(.ceSystem(size: 14, weight: .semibold))
                     Text(hasDraft ? String(localized: "\(name)에게 쓰던 글") : String(localized: "\(name)에게 쓰기")).font(CEFont.secondary.weight(.semibold)).lineLimit(1)
                     if hasDraft { Circle().fill(CE.accent).frame(width: 6, height: 6) }
                 }
                 .foregroundStyle(CE.ink)
                 .padding(.horizontal, 16).frame(height: 40)
-                .glassPanel(Capsule())
+                .glassPanel(CECapsule())
                 .frame(minHeight: 44)
-                .contentShape(Capsule())
+                .contentShape(CECapsule())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(hasDraft ? String(localized: "\(name)에게 쓰던 글 이어 쓰기") : String(localized: "\(name)에게 지시나 질문 쓰기"))
@@ -1454,8 +1508,8 @@ struct ComposerFloor: View {
     var body: some View {
         LinearGradient(stops: [
             .init(color: CE.bg.opacity(0), location: 0),
-            .init(color: CE.bg.opacity(0.82), location: 0.42),
-            .init(color: CE.bg.opacity(0.9), location: 1),
+            .init(color: CE.bg.opacity(CE.isStandard ? 0.82 : 0.9), location: 0.42),
+            .init(color: CE.bg.opacity(CE.isStandard ? 0.9 : 0.97), location: 1),
         ], startPoint: .top, endPoint: .bottom)
         .padding(.top, -18)
         .ignoresSafeArea(edges: .bottom)

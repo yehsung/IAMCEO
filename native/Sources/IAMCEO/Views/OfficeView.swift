@@ -410,7 +410,7 @@ struct OfficeView: View {
         let byID = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return ZStack(alignment: .topLeading) {
             ForEach(marks(map: map)) { mark in
-                let shape = RoundedRectangle(cornerRadius: isMac ? 10 : 8, style: .continuous)
+                let shape = RoundedRectangle(cornerRadius: CERadius.r(isMac ? 10 : 8), style: .continuous)
                 shape.fill(CE.accent.opacity(mark.strong ? 0.15 : 0.10))
                     .overlay { shape.strokeBorder(CE.accent.opacity(mark.strong ? 0.5 : 0.35), lineWidth: 1) }
                     .frame(width: mark.rect.width * p, height: mark.rect.height * p)
@@ -783,7 +783,7 @@ private struct OfficeFloorDots: View {
                 }
                 y += step
             }
-            ctx.fill(dots, with: .color(Color.white.opacity(0.045)))
+            ctx.fill(dots, with: .color(CE.wash.opacity(0.045)))
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -821,7 +821,7 @@ private struct OfficeNameplate: View {
 
     var body: some View {
         // Never below the web's smallest word size (11.5-12px): name 12, marks 10, about 20pt tall.
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(6), style: .continuous)
         let away = member.map { officeDim($0.status) } ?? true
         let counted = member != nil && decisions > 0
         HStack(spacing: 5) {
@@ -829,14 +829,14 @@ private struct OfficeNameplate: View {
                 HStack(spacing: 5) {
                     dot(officeStateKey(member))
                     // iPhone: four desks share a row, so a name may take two short lines rather than end in "…".
-                    Text(member.name).font(.system(size: isMac ? 12 : 11.5, weight: .semibold)).foregroundStyle(away ? CE.ink2 : CE.ink)
+                    Text(member.name).font(.ceSystem(size: isMac ? 12 : 11.5, weight: .semibold)).foregroundStyle(away ? CE.ink2 : CE.ink)
                         .lineLimit(isMac ? 1 : 2).truncationMode(.tail)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                     if member.kind != "worker", !member.name.contains(rankName(member.kind)) {
-                        Text(rankName(member.kind)).font(.system(size: 10, weight: .bold)).foregroundStyle(CE.accent)
+                        Text(rankName(member.kind)).font(.ceSystem(size: 10, weight: .bold)).foregroundStyle(CE.accent)
                             .padding(.horizontal, 4).padding(.vertical, 1)
-                            .background(CE.accent.opacity(0.18), in: RoundedRectangle(cornerRadius: 3.5, style: .continuous))
+                            .background(CE.accent.opacity(0.18), in: RoundedRectangle(cornerRadius: CERadius.r(3.5), style: .continuous))
                             .fixedSize()
                     }
                 }
@@ -845,27 +845,28 @@ private struct OfficeNameplate: View {
                     if isMac {
                         ViewThatFits(in: .horizontal) {
                             Text("전달 확인 \(DeliveryInfo.badgeCount(delivery.needsOwnerCount))")
-                                .font(.system(size: 10, weight: .bold)).foregroundStyle(CE.attention).fixedSize()
-                            Image(systemName: "exclamationmark.circle").font(.system(size: 10, weight: .bold)).foregroundStyle(CE.attention)
+                                .font(.ceSystem(size: 10, weight: .bold)).foregroundStyle(CE.attention).fixedSize()
+                            Image(systemName: "exclamationmark.circle").font(.ceSystem(size: 10, weight: .bold)).foregroundStyle(CE.attention)
                         }
                     } else {
-                        Image(systemName: "exclamationmark.circle").font(.system(size: 10, weight: .bold)).foregroundStyle(CE.attention)
+                        Image(systemName: "exclamationmark.circle").font(.ceSystem(size: 10, weight: .bold)).foregroundStyle(CE.attention)
                     }
                 }
                 if counted && isMac { count }
             } else {
-                Text("새 팀장 자리").font(.system(size: 12, weight: .semibold)).foregroundStyle(CE.ink3).lineLimit(1)
+                Text("새 팀장 자리").font(.ceSystem(size: 12, weight: .semibold)).foregroundStyle(CE.ink3).lineLimit(1)
                     .opacity(0.78)
             }
         }
         // The count capsule sits as far in from the trailing edge as from the top and bottom.
         .padding(.leading, 6).padding(.trailing, counted && isMac ? 3 : 6).padding(.vertical, 3)
-        .background(Color(hex: 0x0E0A1F).opacity(away ? 0.25 : 0.5), in: shape)
+        // Other themes: the theme's surface (a dark plate on a light card would leave its dark name text unreadable).
+        .background(CE.isStandard ? Color(hex: 0x0E0A1F).opacity(away ? 0.25 : 0.5) : CE.surface.opacity(away ? 0.7 : 0.94), in: shape)
         .overlay {
             if member == nil {
-                shape.strokeBorder(Color.white.opacity(0.125), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                shape.strokeBorder(CE.wash.opacity(0.125), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
             } else {
-                shape.strokeBorder(Color.white.opacity(away ? 0.04 : 0.09), lineWidth: 1)
+                shape.strokeBorder(CE.wash.opacity(away ? 0.04 : 0.09), lineWidth: 1)
             }
         }
         .overlay(alignment: .topTrailing) {
@@ -876,11 +877,11 @@ private struct OfficeNameplate: View {
     /// Decisions waiting for the CEO (결재): an app-style count capsule in the attention colour.
     private var count: some View {
         Text(decisions > 9 ? "9+" : "\(decisions)")
-            .font(.system(size: 10, weight: .bold)).monospacedDigit()
-            .foregroundStyle(Color(hex: 0x2B1708))
+            .font(.ceSystem(size: 10, weight: .bold)).monospacedDigit()
+            .foregroundStyle(CE.isStandard ? Color(hex: 0x2B1708) : CE.onStatus)
             .padding(.horizontal, 4)
             .frame(minWidth: 14, minHeight: 14)
-            .background(CE.attention, in: Capsule())
+            .background(CE.attention, in: CECapsule())
             .fixedSize()
     }
 
@@ -926,8 +927,8 @@ private struct OfficeBench: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             HStack(spacing: 5) {
-                Text("자리 비움").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(CE.ink2)
-                Text("\(members.count)").font(.system(size: 12.5)).foregroundStyle(CE.ink3).monospacedDigit()
+                Text("자리 비움").font(.ceSystem(size: 12.5, weight: .semibold)).foregroundStyle(CE.ink2)
+                Text("\(members.count)").font(.ceSystem(size: 12.5)).foregroundStyle(CE.ink3).monospacedDigit()
             }
             .fixedSize()
             .help(Self.explanation)
@@ -941,29 +942,29 @@ private struct OfficeBench: View {
     }
 
     private func plate(_ member: Member) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(8), style: .continuous)
         let count = decisions[member.id] ?? 0
         let when = member.lastActiveAt.map { relativeTime($0) }
         return Button { open(member.id) } label: {
             HStack(spacing: 6) {
                 OfficeStateDot(status: officeStateKey(member), size: 6)
-                Text(member.name).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(CE.ink2).lineLimit(1)
+                Text(member.name).font(.ceSystem(size: 12.5, weight: .semibold)).foregroundStyle(CE.ink2).lineLimit(1)
                 if let when, !when.isEmpty {
-                    Text(when).font(.system(size: 11.5)).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1)
+                    Text(when).font(.ceSystem(size: 11.5)).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1)
                 }
                 if count > 0 {
                     Text(count > 9 ? "9+" : "\(count)")
-                        .font(.system(size: 10, weight: .bold)).monospacedDigit()
-                        .foregroundStyle(Color(hex: 0x2B1708))
+                        .font(.ceSystem(size: 10, weight: .bold)).monospacedDigit()
+                        .foregroundStyle(CE.isStandard ? Color(hex: 0x2B1708) : CE.onStatus)
                         .padding(.horizontal, 4)
                         .frame(minWidth: 14, minHeight: 14)
-                        .background(CE.attention, in: Capsule())
+                        .background(CE.attention, in: CECapsule())
                 }
             }
             .fixedSize()
             .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(Color(hex: 0x0E0A1F).opacity(0.3), in: shape)
-            .overlay { shape.strokeBorder(Color.white.opacity(0.07), lineWidth: 1) }
+            .background(CE.isStandard ? Color(hex: 0x0E0A1F).opacity(0.3) : CE.surface.opacity(0.9), in: shape)
+            .overlay { shape.strokeBorder(CE.wash.opacity(0.07), lineWidth: 1) }
             .frame(minHeight: isMac ? nil : 44)
             .contentShape(Rectangle())
         }
@@ -996,7 +997,7 @@ struct OfficeMessageBox: View {
         let member = member
         let line = member.map(officeDetail) ?? String(localized: "모두 쉬는 중입니다.")
         let key = (member?.id ?? "-") + "|" + (member?.status ?? "") + "|" + line
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous)
         Button {
             if let member { open(member.id) }
         } label: {
@@ -1008,8 +1009,8 @@ struct OfficeMessageBox: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14).padding(.vertical, 10)
             .frame(minHeight: isMac ? 44 : 52)
-            .background(Color.white.opacity(0.04), in: shape)
-            .overlay { shape.strokeBorder(Color.white.opacity(0.07), lineWidth: 1) }
+            .background(CE.wash.opacity(0.04), in: shape)
+            .overlay { shape.strokeBorder(CE.wash.opacity(0.07), lineWidth: 1) }
             .contentShape(shape)
         }
         .buttonStyle(.plain)
@@ -1023,7 +1024,7 @@ struct OfficeMessageBox: View {
     @ViewBuilder private func content(_ member: Member?, line: String) -> some View {
         // Web member card: name 15.5/650, state pill 12.5/600, what it does 14/1.45 ink-1 (here ink2 under the name).
         let detail = Text(line)
-            .font(.system(size: isMac ? 13.5 : 14))
+            .font(.ceSystem(size: isMac ? 13.5 : 14))
             .foregroundStyle(member == nil ? CE.ink3 : (member?.status == "error" ? CE.danger : CE.ink2))
             .lineSpacing(isMac ? 0 : CELeading.spacing(14, 1.45))
             .lineLimit(isMac ? 1 : 2)
@@ -1075,12 +1076,12 @@ struct OfficeMessageBox: View {
     }
     #endif
 
-    private var dot: some View { Text("·").font(.system(size: 13)).foregroundStyle(CE.ink3) }
+    private var dot: some View { Text("·").font(.ceSystem(size: 13)).foregroundStyle(CE.ink3) }
 
     /// When the member last reported (the web card's time), quiet at the trailing edge.
     @ViewBuilder private func stamp(_ time: String) -> some View {
         if !time.isEmpty {
-            Text(time).font(.system(size: 12)).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1).fixedSize()
+            Text(time).font(.ceSystem(size: 12)).foregroundStyle(CE.ink3).monospacedDigit().lineLimit(1).fixedSize()
         }
     }
 
@@ -1088,11 +1089,11 @@ struct OfficeMessageBox: View {
         let info = MemberStatusInfo(member)
         let showsState = officeBubbleShowsState(member)
         return HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(member.name).font(.system(size: isMac ? 14 : 15, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
+            Text(member.name).font(.ceSystem(size: isMac ? 14 : 15, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
                 .layoutProbe("office.bubble.name")
             if showsState {
                 dot
-                Text(officeStateLabel(member)).font(.system(size: isMac ? 12.5 : 13, weight: .semibold))
+                Text(officeStateLabel(member)).font(.ceSystem(size: isMac ? 12.5 : 13, weight: .semibold))
                     .foregroundStyle(member.presentedStatus == "idle" ? CE.ink3 : info.tone.color)
                     .lineLimit(1).fixedSize()
                     .layoutProbe("office.bubble.state")
@@ -1100,7 +1101,7 @@ struct OfficeMessageBox: View {
             if let extra {
                 // 상태 글이 없으면 '이름 · 결재 1건'(N5).
                 if !showsState { dot }
-                Text(extra).font(.system(size: isMac ? 12.5 : 13, weight: .semibold)).foregroundStyle(CE.attention).lineLimit(1).fixedSize()
+                Text(extra).font(.ceSystem(size: isMac ? 12.5 : 13, weight: .semibold)).foregroundStyle(CE.attention).lineLimit(1).fixedSize()
                     .padding(.leading, showsState ? 4 : 0)
             }
         }

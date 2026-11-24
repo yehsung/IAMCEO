@@ -51,14 +51,14 @@ struct Plate<Content: View>: View {
     var radius: CGFloat = CERadius.plate
     @ViewBuilder var content: Content
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: insideGlass ? 14 : radius, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: insideGlass ? CERadius.r(14) : radius, style: .continuous)
         let inner = content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
             .environment(\.ceInsideGlass, true)
         if insideGlass {
             inner
-                .background(raised ? CE.violet.opacity(0.14) : Color.white.opacity(0.035), in: shape)
+                .background(raised ? CE.violet.opacity(0.14) : CE.wash.opacity(0.035), in: shape)
                 .overlay { shape.strokeBorder(raised ? CE.violet.opacity(0.35) : CE.line) }
         } else {
             // Same surface on every OS version: no Liquid Glass and no material under a card (see `cardGlass`);
@@ -112,12 +112,15 @@ private struct CardPill: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let tint: Double
     func body(content: Content) -> some View {
-        if reduceTransparency {
-            content.background(CE.plateRaisedSolid, in: Capsule()).overlay { Capsule().strokeBorder(CE.lineStrong) }
+        if !CE.isStandard {
+            // Other themes: the theme's surface with its line (and its soft shadow where the theme casts one).
+            content.background { ThemedCardSurface(shape: CECapsule(), floating: true) }
+        } else if reduceTransparency {
+            content.background(CE.plateRaisedSolid, in: CECapsule()).overlay { CECapsule().strokeBorder(CE.lineStrong) }
         } else {
             content
-                .background { CardGlassFill(shape: Capsule(), tint: tint) }
-                .overlay { CardRim(shape: Capsule()) }
+                .background { CardGlassFill(shape: CECapsule(), tint: tint) }
+                .overlay { CardRim(shape: CECapsule()) }
         }
     }
 }
@@ -129,14 +132,16 @@ private struct CardPill: ViewModifier {
 struct TabDrop: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     var body: some View {
-        let shape = Capsule()
+        let shape = CECapsule()
         Group {
-            if reduceTransparency {
+            if !CE.isStandard {
+                ThemedSelection(shape: shape)
+            } else if reduceTransparency {
                 shape.fill(CE.violet.opacity(0.34)).overlay { shape.strokeBorder(CE.lineStrong) }
             } else {
                 ZStack {
                     shape.fill(CE.violet.opacity(0.2))
-                    shape.fill(LinearGradient(stops: [.init(color: .white.opacity(0.13), location: 0), .init(color: .white.opacity(0.05), location: 0.62)], startPoint: .top, endPoint: .bottom))
+                    shape.fill(LinearGradient(stops: [.init(color: CE.wash.opacity(0.13), location: 0), .init(color: CE.wash.opacity(0.05), location: 0.62)], startPoint: .top, endPoint: .bottom))
                 }
                 .overlay { CardRim(shape: shape, width: 1) }
                 .background {
@@ -159,7 +164,9 @@ private struct CardGlass<S: InsettableShape>: ViewModifier {
     let shape: S
     let raised: Bool
     func body(content: Content) -> some View {
-        if reduceTransparency {
+        if !CE.isStandard {
+            content.background { ThemedCardSurface(shape: shape, raised: raised) }
+        } else if reduceTransparency {
             content.background(raised ? CE.plateRaisedSolid : CE.plateSolid, in: shape).overlay { shape.strokeBorder(CE.lineStrong) }
         } else {
             content
@@ -177,7 +184,10 @@ private struct GlassPanel<S: InsettableShape>: ViewModifier {
     /// aurora): at 0.72 the panel lands on the web composer's colour (rgb ≈ 27 25 49) instead of a lighter grey.
     private static var tint: Double { 0.72 }
     func body(content: Content) -> some View {
-        if reduceTransparency {
+        if !CE.isStandard {
+            // A box floating over scrolling content: opaque in these themes (nothing shows through its text).
+            content.background { ThemedCardSurface(shape: shape, floating: true) }
+        } else if reduceTransparency {
             content.background(CE.plateRaisedSolid, in: shape).overlay { shape.strokeBorder(CE.lineStrong) }
         } else if #available(macOS 26.0, iOS 26.0, *) {
             content
@@ -195,6 +205,40 @@ private struct GlassPanel<S: InsettableShape>: ViewModifier {
     }
 }
 
+/// A card in the themes other than the default (no aurora glass). Its depth follows the theme:
+/// - shadow (서리 유리): the surface, a 1pt line and two soft shadows;
+/// - hairline (작업대, 또렷): the surface and the theme's line (또렷 at 2pt);
+/// - flat (말랑): an area of the alternate surface colour, no line or shadow.
+/// `raised` (the card that wants attention) adds an accent wash and an accent line. `floating` (the composer, tab pills)
+/// always keeps a line and a light shadow, since content scrolls under it. Opaque on every path.
+struct ThemedCardSurface<S: InsettableShape>: View {
+    let shape: S
+    var raised = false
+    var floating = false
+    var body: some View {
+        let style = CE.style
+        let dark = style.dark
+        let flat = style.elevation == .flat && !floating
+        ZStack {
+            shape.fill(flat ? CE.surfaceAlt : CE.surface)
+            if raised { shape.fill(CE.violet.opacity(dark ? 0.14 : 0.07)) }
+            if raised {
+                shape.strokeBorder(CE.accent.opacity(dark ? 0.55 : 0.5), lineWidth: style.borderWidth)
+            } else if !flat {
+                shape.strokeBorder(CE.line, lineWidth: style.borderWidth)
+            }
+        }
+        .background {
+            if style.elevation == .shadow || floating {
+                shape.fill(CE.surface)
+                    .shadow(color: CE.shadow.opacity(dark ? 0.45 : 0.10), radius: floating ? 10 : 14, y: floating ? 3 : 6)
+                    .shadow(color: CE.shadow.opacity(dark ? 0.3 : 0.06), radius: 2, y: 1)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 /// Inside of the card: tint, top-down white gradient and the inset depth of web `--g-depth` (inner dark edge, top
 /// highlight line, faint top and bottom glows).
 struct CardGlassFill<S: InsettableShape>: View {
@@ -208,9 +252,9 @@ struct CardGlassFill<S: InsettableShape>: View {
             shape.fill(CE.cardTint.opacity(tint ?? (raised ? 0.5 : 0.55)))
             if raised { shape.fill(CE.violet.opacity(0.16)) }
             // background: linear-gradient(180deg, white .045, white .012 62%)
-            shape.fill(LinearGradient(stops: [.init(color: .white.opacity(0.045), location: 0), .init(color: .white.opacity(0.012), location: 0.62)], startPoint: .top, endPoint: .bottom))
+            shape.fill(LinearGradient(stops: [.init(color: CE.wash.opacity(0.045), location: 0), .init(color: CE.wash.opacity(0.012), location: 0.62)], startPoint: .top, endPoint: .bottom))
             // ::after: linear-gradient(180deg, white .035, transparent 22%)
-            shape.fill(LinearGradient(stops: [.init(color: .white.opacity(0.035), location: 0), .init(color: .white.opacity(0), location: 0.22)], startPoint: .top, endPoint: .bottom))
+            shape.fill(LinearGradient(stops: [.init(color: CE.wash.opacity(0.035), location: 0), .init(color: CE.wash.opacity(0), location: 0.22)], startPoint: .top, endPoint: .bottom))
             // inset 0 0 7px 1px rgb(6 3 20 / .22): dark inner edge, as three stacked bands (≈ .12 → .08 → .045 from the
             // edge in, gone by 6.5pt). Not an inner shadow: SwiftUI scales an inner shadow by its fill's alpha, so on
             // this see-through card it draws nothing. Not a blur either: that is one more offscreen pass per card.
@@ -219,15 +263,15 @@ struct CardGlassFill<S: InsettableShape>: View {
             shape.strokeBorder(Self.edgeDark.opacity(0.045), lineWidth: 1.25)
             // inset 0 1px .5px -.5px white .6: a half-point highlight along the whole top edge (under the rim, which
             // fades out towards the right), tapering away down the corners like the CSS one.
-            shape.strokeBorder(Color.white.opacity(0.6), lineWidth: 0.5)
+            shape.strokeBorder(CE.wash.opacity(0.6), lineWidth: 0.5)
                 .mask(alignment: .top) {
-                    LinearGradient(colors: [.white, .white.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 11)
+                    LinearGradient(colors: [.white, CE.wash.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 11)
                 }
             // inset 0 14px 26px -18px white .1 / inset 0 -12px 22px -16px white .06: faint top and bottom glows
             VStack(spacing: 0) {
-                LinearGradient(colors: [.white.opacity(0.035), .white.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 18)
+                LinearGradient(colors: [CE.wash.opacity(0.035), CE.wash.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 18)
                 Spacer(minLength: 0)
-                LinearGradient(colors: [.white.opacity(0), .white.opacity(0.022)], startPoint: .top, endPoint: .bottom).frame(height: 14)
+                LinearGradient(colors: [CE.wash.opacity(0), CE.wash.opacity(0.022)], startPoint: .top, endPoint: .bottom).frame(height: 14)
             }
             .clipShape(shape)
         }
@@ -242,20 +286,20 @@ struct CardRim<S: InsettableShape>: View {
     var width: CGFloat = 1.25
     var body: some View {
         ZStack {
-            shape.strokeBorder(Color.white.opacity(0.07), lineWidth: width)
+            shape.strokeBorder(CE.wash.opacity(0.07), lineWidth: width)
             shape.strokeBorder(EllipticalGradient(stops: [
                 .init(color: CE.ice.opacity(0.34), location: 0),
                 .init(color: Color(red: 196 / 255, green: 168 / 255, blue: 1).opacity(0.16), location: 0.38),
-                .init(color: .white.opacity(0), location: 0.68),
+                .init(color: CE.wash.opacity(0), location: 0.68),
             ], center: .bottomTrailing, startRadiusFraction: 0, endRadiusFraction: 0.56), lineWidth: width)
             shape.strokeBorder(EllipticalGradient(stops: [
-                .init(color: .white.opacity(0.6), location: 0),
-                .init(color: .white.opacity(0), location: 0.62),
+                .init(color: CE.wash.opacity(0.6), location: 0),
+                .init(color: CE.wash.opacity(0), location: 0.62),
             ], center: UnitPoint(x: 0, y: 0.12), startRadiusFraction: 0, endRadiusFraction: 0.49), lineWidth: width)
             shape.strokeBorder(EllipticalGradient(stops: [
-                .init(color: .white.opacity(0.95), location: 0),
-                .init(color: .white.opacity(0.42), location: 0.34),
-                .init(color: .white.opacity(0), location: 0.68),
+                .init(color: CE.wash.opacity(0.95), location: 0),
+                .init(color: CE.wash.opacity(0.42), location: 0.34),
+                .init(color: CE.wash.opacity(0), location: 0.68),
             ], center: UnitPoint(x: 0.34, y: 0), startRadiusFraction: 0, endRadiusFraction: 0.6), lineWidth: width)
         }
         .allowsHitTesting(false)
@@ -296,7 +340,7 @@ struct SectionHeader: View {
             Spacer(minLength: 8)
             if let action, let onAction {
                 Button(action: onAction) {
-                    HStack(spacing: 3) { Text(action); Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold)) }
+                    HStack(spacing: 3) { Text(action); Image(systemName: "chevron.right").font(.ceSystem(size: 8, weight: .bold)) }
                         .frame(minHeight: isMac ? nil : 44)
                         .contentShape(Rectangle())
                 }
@@ -316,18 +360,18 @@ struct Tag: View {
     init(_ text: String, tone: Tone = .neutral, icon: String? = nil) { self.text = text; self.tone = tone; self.icon = icon }
     var body: some View {
         HStack(spacing: 4) {
-            if let icon { Image(systemName: icon).font(.system(size: 9.5, weight: .bold)) }
+            if let icon { Image(systemName: icon).font(.ceSystem(size: 9.5, weight: .bold)) }
             Text(text).lineLimit(1)
         }
         #if os(macOS)
-        .font(.system(size: 12, weight: .semibold))
+        .font(.ceSystem(size: 12, weight: .semibold))
         #else
         .font(CEFont.caption.weight(.semibold))
         #endif
         .foregroundStyle(tone == .neutral ? CE.ink : tone.color)
         .padding(.horizontal, 7)
         .frame(minWidth: 20, minHeight: 20)
-        .background((tone == .neutral ? Color.white : tone.color).opacity(tone == .neutral ? 0.1 : 0.16), in: Capsule())
+        .background((tone == .neutral ? CE.wash : tone.color).opacity(tone == .neutral ? 0.1 : 0.16), in: CECapsule())
         .fixedSize()
     }
 }
@@ -341,11 +385,19 @@ struct StatusDot: View {
     @Environment(\.ceTabVisible) private var tabVisible
     var body: some View {
         Group {
-            if tone == .dim {
+            if CE.style.statusShape == .bar {
+                // 작업대·또렷: state as a short upright bar (a hollow one for asleep/offline).
+                let bar = RoundedRectangle(cornerRadius: 1, style: .continuous)
+                if tone == .dim {
+                    bar.strokeBorder(tone.color, lineWidth: 1.4).frame(width: 4, height: size + 4)
+                } else {
+                    bar.fill(tone.color).frame(width: 4, height: size + 4)
+                }
+            } else if tone == .dim {
                 Circle().strokeBorder(tone.color, lineWidth: 1.4).frame(width: size, height: size)
             } else {
                 Circle().fill(tone.color).frame(width: size, height: size)
-                    .shadow(color: [.attention, .approval, .live].contains(tone) ? tone.color.opacity(0.8) : .clear, radius: 4)
+                    .shadow(color: [.attention, .approval, .live].contains(tone) && CE.style.dark ? tone.color.opacity(0.8) : .clear, radius: 4)
             }
         }
         .background {
@@ -358,7 +410,8 @@ struct StatusDot: View {
     }
 
     static func pulses(pulsing: Bool, reduceMotion: Bool, tabVisible: Bool) -> Bool {
-        pulsing && !reduceMotion && tabVisible
+        // The bar themes (작업대, 또렷) mark work with the bar itself: no round pulse around it.
+        pulsing && !reduceMotion && tabVisible && CE.style.statusShape != .bar
     }
 }
 
@@ -393,8 +446,10 @@ struct StatusBadge: View {
                     StatusDot(tone: info.tone, pulsing: info.live, size: 8)
                     Text(info.label).font(CEFont.meta.weight(.semibold)).foregroundStyle(info.tone == .neutral || info.tone == .dim ? CE.ink2 : info.tone.color)
                 }
-                .padding(.leading, 8).padding(.trailing, 9).frame(minHeight: 24)
-                .background(Self.fill(info.tone), in: Capsule())
+                .padding(.leading, CE.style.statusShape == .pill ? 8 : 0).padding(.trailing, CE.style.statusShape == .pill ? 9 : 0)
+                .frame(minHeight: 24)
+                // The pill themes tint a capsule; the bar and dot themes show the mark and its word on the surface.
+                .background(CE.style.statusShape == .pill ? Self.fill(info.tone) : Color.clear, in: CECapsule())
             }
         }
         .fixedSize()
@@ -403,13 +458,14 @@ struct StatusBadge: View {
     }
 
     private static func fill(_ tone: Tone) -> Color {
-        switch tone {
+        if !CE.isStandard { return tone == .dim ? Color.clear : tone == .neutral ? CE.wash.opacity(0.06) : tone.color.opacity(0.14) }
+        return switch tone {
         case .live, .accent: CE.violet.opacity(0.2)
         case .attention: CE.attention.opacity(0.15)
         case .approval: CE.approval.opacity(0.17)
         case .danger: CE.error.opacity(0.15)
         case .success: CE.success.opacity(0.14)
-        case .neutral: Color.white.opacity(0.06)
+        case .neutral: CE.wash.opacity(0.06)
         case .dim: Color.clear
         }
     }
@@ -437,12 +493,17 @@ struct ProviderTag: View {
 struct CountBadge: View {
     let count: Int
     var tone: Tone = .accent
+    /// Digits on the danger fill or the accent fill.
+    private var countTextColor: Color {
+        if CE.isStandard { return .white }
+        return tone == .danger || tone == .approval ? CE.palette.onError : CE.onAccent
+    }
     var body: some View {
         if count > 0 {
             Text("\(count)").font(CEFont.caption.weight(.semibold)).monospacedDigit()
-                .foregroundStyle(tone == .neutral ? CE.ink : .white)
+                .foregroundStyle(tone == .neutral ? CE.ink : countTextColor)
                 .padding(.horizontal, 6).frame(minWidth: 20, minHeight: 20)
-                .background(tone == .neutral ? Color.white.opacity(0.12) : (tone == .danger || tone == .approval ? CE.error : CE.accentFill), in: Capsule())
+                .background(tone == .neutral ? CE.wash.opacity(0.12) : (tone == .danger || tone == .approval ? CE.error : CE.accentFill), in: CECapsule())
                 .fixedSize()
         }
     }
@@ -559,8 +620,8 @@ struct BrandMark: View {
             .interpolation(.high)
             .frame(width: size, height: size)
             .clipShape(tile)
-            .overlay { tile.strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5) }
-            .shadow(color: CE.violet.opacity(0.45), radius: 5, y: 1)
+            .overlay { tile.strokeBorder(CE.wash.opacity(0.14), lineWidth: 0.5) }
+            .shadow(color: CE.isStandard ? CE.violet.opacity(0.45) : CE.shadow.opacity(CE.style.dark ? 0.4 : 0.12), radius: 5, y: 1)
             .accessibilityHidden(true)
     }
 }
@@ -576,7 +637,7 @@ struct CECloseButton: View {
     var help: String? = nil
     let action: () -> Void
     var body: some View {
-        let button = Button(action: action) { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)) }
+        let button = Button(action: action) { Image(systemName: "xmark").font(.ceSystem(size: 10, weight: .bold)) }
             .buttonStyle(CECloseButtonStyle())
             .focusEffectDisabled()
             #if os(macOS)
@@ -598,8 +659,8 @@ private struct CECloseButtonStyle: ButtonStyle {
             configuration.label
                 .foregroundStyle(hovering ? CE.ink : CE.ink2)
                 .frame(width: 26, height: 26)
-                .background(Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0.06), in: Circle())
-                .overlay { Circle().strokeBorder(Color.white.opacity(0.07)) }
+                .background(CE.wash.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0.06), in: Circle())
+                .overlay { Circle().strokeBorder(CE.wash.opacity(0.07)) }
                 .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
                 .contentShape(Rectangle())
                 .onHover { hovering = $0 }
@@ -612,8 +673,13 @@ private struct CECloseButtonStyle: ButtonStyle {
 struct CESheetBackground: View {
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Color(hex: 0x19132F), Color(hex: 0x0F0B20)], startPoint: .top, endPoint: .bottom)
-            RadialGradient(colors: [CE.violet.opacity(0.16), .clear], center: UnitPoint(x: 0.12, y: 0), startRadius: 0, endRadius: 380)
+            if CE.isStandard {
+                LinearGradient(colors: [Color(hex: 0x19132F), Color(hex: 0x0F0B20)], startPoint: .top, endPoint: .bottom)
+                RadialGradient(colors: [CE.violet.opacity(0.16), .clear], center: UnitPoint(x: 0.12, y: 0), startRadius: 0, endRadius: 380)
+            } else {
+                // Other themes: the theme's background, the colour its cards stand on.
+                CE.bg
+            }
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
@@ -718,9 +784,9 @@ struct CESheet<Content: View, Footer: View>: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
             if let icon {
-                let tile = RoundedRectangle(cornerRadius: 9, style: .continuous)
+                let tile = RoundedRectangle(cornerRadius: CERadius.r(9), style: .continuous)
                 Image(systemName: icon)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.ceSystem(size: 14, weight: .semibold))
                     .foregroundStyle(CE.accent)
                     .frame(width: 32, height: 32)
                     .background(CE.violet.opacity(0.16), in: tile)
@@ -747,7 +813,7 @@ struct CESheet<Content: View, Footer: View>: View {
         }
         .padding(.horizontal, isMac ? 22 : 16)
         .padding(.vertical, isMac ? 14 : 10)
-        .background(Color.black.opacity(0.22))
+        .background(CE.isStandard ? Color.black.opacity(0.22) : CE.surfaceAlt)
         .overlay(alignment: .top) { Rectangle().fill(CE.line).frame(height: 1) }
     }
 }
@@ -787,10 +853,10 @@ struct Avatar: View {
     var size: CGFloat = 28
     var body: some View {
         Image(systemName: "terminal")
-            .font(.system(size: size * 0.42, weight: .medium))
+            .font(.ceSystem(size: size * 0.42, weight: .medium))
             .foregroundStyle(CE.ink2)
             .frame(width: size, height: size)
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: size * 0.3, style: .continuous))
+            .background(CE.wash.opacity(0.08), in: RoundedRectangle(cornerRadius: size * 0.3, style: .continuous))
             .accessibilityHidden(true)
     }
 }
@@ -800,8 +866,8 @@ struct ContextMeter: View {
     var body: some View {
         let value = min(max(pct, 0), 100)
         HStack(spacing: 5) {
-            Capsule().fill(Color.white.opacity(0.1)).frame(width: 34, height: 4)
-                .overlay(alignment: .leading) { Capsule().fill(value >= 80 ? CE.attention : CE.ink3).frame(width: 34 * value / 100, height: 4) }
+            CECapsule().fill(CE.wash.opacity(0.1)).frame(width: 34, height: 4)
+                .overlay(alignment: .leading) { CECapsule().fill(value >= 80 ? CE.attention : CE.ink3).frame(width: 34 * value / 100, height: 4) }
             Text("문맥 \(Int(value))%").font(CEFont.meta).foregroundStyle(CE.ink3).monospacedDigit()
         }
         .accessibilityElement(children: .ignore)
@@ -839,6 +905,9 @@ struct MarkdownText: View {
 
     /// Extra space between two lines of one paragraph: the web line height over the system font's own ~1.2.
     private var leading: CGFloat { CELeading.spacing(size, lineHeight) }
+    /// On the owner's bubble in a theme other than the default: the bubble's own text colours (the bubble may be light
+    /// in a dark theme, as in 말랑's pink one). The default theme keeps 0.2.10's colours, all near white.
+    private var onBubble: Bool { onAccent && !CE.isStandard }
 
     var body: some View {
         VStack(alignment: .leading, spacing: (size * 0.7).rounded()) {
@@ -846,23 +915,24 @@ struct MarkdownText: View {
                 switch block {
                 case .heading(let level, let value):
                     Text(inline(value))
-                        .font(.system(size: headingSize(level), weight: .semibold))
+                        .font(.ceSystem(size: headingSize(level), weight: .semibold))
                         .tracking(-0.15)
                         .lineSpacing((size * 0.2).rounded())
-                        .foregroundStyle(level >= 4 ? CE.ink2 : CE.ink)
+                        .foregroundStyle(onBubble ? CE.palette.onOwnerBubble : level >= 4 ? CE.ink2 : CE.ink)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, index == 0 ? 0 : (size * (level <= 2 ? 0.55 : 0.4)).rounded())
                         .accessibilityAddTraits(.isHeader)
                 case .code(let value):
-                    let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
                     ScrollView(.horizontal, showsIndicators: false) {
-                        Text(value).font(.system(size: (size * 0.87).rounded(), design: .monospaced))
+                        Text(value).font(.ceSystem(size: (size * 0.87).rounded(), design: .monospaced))
                             .lineSpacing((size * 0.3).rounded())
-                            .foregroundStyle(CE.ink2)
+                            .foregroundStyle(onBubble ? CE.palette.onOwnerBubble : CE.isStandard ? CE.ink2 : CE.codeText)
                             .padding(.horizontal, 14).padding(.vertical, 12)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(onAccent ? Color(red: 9 / 255, green: 7 / 255, blue: 19 / 255).opacity(0.5)
+                    .background(!CE.isStandard ? (onAccent ? CE.palette.ownerCode : CE.palette.codeBg)
+                                : onAccent ? Color(red: 9 / 255, green: 7 / 255, blue: 19 / 255).opacity(0.5)
                                          : Color(red: 5 / 255, green: 4 / 255, blue: 11 / 255).opacity(0.55), in: shape)
                     .overlay { shape.strokeBorder(CE.line) }
                 case .list(let items):
@@ -871,9 +941,9 @@ struct MarkdownText: View {
                     }
                 case .quote(let value):
                     HStack(alignment: .top, spacing: 12) {
-                        RoundedRectangle(cornerRadius: 1).fill(onAccent ? Color.white.opacity(0.5) : CE.accent.opacity(0.7)).frame(width: 2)
+                        RoundedRectangle(cornerRadius: CERadius.r(1)).fill(onBubble ? CE.palette.onOwnerBubble.opacity(0.5) : onAccent ? CE.wash.opacity(0.5) : CE.accent.opacity(0.7)).frame(width: 2)
                         MarkdownText(text: value, size: size, lineHeight: lineHeight)
-                            .foregroundStyle(onAccent ? Color(hex: 0xE6DFFF) : CE.ink2)
+                            .foregroundStyle(onBubble ? CE.palette.ownerMuted : onAccent ? Color(hex: 0xE6DFFF) : CE.ink2)
                     }
                     .fixedSize(horizontal: false, vertical: true)
                 case .rule:
@@ -881,7 +951,7 @@ struct MarkdownText: View {
                 case .table(let table):
                     MarkdownTableView(table: table, size: (size * 0.93).rounded())
                 case .paragraph(let value):
-                    Text(inline(value)).font(.system(size: size)).lineSpacing(leading)
+                    Text(inline(value)).font(.ceSystem(size: size)).lineSpacing(leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -897,17 +967,17 @@ struct MarkdownText: View {
             Group {
                 if let done = item.task {
                     Image(systemName: done ? "checkmark.square.fill" : "square")
-                        .font(.system(size: size * 0.9)).foregroundStyle(done ? CE.accent : CE.ink3)
+                        .font(.ceSystem(size: size * 0.9)).foregroundStyle(onBubble ? CE.palette.onOwnerBubble : done ? CE.accent : CE.ink3)
                 } else {
-                    Text(item.marker).font(.system(size: item.marker.count > 1 ? size * 0.93 : size))
-                        .foregroundStyle(onAccent ? Color(hex: 0xDAD2FF) : CE.ink3)
+                    Text(item.marker).font(.ceSystem(size: item.marker.count > 1 ? size * 0.93 : size))
+                        .foregroundStyle(onBubble ? CE.palette.ownerMuted : onAccent ? Color(hex: 0xDAD2FF) : CE.ink3)
                         .monospacedDigit()
                 }
             }
             .frame(minWidth: (size * 1.35).rounded(), alignment: .leading)
             .padding(.trailing, item.marker.count > 2 ? 4 : 0)
-            Text(inline(item.text)).font(.system(size: size)).lineSpacing(leading)
-                .foregroundStyle(item.task == true ? CE.ink2 : CE.ink)
+            Text(inline(item.text)).font(.ceSystem(size: size)).lineSpacing(leading)
+                .foregroundStyle(onBubble ? CE.palette.onOwnerBubble : item.task == true ? CE.ink2 : CE.ink)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.leading, CGFloat(item.level) * (size * 1.35).rounded())
@@ -918,8 +988,8 @@ struct MarkdownText: View {
         var result = markdownInline(value)
         guard onAccent else { return result }
         for run in result.runs where run.inlinePresentationIntent?.contains(.code) == true {
-            result[run.range].backgroundColor = Color(red: 9 / 255, green: 7 / 255, blue: 19 / 255).opacity(0.35)
-            if run.link == nil { result[run.range].foregroundColor = Color.white }
+            result[run.range].backgroundColor = CE.isStandard ? Color(red: 9 / 255, green: 7 / 255, blue: 19 / 255).opacity(0.35) : CE.palette.ownerCode
+            if run.link == nil { result[run.range].foregroundColor = CE.palette.onOwnerBubble }
         }
         return result
     }
@@ -1117,7 +1187,8 @@ enum MarkdownBlock: Equatable {
 func markdownInline(_ value: String) -> AttributedString {
     // 같은 문단은 다시 그릴 때마다 다시 해석하지 않는다(대화·자료는 스크롤할 때마다 본문을 다시 계산한다).
     guard value.utf8.count <= 4_000 else { return markdownInlineUncached(value) }
-    return MarkdownInlineCache.shared.value(value) { markdownInlineUncached(value) }
+    // 테마마다 글자 색이 다르므로 테마 열쇠를 붙여 기억한다(바꾼 테마가 옛 색을 꺼내 쓰지 않게).
+    return MarkdownInlineCache.shared.value(CE.style.key + "\u{1}" + value) { markdownInlineUncached(value) }
 }
 
 private final class MarkdownInlineCache: @unchecked Sendable {
@@ -1142,8 +1213,8 @@ func markdownInlineUncached(_ value: String) -> AttributedString {
     var result = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
         ?? AttributedString(value)
     for run in result.runs where run.inlinePresentationIntent?.contains(.code) == true {
-        result[run.range].backgroundColor = Color.white.opacity(0.08)
-        result[run.range].foregroundColor = CE.ink
+        result[run.range].backgroundColor = CE.isStandard ? CE.wash.opacity(0.08) : CE.chipBg
+        result[run.range].foregroundColor = CE.isStandard ? CE.ink : CE.codeText
     }
     return LocalFileLinks.applying(to: result)
 }
@@ -1184,6 +1255,7 @@ func markdownEscapingSingleTildes(_ value: String) -> String {
 /// A pipe table as a grid: a tinted header row, hairlines between rows and columns, cells wrapping inside columns sized
 /// to their content (shrunk in proportion when the table is wider than the space, stretched to fill it otherwise).
 private struct MarkdownTableView: View {
+    @Environment(\.markdownOnAccent) private var onAccent
     let table: MarkdownTable
     /// Cell text size (the web's .93em).
     let size: CGFloat
@@ -1201,7 +1273,7 @@ private struct MarkdownTableView: View {
                 }
             }
         }
-        .background(Color.white.opacity(0.02))
+        .background(CE.wash.opacity(0.02))
         .clipShape(shape)
         .overlay { shape.strokeBorder(CE.line) }
         .accessibilityElement(children: .contain)
@@ -1213,14 +1285,14 @@ private struct MarkdownTableView: View {
         let frameAlign: Alignment = align == .center ? .top : align == .trailing ? .topTrailing : .topLeading
         let textAlign: TextAlignment = align == .center ? .center : align == .trailing ? .trailing : .leading
         return Text(markdownInline(value))
-            .font(.system(size: size, weight: header ? .semibold : .regular))
-            .foregroundStyle(CE.ink)
+            .font(.ceSystem(size: size, weight: header ? .semibold : .regular))
+            .foregroundStyle(onAccent && !CE.isStandard ? CE.palette.onOwnerBubble : CE.ink)
             .multilineTextAlignment(textAlign)
             .lineSpacing((size * 0.35).rounded())
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 10).padding(.vertical, 7)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: frameAlign)
-            .background(header ? Color.white.opacity(0.04) : Color.clear)
+            .background(header ? CE.wash.opacity(0.04) : Color.clear)
             .overlay(alignment: .top) { if row > 0 { Rectangle().fill(CE.line).frame(height: 1) } }
             .overlay(alignment: .leading) { if column > 0 { Rectangle().fill(CE.line).frame(width: 1) } }
     }
@@ -1526,20 +1598,20 @@ private struct CESegmentPillItem: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(isMac ? .system(size: 13.5, weight: .semibold) : CEFont.secondary.weight(.semibold))
-                .foregroundStyle(selected ? Color.white : hovering ? CE.ink : CE.ink2)
+                .font(isMac ? .ceSystem(size: 13.5, weight: .semibold) : CEFont.secondary.weight(.semibold))
+                .foregroundStyle(selected ? CE.onSelection : hovering ? CE.ink : CE.ink2)
                 .lineLimit(1)
                 .padding(.horizontal, stretch ? 8 : 14)
                 .frame(maxWidth: stretch ? .infinity : nil, minHeight: isMac ? 34 : 40)
                 .background {
                     if selected {
-                        Capsule().fill(CE.violet.opacity(0.42))
-                            .overlay { Capsule().strokeBorder(CE.violet.opacity(0.9)) }
-                            .shadow(color: CE.violet.opacity(0.45), radius: 10, y: 2)
+                        CECapsule().fill(CE.violet.opacity(CE.isStandard || CE.style.dark ? 0.42 : 0.16))
+                            .overlay { CECapsule().strokeBorder(CE.violet.opacity(0.9), lineWidth: CE.borderWidth) }
+                            .shadow(color: CE.isStandard ? CE.violet.opacity(0.45) : .clear, radius: 10, y: 2)
                             .matchedGeometryEffect(id: "drop", in: drop)
                     }
                 }
-                .contentShape(Capsule())
+                .contentShape(CECapsule())
                 .animation(.linear(duration: 0.12), value: hovering)
         }
         .buttonStyle(.plain)

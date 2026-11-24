@@ -259,7 +259,7 @@ struct ComposerBar: View {
     }
 
     private var panel: some View {
-        let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(20), style: .continuous)
         // web .cmp__panel: meta row, error line and input row stack with no gap of their own.
         return VStack(alignment: .leading, spacing: 0) {
             if hasMetaRow { metaRow }
@@ -380,7 +380,7 @@ struct ComposerBar: View {
             }
             if let block = quietBlock {
                 HStack(spacing: 5) {
-                    Image(systemName: queueMode ? "clock" : "wifi.exclamationmark").font(.system(size: 10.5, weight: .semibold))
+                    Image(systemName: queueMode ? "clock" : "wifi.exclamationmark").font(.ceSystem(size: 10.5, weight: .semibold))
                     Text(block.text).lineLimit(1).truncationMode(.tail)
                 }
                 .font(hintFont).foregroundStyle(block.tone.color)
@@ -432,7 +432,7 @@ struct ComposerBar: View {
             HStack(spacing: 5) {
                 if missingTarget { StatusDot(tone: .danger, size: 6) }
                 Text(label).font(CEFont.meta.weight(.semibold)).lineLimit(1)
-                Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .bold))
+                Image(systemName: "chevron.down").font(.ceSystem(size: 8.5, weight: .bold))
             }
         }
         .buttonStyle(TargetChipStyle(direct: direct, missing: missingTarget))
@@ -463,12 +463,12 @@ struct ComposerBar: View {
             HStack(spacing: 5) {
                 if missingTarget { StatusDot(tone: .danger, size: 6) }
                 Text(label).font(CEFont.meta.weight(.semibold)).lineLimit(1)
-                Image(systemName: "chevron.down").font(.system(size: 8.5, weight: .bold))
+                Image(systemName: "chevron.down").font(.ceSystem(size: 8.5, weight: .bold))
             }
-            .foregroundStyle(direct ? Color.white : missingTarget ? CE.danger : CE.ink2)
+            .foregroundStyle(direct ? CE.onSelection : missingTarget ? CE.danger : CE.ink2)
             .padding(.horizontal, 10).frame(height: 28)
-            .background(direct ? CE.violet.opacity(0.42) : Color.white.opacity(0.08), in: Capsule())
-            .overlay { Capsule().strokeBorder(direct ? CE.violet.opacity(0.95) : missingTarget ? CE.danger.opacity(0.6) : Color.white.opacity(0.1)) }
+            .background(direct ? CE.violet.opacity(0.42) : CE.wash.opacity(0.08), in: CECapsule())
+            .overlay { CECapsule().strokeBorder(direct ? CE.violet.opacity(0.95) : missingTarget ? CE.danger.opacity(0.6) : CE.wash.opacity(0.1)) }
             .frame(maxWidth: 220)
             .frame(height: 44)
             .contentShape(Rectangle())
@@ -551,7 +551,7 @@ struct ComposerBar: View {
         let reason = friendlyError(failure.failureReason ?? String(localized: "서버가 접수하지 않았습니다"))
         return HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "exclamationmark.circle")
-                .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(CE.danger)
+                .font(.ceSystem(size: 11.5, weight: .semibold)).foregroundStyle(CE.danger)
             VStack(alignment: .leading, spacing: 3) {
                 if retained {
                     Text("보내지 못한 글 · \(failure.failurePreview)")
@@ -604,7 +604,7 @@ struct ComposerBar: View {
     /// web .cmp__error: padding 4 8, 13px at line-height 1.4.
     private func notice(_ text: String, icon: String, color: Color, actionTitle: String? = nil, action: (() -> Void)? = nil) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: icon).font(.system(size: 11.5, weight: .semibold))
+            Image(systemName: icon).font(.ceSystem(size: 11.5, weight: .semibold))
             Text(text).lineLimit(isMac ? 1 : 3).truncationMode(.tail)
                 .lineSpacing(CELeading.spacing(13, 1.4))
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -660,7 +660,7 @@ struct ComposerBar: View {
                 .id([drafts.namespace, draftKey])
                 .overlay(alignment: .topLeading) {
                     if draftText.isEmpty {
-                        ComposerPlaceholderText(project: placeholder.project, text: placeholder.text).font(.system(size: 15)).foregroundStyle(CE.ink2)
+                        ComposerPlaceholderText(project: placeholder.project, text: placeholder.text).font(.ceSystem(size: 15)).foregroundStyle(CE.ink2)
                             .allowsHitTesting(false)
                     }
                 }
@@ -682,9 +682,9 @@ struct ComposerBar: View {
 
             Button { Task { await send() } } label: {
                 Group {
-                    if sending { ProgressView().controlSize(.small).tint(.white) }
+                    if sending { ProgressView().controlSize(.small).tint(CE.onAccent) }
                     // F1: 연결을 기다리는 동안은 '연결되면 보내기'(시계).
-                    else { Image(systemName: queueMode ? "clock" : "arrow.up").font(.system(size: 16, weight: .bold)) }
+                    else { Image(systemName: queueMode ? "clock" : "arrow.up").font(.ceSystem(size: 16, weight: .bold)) }
                 }
             }
             .buttonStyle(ComposerSendStyle(active: canSend || sending || canQueue))
@@ -698,7 +698,7 @@ struct ComposerBar: View {
     // MARK: Actions
 
     private var attachmentIcon: some View {
-        Image(systemName: "paperclip").font(.system(size: 17)).frame(width: 44, height: 44)
+        Image(systemName: "paperclip").font(.ceSystem(size: 17)).frame(width: 44, height: 44)
     }
 
     @ViewBuilder private var attachmentButton: some View {
@@ -865,6 +865,8 @@ struct IOSComposerTextView: UIViewRepresentable {
     let textRevision: () -> Int
     var drafts: DraftStore? = nil
     var draftKey: String? = nil
+    /// The theme on screen when this was made (read in the parent's body): a new theme updates the text colours.
+    var themeKey = CE.style.key
 
     /// Web .cmp__input: 15px text with 22pt lines (4pt extra leading).
     static func attributes(_ font: UIFont?) -> [NSAttributedString.Key: Any] {
@@ -897,6 +899,12 @@ struct IOSComposerTextView: UIViewRepresentable {
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.connect(view)
+        if context.coordinator.themeKey != themeKey {
+            context.coordinator.themeKey = themeKey
+            view.textColor = UIColor(CE.ink)
+            view.tintColor = UIColor(CE.accent)
+            view.typingAttributes = Self.attributes(view.font)
+        }
         view.isEditable = context.environment.isEnabled
         view.isSelectable = context.environment.isEnabled
         view.accessibilityLabel = placeholder
@@ -920,6 +928,8 @@ struct IOSComposerTextView: UIViewRepresentable {
     @MainActor final class Coordinator: NSObject, UITextViewDelegate {
         let editorID = UUID()
         var parent: IOSComposerTextView
+        /// The theme the editor's colours were last set for (makeUIView sets the first).
+        var themeKey = CE.style.key
         private var lastRevision: Int?
         private var lastObservedText: String?
         init(_ parent: IOSComposerTextView) { self.parent = parent }
@@ -1007,7 +1017,7 @@ struct ComposerGhostStyle: ButtonStyle {
             configuration.label
                 .foregroundStyle(!isEnabled ? CE.ink3.opacity(0.6) : lit ? CE.ink : CE.ink2)
                 .background {
-                    Circle().fill(Color.white.opacity(!isEnabled ? 0 : configuration.isPressed ? 0.11 : hovering ? 0.07 : 0))
+                    Circle().fill(CE.wash.opacity(!isEnabled ? 0 : configuration.isPressed ? 0.11 : hovering ? 0.07 : 0))
                 }
                 .animation(.linear(duration: 0.16), value: lit)
                 .contentShape(Circle())
@@ -1027,6 +1037,29 @@ private struct ComposerSendStyle: ButtonStyle {
         let active: Bool
         @State private var hovering = false
         var body: some View {
+            if CE.isStandard { aurora } else { themed }
+        }
+
+        /// Other themes: the accent fill and its text colour, square where the theme squares its controls.
+        private var themed: some View {
+            let shape = RoundedRectangle(cornerRadius: CE.style.squareCapsules ? CE.style.controlRadius : 22, style: .continuous)
+            return configuration.label
+                .foregroundStyle(CE.onAccent)
+                .frame(width: 44, height: 44)
+                .background {
+                    shape.fill(CE.accentFill)
+                        .shadow(color: CE.shadow.opacity(active && CE.style.elevation == .shadow ? 0.22 : 0), radius: 6, y: 3)
+                }
+                .brightness(active && hovering && !configuration.isPressed ? (CE.style.dark ? 0.06 : -0.05) : 0)
+                .opacity(active ? 1 : 0.4)
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(.spring(response: 0.3, dampingFraction: 0.55), value: configuration.isPressed)
+                .animation(.linear(duration: 0.16), value: active)
+                .contentShape(shape)
+                .onHover { hovering = $0 }
+        }
+
+        private var aurora: some View {
             configuration.label
                 .foregroundStyle(Color.white)
                 .shadow(color: Color(red: 28 / 255, green: 8 / 255, blue: 92 / 255).opacity(0.45), radius: 0.5, y: 1)
@@ -1035,7 +1068,7 @@ private struct ComposerSendStyle: ButtonStyle {
                     Circle().fill(CE.primaryGradient)
                         .overlay {
                             Circle().fill(LinearGradient(stops: [
-                                .init(color: .white.opacity(0.14), location: 0), .init(color: .white.opacity(0.025), location: 0.44),
+                                .init(color: CE.wash.opacity(0.14), location: 0), .init(color: CE.wash.opacity(0.025), location: 0.44),
                                 .init(color: .clear, location: 0.52),
                             ], startPoint: .top, endPoint: .bottom))
                         }
@@ -1075,15 +1108,15 @@ private struct TargetChipStyle: ButtonStyle {
         var body: some View {
             let lit = isEnabled && (hovering || configuration.isPressed)
             configuration.label
-                .foregroundStyle(direct ? Color.white : missing ? CE.danger : lit ? CE.ink : CE.ink2)
+                .foregroundStyle(direct ? CE.onSelection : missing ? CE.danger : lit ? CE.ink : CE.ink2)
                 .padding(.horizontal, 10).frame(height: 28)
-                .background(direct ? CE.violet.opacity(lit ? 0.52 : 0.42) : Color.white.opacity(lit ? 0.13 : 0.08), in: Capsule())
+                .background(direct ? CE.violet.opacity(lit ? 0.52 : 0.42) : CE.wash.opacity(lit ? 0.13 : 0.08), in: CECapsule())
                 .overlay {
-                    Capsule().strokeBorder(direct ? CE.violet.opacity(0.95) : missing ? CE.danger.opacity(0.6) : Color.white.opacity(0.1))
+                    CECapsule().strokeBorder(direct ? CE.violet.opacity(0.95) : missing ? CE.danger.opacity(0.6) : CE.wash.opacity(0.1))
                 }
                 .frame(maxWidth: 220)
                 .animation(.linear(duration: 0.12), value: lit)
-                .contentShape(Capsule())
+                .contentShape(CECapsule())
                 .onHover { hovering = $0 }
         }
     }
@@ -1100,7 +1133,7 @@ struct ChipRemoveStyle: ButtonStyle {
             configuration.label
                 .foregroundStyle(lit ? CE.ink : CE.ink2)
                 .frame(width: 28, height: 28)
-                .background(Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0), in: Circle())
+                .background(CE.wash.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0), in: Circle())
                 .contentShape(Circle())
                 .onHover { hovering = $0 }
         }
@@ -1147,7 +1180,7 @@ private struct ComposerTargetMenu: View {
                 list
             }
         }
-        .background(Color(red: 18 / 255, green: 14 / 255, blue: 38 / 255).opacity(0.98))
+        .background(CE.isStandard ? Color(red: 18 / 255, green: 14 / 255, blue: 38 / 255).opacity(0.98) : CE.surface)
         .focusable()
         .focused($focused)
         .focusEffectDisabled()
@@ -1171,14 +1204,14 @@ private struct ComposerTargetMenu: View {
     }
 
     private func row(_ entry: ComposerTargetEntry, position: Int) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         let selected = entry.memberID == current
         let info = entry.status
         return Button { onPick(entry.memberID) } label: {
             HStack(spacing: 12) {
                 // web: name and sub at line-height 1.3, 1px apart.
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(entry.name).font(.system(size: 14.5, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
+                    Text(entry.name).font(.ceSystem(size: 14.5, weight: .semibold)).foregroundStyle(CE.ink).lineLimit(1)
                     if !entry.sub.isEmpty {
                         Text(entry.sub).font(CEFont.meta).foregroundStyle(CE.ink2).lineLimit(1)
                     }
@@ -1191,7 +1224,7 @@ private struct ComposerTargetMenu: View {
                     }
                     .fixedSize()
                 }
-                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(CE.accent)
+                Image(systemName: "checkmark").font(.ceSystem(size: 11, weight: .bold)).foregroundStyle(CE.accent)
                     .frame(width: 12)
                     .opacity(selected ? 1 : 0)
             }
@@ -1271,8 +1304,8 @@ struct ComposerChipThumb: View {
             if let image {
                 image.resizable().scaledToFill()
             } else {
-                Circle().fill(Color.white.opacity(0.1))
-                Image(systemName: "photo").font(.system(size: 9, weight: .semibold)).foregroundStyle(CE.ink2)
+                Circle().fill(CE.wash.opacity(0.1))
+                Image(systemName: "photo").font(.ceSystem(size: 9, weight: .semibold)).foregroundStyle(CE.ink2)
             }
         }
         .frame(width: 20, height: 20)

@@ -60,7 +60,7 @@ struct HomeView: View {
     /// Web TOP_REPORTS.
     private static let topRecent = 5
     /// Web .hm-row__title 14.5 at 1.4, two lines at most.
-    private static let rowTitleLeading = CELeading.spacing(14.5, 1.4)
+    private static var rowTitleLeading: CGFloat { CELeading.spacing(14.5, 1.4) }
     /// 팀 summary: fixed order, zero counts dropped. 승인 창 앞 and 오류 are not counted here: they are in 내 차례.
     private static let summaryParts: [(status: String, label: String)] = [
         ("working", String(localized: "일하는 중")), ("waiting", String(localized: "내 답 기다림")), ("idle", String(localized: "쉬는 중")), ("asleep", String(localized: "잠듦")), ("offline", String(localized: "안 보임")),
@@ -238,7 +238,7 @@ struct HomeView: View {
             let reason = project.connection.reason
             // Web .gate: radius 20, padding 10 10 10 16, gap 8 × 14, text 14/1.5 (650 ink-1 for the reason),
             // the action a glass size m button (44pt, 15/600).
-            let textFont: Font = isMac ? .system(size: 14, weight: .semibold) : CEFont.rowTitle
+            let textFont: Font = isMac ? .ceSystem(size: 14, weight: .semibold) : CEFont.rowTitle
             Plate(padding: 0, radius: 20) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .center, spacing: 14) {
@@ -449,13 +449,13 @@ struct HomeView: View {
     /// end ("완료한 할 일 n"); opened, they list under it, where unchecking still works. Also carries a todo error and
     /// the resend note, which have no card to sit in here.
     private func clearBlock(_ rows: [HomeTurnRow]) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(16), style: .continuous)
         let fold = rows.lazy.compactMap { row -> Int? in if case .doneFold(let count) = row { count } else { nil } }.first
         let rest = rows.filter { if case .doneFold = $0 { false } else { true } }
         // The fold's 44pt hit area overlaps the line's padding instead of making the line taller.
         let foldPull: CGFloat = -12
         // Web .hm-clear: 14 at 1.5.
-        let font: Font = isMac ? .system(size: 14) : CEFont.body
+        let font: Font = isMac ? .ceSystem(size: 14) : CEFont.body
         let leading = CELeading.spacing(isMac ? 14 : 15, 1.5)
         return VStack(alignment: .leading, spacing: 0) {
             if let fold {
@@ -489,8 +489,8 @@ struct HomeView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(Color(red: 12 / 255, green: 9 / 255, blue: 28 / 255).opacity(0.5), in: shape)
-        .overlay { shape.strokeBorder(CE.line) }
+        .background(CE.isStandard ? Color(red: 12 / 255, green: 9 / 255, blue: 28 / 255).opacity(0.5) : CE.surfaceAlt, in: shape)
+        .overlay { shape.strokeBorder(CE.line, lineWidth: CE.borderWidth) }
     }
 
     private var clearText: Text {
@@ -787,7 +787,7 @@ struct HomeView: View {
                     HStack(alignment: .center, spacing: 10) {
                         // Web .hm-todo__title: 15/600 at 1.4, wraps when open.
                         Text(todo.title)
-                            .font(isMac ? .system(size: 15, weight: .semibold) : CEFont.rowTitle)
+                            .font(isMac ? .ceSystem(size: 15, weight: .semibold) : CEFont.rowTitle)
                             .foregroundStyle(checked ? CE.ink2 : CE.ink)
                             .strikethrough(checked, color: CE.ink3)
                             .lineSpacing(CELeading.spacing(15, 1.4))
@@ -983,7 +983,7 @@ struct HomeView: View {
                 .lineLimit(1)
                 .padding(.leading, 9).padding(.trailing, 10)
                 .frame(minHeight: 28)
-                .background(Color.white.opacity(0.07), in: Capsule())
+                .background(CE.wash.opacity(0.07), in: CECapsule())
                 .fixedSize()
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(part.label) \(part.count)명")
@@ -1113,7 +1113,7 @@ struct HomeView: View {
         switch section {
         case .done: CE.success
         case .doing: CE.live
-        case .next: Color.white.opacity(0.22)
+        case .next: CE.wash.opacity(0.22)
         case .hold: CE.warn.opacity(0.7)
         }
     }
@@ -1121,7 +1121,7 @@ struct HomeView: View {
     /// Legend and row dot colour: the bar colour at full strength, with 예정 a touch brighter so a 6pt dot still reads.
     private static func legendColor(_ section: WorkSection) -> Color {
         switch section {
-        case .next: Color.white.opacity(0.38)
+        case .next: CE.wash.opacity(0.38)
         case .hold: CE.warn
         default: workColor(section)
         }
@@ -1175,7 +1175,7 @@ struct HomeView: View {
             .frame(width: 8)
             .accessibilityHidden(true)
         // Web .hm-work__title 14 at 1.45; .hm-work__who 12.5 ink-2.
-        let title = Text(item.title).font(isMac ? .system(size: 14) : CEFont.body).foregroundStyle(CE.ink)
+        let title = Text(item.title).font(isMac ? .ceSystem(size: 14) : CEFont.body).foregroundStyle(CE.ink)
         let context = Text(trailing).font(CEFont.meta).foregroundStyle(CE.ink2)
         return ViewThatFits(in: .horizontal) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -1252,7 +1252,7 @@ struct HomeView: View {
         return HomeRowButton(action: action) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Image(systemName: icon)
-                    .font(.system(size: isMac ? 13 : 15, weight: .medium))
+                    .font(.ceSystem(size: isMac ? 13 : 15, weight: .medium))
                     .foregroundStyle(tint)
                     .frame(width: 18)
                     .accessibilityHidden(true)
@@ -1449,7 +1449,7 @@ private struct HomeCard<Accessory: View, Content: View>: View {
                     .font(CEFont.caption.weight(.semibold)).monospacedDigit().foregroundStyle(CE.ink)
                     .padding(.horizontal, 6)
                     .frame(minWidth: 20, minHeight: 20)
-                    .background(Color.white.opacity(0.12), in: Capsule())
+                    .background(CE.wash.opacity(0.12), in: CECapsule())
                     .fixedSize()
                     .accessibilityLabel("\(count)건")
             }
@@ -1521,16 +1521,16 @@ private struct HomeIconButton: View {
                         if busy {
                             ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 14, height: 14)
                         } else {
-                            Image(systemName: icon).font(.system(size: isMac ? 11 : 12, weight: .semibold))
+                            Image(systemName: icon).font(.ceSystem(size: isMac ? 11 : 12, weight: .semibold))
                         }
-                        Text(title).font(isMac ? .system(size: 12.5, weight: .semibold) : CEFont.meta.weight(.semibold))
+                        Text(title).font(isMac ? .ceSystem(size: 12.5, weight: .semibold) : CEFont.meta.weight(.semibold))
                             .lineLimit(1)
                     }
                     .foregroundStyle(ink)
                     .padding(.horizontal, 11)
                     .frame(height: size)
-                    .background(Capsule().fill(fill))
-                    .overlay { Capsule().strokeBorder(isEnabled ? CE.lineStrong : CE.line) }
+                    .background(CECapsule().fill(fill))
+                    .overlay { CECapsule().strokeBorder(isEnabled ? CE.lineStrong : CE.line) }
                     .frame(minWidth: hit, minHeight: hit)
                     .contentShape(Rectangle())
                 }
@@ -1543,7 +1543,7 @@ private struct HomeIconButton: View {
             } else {
                 Button(action: action) {
                     Image(systemName: icon)
-                        .font(.system(size: isMac ? 11.5 : 13.5, weight: .semibold))
+                        .font(.ceSystem(size: isMac ? 11.5 : 13.5, weight: .semibold))
                         .foregroundStyle(ink)
                         .frame(width: size, height: size)
                         .background(Circle().fill(fill))
@@ -1561,7 +1561,7 @@ private struct HomeIconButton: View {
     }
 
     private var ink: Color { isEnabled ? (hovering ? CE.ink : CE.ink2) : CE.ink3.opacity(0.75) }
-    private var fill: Color { Color.white.opacity(isEnabled ? (hovering ? 0.12 : 0.07) : 0.035) }
+    private var fill: Color { CE.wash.opacity(isEnabled ? (hovering ? 0.12 : 0.07) : 0.035) }
 }
 
 /// iPhone row action that has no room for words (다시 보내기): a 34pt quiet glass circle — the same look as the
@@ -1581,12 +1581,12 @@ private struct HomeCircleButton: View {
                 if busy {
                     ProgressView().controlSize(.small)
                 } else {
-                    Image(systemName: icon).font(.system(size: 15, weight: .semibold))
+                    Image(systemName: icon).font(.ceSystem(size: 15, weight: .semibold))
                 }
             }
             .foregroundStyle(isEnabled ? CE.ink : CE.ink3)
             .frame(width: size, height: size)
-            .background(Color.white.opacity(isEnabled ? 0.07 : 0), in: Circle())
+            .background(CE.wash.opacity(isEnabled ? 0.07 : 0), in: Circle())
             .background(.ultraThinMaterial.opacity(isEnabled ? 1 : 0.5), in: Circle())
             .overlay { if isEnabled { GlassRim(shape: Circle()) } else { Circle().strokeBorder(CE.line) } }
             .frame(width: hit, height: hit)
@@ -1614,7 +1614,7 @@ private struct HomeProgressBar: View {
             }
         }
         .frame(height: 8)
-        .clipShape(Capsule())
+        .clipShape(CECapsule())
         .accessibilityHidden(true)
     }
 }
@@ -1647,7 +1647,7 @@ private struct HomeGlyph: View {
     let tint: Color
     var body: some View {
         Image(systemName: icon)
-            .font(.system(size: isMac ? 13.5 : 15, weight: .semibold))
+            .font(.ceSystem(size: isMac ? 13.5 : 15, weight: .semibold))
             .foregroundStyle(tint)
             .frame(width: 22)
             .accessibilityHidden(true)
@@ -1672,7 +1672,7 @@ private struct HomeQuietLink: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Text(text).monospacedDigit()
-                Image(systemName: "chevron.right").font(.system(size: isMac ? 9 : 10, weight: .bold))
+                Image(systemName: "chevron.right").font(.ceSystem(size: isMac ? 9 : 10, weight: .bold))
             }
             .font(CEFont.secondary.weight(.medium))
             .foregroundStyle(hovering ? CE.ink : CE.ink2)
@@ -1697,14 +1697,14 @@ private struct HomeTodoCheck: View {
     @State private var hovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(7), style: .continuous)
         Button(action: action) {
             ZStack {
                 if checked {
                     shape.fill(CE.success)
                     Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .heavy))
-                        .foregroundStyle(Color(hex: 0x0B1A14))
+                        .font(.ceSystem(size: 11, weight: .heavy))
+                        .foregroundStyle(CE.isStandard ? Color(hex: 0x0B1A14) : CE.onStatus)
                         .transition(reduceMotion ? .opacity : .scale(scale: 0.4).combined(with: .opacity))
                 } else {
                     // Read-only (sample, offline): a quieter box, never hidden.
@@ -1738,7 +1738,7 @@ private struct HomeChevron: View {
     let open: Bool
     var body: some View {
         Image(systemName: "chevron.down")
-            .font(.system(size: isMac ? 10 : 12, weight: .semibold))
+            .font(.ceSystem(size: isMac ? 10 : 12, weight: .semibold))
             .foregroundStyle(CE.ink2)
             .rotationEffect(.degrees(open ? 180 : 0))
             .accessibilityHidden(true)
@@ -1759,7 +1759,7 @@ private struct HomeFoldButton: View {
                 Text(title).monospacedDigit().foregroundStyle(hovering ? CE.ink : CE.ink2)
                 HomeChevron(open: open)
             }
-            .font(isMac ? .system(size: 13.5, weight: .semibold) : CEFont.note.weight(.semibold))
+            .font(isMac ? .ceSystem(size: 13.5, weight: .semibold) : CEFont.note.weight(.semibold))
             .frame(minHeight: isMac ? minHeight : 44)
             .contentShape(Rectangle())
         }

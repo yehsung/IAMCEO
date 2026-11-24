@@ -18,6 +18,8 @@ struct MacComposerTextView: NSViewRepresentable {
 
     var drafts: DraftStore? = nil
     var draftKey: String? = nil
+    /// The theme on screen when this was made (read in the parent's body): a new theme updates the text colours.
+    var themeKey = CE.style.key
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
@@ -58,6 +60,11 @@ struct MacComposerTextView: NSViewRepresentable {
         context.coordinator.parent = self
         guard let view = scroll.documentView as? Editor else { return }
         context.coordinator.connect(view)
+        if context.coordinator.themeKey != themeKey {
+            context.coordinator.themeKey = themeKey
+            view.textColor = NSColor(CE.ink)
+            view.insertionPointColor = NSColor(CE.accent)
+        }
         view.isEditable = context.environment.isEnabled
         view.isSelectable = context.environment.isEnabled
         view.canReceive = canReceive
@@ -110,6 +117,8 @@ struct MacComposerTextView: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         let editorID = UUID()
         var parent: MacComposerTextView
+        /// The theme the editor's colours were last set for (makeNSView sets the first).
+        var themeKey = CE.style.key
         private var lastRevision: Int?
         private var lastPublishedText: String?
         private var lastObservedText: String?

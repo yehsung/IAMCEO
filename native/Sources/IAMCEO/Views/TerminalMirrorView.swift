@@ -105,9 +105,9 @@ struct TerminalMirrorView: View {
         // the CESheet header of the live terminal sheet (icon tile, 16.5 title, quiet round ×) on the same surface.
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                let tile = RoundedRectangle(cornerRadius: 9, style: .continuous)
+                let tile = RoundedRectangle(cornerRadius: CERadius.r(9), style: .continuous)
                 Image(systemName: "terminal")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.ceSystem(size: 14, weight: .semibold))
                     .foregroundStyle(CE.accent)
                     .frame(width: 32, height: 32)
                     .background(CE.violet.opacity(0.16), in: tile)
@@ -117,7 +117,7 @@ struct TerminalMirrorView: View {
                     .accessibilityAddTraits(.isHeader)
                 TeamMemberStatusBadge(member: current)
                 Spacer(minLength: 12)
-                Button { dismiss() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)) }
+                Button { dismiss() } label: { Image(systemName: "xmark").font(.ceSystem(size: 10, weight: .bold)) }
                     .buttonStyle(MirrorCloseStyle())
                     .focusEffectDisabled()
                     .help(controlling ? "닫기 · 조작을 끝내고 자동 전달을 다시 켭니다" : "닫기")
@@ -187,8 +187,8 @@ struct TerminalMirrorView: View {
         HStack(spacing: 4) {
             Button { follow.toggle() } label: {
                 Image(systemName: follow ? "arrow.down.to.line.compact" : "pause")
-                    .font(.system(size: 12, weight: .semibold)).frame(width: 28, height: 28)
-                    .background(follow ? CE.accent.opacity(0.16) : Color.white.opacity(0.05), in: Circle())
+                    .font(.ceSystem(size: 12, weight: .semibold)).frame(width: 28, height: 28)
+                    .background(follow ? CE.accent.opacity(0.16) : CE.wash.opacity(0.05), in: Circle())
                     .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
                     .contentShape(Rectangle())
             }
@@ -201,8 +201,8 @@ struct TerminalMirrorView: View {
                 Group {
                     if loading { ProgressView().controlSize(.mini) } else { Image(systemName: "arrow.clockwise") }
                 }
-                .font(.system(size: 12, weight: .semibold)).frame(width: 28, height: 28)
-                .background(Color.white.opacity(0.05), in: Circle())
+                .font(.ceSystem(size: 12, weight: .semibold)).frame(width: 28, height: 28)
+                .background(CE.wash.opacity(0.05), in: Circle())
                 .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
                 .contentShape(Rectangle())
             }
@@ -233,13 +233,13 @@ struct TerminalMirrorView: View {
 
     /// web .tm-screen: radius 12, padding 12, rgb(5 4 11 / .78) with a hairline ring, code at line-height 1.45.
     private var terminal: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         return GeometryReader { proxy in
             ScrollViewReader { reader in
                 ScrollView([.horizontal, .vertical]) {
                     VStack(alignment: .leading, spacing: 0) {
                         Text(displayText)
-                            .font(.system(size: 12 * TerminalReadingScale.zoom(readingZoom * pinch), design: .monospaced))
+                            .font(.ceSystem(size: 12 * TerminalReadingScale.zoom(readingZoom * pinch), design: .monospaced))
                             .foregroundStyle(screen.isEmpty ? CE.ink3 : CE.ink)
                             .lineSpacing(CELeading.spacing(12.5, 1.45))
                             .textSelection(.enabled)
@@ -287,7 +287,7 @@ struct TerminalMirrorView: View {
                         .ceField(focused: inputFocused)
                         .accessibilityLabel("터미널 입력")
                     Button { Task { await sendInput() } } label: {
-                        Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).frame(width: 18, height: 18)
+                        Image(systemName: "arrow.up").font(.ceSystem(size: 13, weight: .bold)).frame(width: 18, height: 18)
                     }
                     .ceProminentButton()
                     .disabled(input.isEmpty || pending || unresolved || !store.canWrite || inputSaveError != nil)
@@ -327,7 +327,7 @@ struct TerminalMirrorView: View {
             HStack(spacing: 12) {
                 Button { Task { if await store.claimTerminal(member) { await readScreen() } } } label: {
                     HStack(spacing: 6) {
-                        if pending { ProgressView().controlSize(.small).tint(.white) } else { Image(systemName: "hand.tap") }
+                        if pending { ProgressView().controlSize(.small).tint(CE.onAccent) } else { Image(systemName: "hand.tap") }
                         Text(pending ? "조작권을 받는 중" : claimCanBeRecovered ? "조작권 다시 확인" : "입력 시작")
                     }
                 }
@@ -510,12 +510,12 @@ private struct TermKeyStyle: ButtonStyle {
         @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: CERadius.r(10), style: .continuous)
             configuration.label
                 .foregroundStyle(isEnabled ? CE.ink : CE.ink3)
                 .padding(.horizontal, 12)
                 .frame(minWidth: isMac ? 40 : 44, minHeight: isMac ? 32 : 40)
-                .background(Color.white.opacity(configuration.isPressed ? 0.16 : hovering && isEnabled ? 0.11 : 0.07), in: shape)
+                .background(CE.wash.opacity(configuration.isPressed ? 0.16 : hovering && isEnabled ? 0.11 : 0.07), in: shape)
                 .background(.ultraThinMaterial.opacity(isEnabled ? 1 : 0.5), in: shape)
                 .overlay { if isEnabled { GlassRim(shape: shape) } else { shape.strokeBorder(CE.line) } }
                 .scaleEffect(configuration.isPressed ? 0.97 : 1)
@@ -536,8 +536,8 @@ private struct MirrorCloseStyle: ButtonStyle {
             configuration.label
                 .foregroundStyle(hovering ? CE.ink : CE.ink2)
                 .frame(width: 26, height: 26)
-                .background(Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0.06), in: Circle())
-                .overlay { Circle().strokeBorder(Color.white.opacity(0.07)) }
+                .background(CE.wash.opacity(configuration.isPressed ? 0.14 : hovering ? 0.1 : 0.06), in: Circle())
+                .overlay { Circle().strokeBorder(CE.wash.opacity(0.07)) }
                 .contentShape(Circle())
                 .onHover { hovering = $0 }
         }

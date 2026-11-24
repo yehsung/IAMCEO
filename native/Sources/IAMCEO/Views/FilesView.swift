@@ -251,7 +251,7 @@ struct FilesView: View {
                                     FileRow(file: file, openDecisions: counts[file.id] ?? 0, selected: selected, searchResult: model.resultsByID[file.id])
                                 }
                                 // web .fl-row: radius 15, hover white .06, the selected row is the rail's violet drop.
-                                .buttonStyle(RowButtonStyle(selected: selected, radius: 15))
+                                .buttonStyle(RowButtonStyle(selected: selected, radius: CERadius.r(15)))
                                 .contextMenu { fileMenu(file) }
                                 .id(file.id)
                             }
@@ -337,7 +337,7 @@ struct FilesView: View {
                                 Button { router.fileID = file.id } label: {
                                     FileRow(file: file, openDecisions: counts[file.id] ?? 0, chevron: true, searchResult: model.resultsByID[file.id])
                                 }
-                                .buttonStyle(RowButtonStyle(radius: 0))
+                                .buttonStyle(RowButtonStyle(radius: CERadius.r(0)))
                             }
                         }
                     }
@@ -356,7 +356,7 @@ struct FilesView: View {
     /// Web .input (the shared field: 44 tall, 15pt, accent ring while typing).
     private var searchField: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .medium)).foregroundStyle(CE.ink3)
+            Image(systemName: "magnifyingglass").font(.ceSystem(size: 13, weight: .medium)).foregroundStyle(CE.ink3)
             TextField("제목·요약·작성자·본문 검색", text: $search)
                 .focused($searchFocused)
                 .autocorrectionDisabled()
@@ -529,7 +529,7 @@ private struct FileRow: View {
                 if let imageAttachment { RowThumb(attachment: imageAttachment) }
             }
             if chevron {
-                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(CE.ink3)
+                Image(systemName: "chevron.right").font(.ceSystem(size: 11, weight: .semibold)).foregroundStyle(CE.ink3)
             }
         }
         .padding(.horizontal, chevron ? 14 : 12)
@@ -558,14 +558,14 @@ private struct RowThumb: View {
     @State private var thumbAPI: APIClient?
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(10), style: .continuous)
         shape.fill(CE.bgDeep.opacity(0.5))
             .frame(width: 52, height: 52)
             .overlay {
                 if let thumb, thumbAPI === store.api {
                     thumb.resizable().scaledToFill()
                 } else {
-                    Image(systemName: "photo").font(.system(size: 15)).foregroundStyle(CE.ink3)
+                    Image(systemName: "photo").font(.ceSystem(size: 15)).foregroundStyle(CE.ink3)
                 }
             }
             .clipShape(shape)
@@ -939,7 +939,7 @@ private struct FileReaderContent: View {
         return fileHeaderReserve(base: base, actionsWidth: headerActionsWidth, sidePadding: isArtifact ? 6 : 0)
     }
 
-    private var metaFont: Font { isMac ? .system(size: 13) : CEFont.secondary }
+    private var metaFont: Font { isMac ? .ceSystem(size: 13) : CEFont.secondary }
 
     private var kindTag: some View { KindTag(kind: file.kind).layoutProbe("file.meta.kind") }
 
@@ -955,7 +955,7 @@ private struct FileReaderContent: View {
 
     private var titleFont: Font {
         #if os(macOS)
-        .system(size: isArtifact ? 19 : 22, weight: .bold)
+        .ceSystem(size: isArtifact ? 19 : 22, weight: .bold)
         #else
         isArtifact ? .title3.weight(.bold) : .title2.weight(.bold)
         #endif
@@ -963,7 +963,7 @@ private struct FileReaderContent: View {
 
     private var summaryFont: Font {
         #if os(macOS)
-        .system(size: 15)
+        .ceSystem(size: 15)
         #else
         .subheadline
         #endif
@@ -1048,7 +1048,7 @@ private struct FileReaderContent: View {
                 Task { try? await Task.sleep(for: .seconds(2)); copiedPath = false }
             } label: {
                 Text(copiedPath ? "복사됨" : "복사")
-                    .font(isMac ? .system(size: 13, weight: .semibold) : CEFont.secondary.weight(.semibold))
+                    .font(isMac ? .ceSystem(size: 13, weight: .semibold) : CEFont.secondary.weight(.semibold))
                     .foregroundStyle(copiedPath ? CE.success : CE.ink)
                     .padding(.horizontal, 8)
                     .frame(minWidth: 52, minHeight: isMac ? 36 : 44)
@@ -1147,11 +1147,11 @@ private struct KindTag: View {
     let kind: String
     var body: some View {
         Text(fileKindName(kind))
-            .font(isMac ? .system(size: 11.5, weight: .semibold) : .caption2.weight(.semibold))
-            .foregroundStyle(kind == "artifact" ? Color.white : CE.ink)
+            .font(isMac ? .ceSystem(size: 11.5, weight: .semibold) : .caption2.weight(.semibold))
+            .foregroundStyle(kind == "artifact" ? CE.onSelection : CE.ink)
             .padding(.horizontal, 7)
             .frame(minHeight: 19)
-            .background(kind == "artifact" ? CE.violet.opacity(0.45) : Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .background(kind == "artifact" ? CE.violet.opacity(0.45) : CE.wash.opacity(0.1), in: RoundedRectangle(cornerRadius: CERadius.r(6), style: .continuous))
             .fixedSize()
     }
 }
@@ -1482,7 +1482,7 @@ private struct TableBlock: View {
         let rows = Array((sortedRows ?? table.rows).prefix(tableRowLimit))
         // web max-height min(72vh, 780px).
         let cap = viewportLimit(viewport, 0.9, cap: 780, floor: 260)
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         let cellSize = tableCellSize
         return ScrollView(tall ? [.horizontal, .vertical] : .horizontal) {
             // Pinned only while the box scrolls itself (web th sticky inside .vw-table__scroll).
@@ -1523,13 +1523,13 @@ private struct TableBlock: View {
                         if numeric { Spacer(minLength: 0) }
                         Text(title).lineLimit(1)
                         Image(systemName: sorted == false ? "arrow.down" : "arrow.up")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.ceSystem(size: 10, weight: .bold))
                             .foregroundStyle(CE.accent)
                             .opacity(sorted == nil ? 0 : 1)
                             .frame(width: 13)
                         if !numeric { Spacer(minLength: 0) }
                     }
-                    .font(.system(size: tableHeadSize, weight: .semibold))
+                    .font(.ceSystem(size: tableHeadSize, weight: .semibold))
                     .foregroundStyle(CE.ink)
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .frame(width: widths[index])
@@ -1542,7 +1542,7 @@ private struct TableBlock: View {
             }
         }
         .background(Color(hex: 0x1A1533))
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.white.opacity(0.14)).frame(height: 1) }
+        .overlay(alignment: .bottom) { Rectangle().fill(CE.wash.opacity(0.14)).frame(height: 1) }
     }
 
     /// Header tap cycles ascending → descending → original order. Empty cells always sink.
@@ -1574,14 +1574,14 @@ private struct TableRowView: View {
                     .frame(width: widths[column], alignment: number ? .topTrailing : .topLeading)
             }
         }
-        .background(Color.white.opacity(hovering ? 0.03 : 0))
+        .background(CE.wash.opacity(hovering ? 0.03 : 0))
         .overlay(alignment: .bottom) { if !last { Rectangle().fill(CE.line).frame(height: 1) } }
         .onHover { hovering = $0 }
     }
 
     private func cell(_ value: String, number: Bool) -> some View {
         (number ? Text(value).monospacedDigit() : Text(value))
-            .font(.system(size: cellSize))
+            .font(.ceSystem(size: cellSize))
             .foregroundStyle(CE.ink)
             .lineSpacing(CELeading.spacing(cellSize, 1.45))
             .multilineTextAlignment(number ? .trailing : .leading)
@@ -1674,8 +1674,8 @@ private struct ArtifactViewer: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: reservedHeight)
-        .background(CE.bg.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
+        .background(CE.bg.opacity(0.6), in: RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous).strokeBorder(CE.line) }
         .accessibilityElement(children: .combine)
     }
 
@@ -1683,7 +1683,7 @@ private struct ArtifactViewer: View {
     private var gate: some View {
         VStack(alignment: .leading, spacing: CESpace.m) {
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "lock.shield").font(.system(size: 17, weight: .medium)).foregroundStyle(CE.accent)
+                Image(systemName: "lock.shield").font(.ceSystem(size: 17, weight: .medium)).foregroundStyle(CE.accent)
                     .frame(width: 22)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("팀원이 만든 페이지입니다").font(CEFont.rowTitle).foregroundStyle(CE.ink)
@@ -1722,7 +1722,7 @@ private struct ArtifactViewer: View {
         .recessed(radius: 14)
     }
 
-    private var gateNoteFont: Font { isMac ? .system(size: 13) : CEFont.secondary }
+    private var gateNoteFont: Font { isMac ? .ceSystem(size: 13) : CEFont.secondary }
 
     /// The page alone (web .afr-stage): 크게 보기 lives in the reader header, so the frame starts right under the summary.
     private func preview(_ artifact: LoadedArtifact) -> some View {
@@ -1753,8 +1753,8 @@ private struct ArtifactViewer: View {
                 if pageHeight == 0 { pageHeight = reservedHeight }
             }
             .background(CE.bg)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
+            .clipShape(RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous).strokeBorder(CE.line) }
             .accessibilityLabel("\(file.title) 미리보기")
     }
 
@@ -1804,8 +1804,8 @@ private struct ArtifactFullView: View {
     private func sheet(width: CGFloat) -> some View {
         CESheet(title.isEmpty ? String(localized: "제목 없는 자료") : title, icon: "macwindow", width: width, scrolls: false) {
             SandboxedHTML(html: artifact.html, rule: artifact.rule, title: title)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CE.line) }
+                .clipShape(RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous).strokeBorder(CE.line) }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 #if os(iOS)
                 .padding(.bottom, CESpace.l)
@@ -1907,7 +1907,7 @@ private struct AttachmentView: View {
     }
 
     @ViewBuilder private var imageArea: some View {
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(6), style: .continuous)
         if let image {
             let scale = max(displayScale, 1)
             image.resizable().scaledToFit()
@@ -1917,7 +1917,7 @@ private struct AttachmentView: View {
                 .contentShape(Rectangle())
         } else {
             ZStack {
-                shape.fill(Color.white.opacity(0.04))
+                shape.fill(CE.wash.opacity(0.04))
                 if loading {
                     ProgressView().controlSize(.small)
                 } else if let error {
@@ -1960,7 +1960,7 @@ private struct AttachmentView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
-                    .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: CERadius.r(6), style: .continuous))
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.circle")
@@ -2171,7 +2171,7 @@ private struct AttachmentThumb: View {
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         Button { open() } label: {
             well(shape)
                 .overlay {
@@ -2191,7 +2191,7 @@ private struct AttachmentThumb: View {
                     }
                 }
                 .clipShape(shape)
-                .overlay { shape.strokeBorder(Color.white.opacity(hovering ? 0.28 : 0.1)) }
+                .overlay { shape.strokeBorder(CE.wash.opacity(hovering ? 0.28 : 0.1)) }
                 .contentShape(shape)
                 .animation(.linear(duration: 0.12), value: hovering)
         }
@@ -2239,13 +2239,13 @@ private struct AttachmentChip: View {
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         Button { Task { await open() } } label: {
             HStack(spacing: 10) {
                 Image(systemName: fileKindIcon(attachmentKind(attachment)))
-                    .font(.system(size: 12, weight: .medium)).foregroundStyle(CE.ink3)
+                    .font(.ceSystem(size: 12, weight: .medium)).foregroundStyle(CE.ink3)
                 Text(attachment.displayName)
-                    .font(isMac ? .system(size: 13.5, weight: .medium) : CEFont.note.weight(.medium))
+                    .font(isMac ? .ceSystem(size: 13.5, weight: .medium) : CEFont.note.weight(.medium))
                     .foregroundStyle(CE.ink).lineLimit(1).truncationMode(.middle)
                 if source.loading {
                     ProgressView().controlSize(.mini)
@@ -2257,8 +2257,8 @@ private struct AttachmentChip: View {
             }
             .padding(.horizontal, 14).padding(.vertical, 6)
             .frame(minHeight: isMac ? 36 : 44)
-            .background(Color.white.opacity(hovering ? 0.13 : 0.07), in: shape)
-            .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
+            .background(CE.wash.opacity(hovering ? 0.13 : 0.07), in: shape)
+            .overlay { shape.strokeBorder(CE.wash.opacity(0.1)) }
             .contentShape(shape)
             .animation(.linear(duration: 0.12), value: hovering)
         }
@@ -2270,7 +2270,7 @@ private struct AttachmentChip: View {
         .modifier(AttachmentActions(attachment: attachment))
     }
 
-    private var sizeFont: Font { isMac ? .system(size: 12.5) : CEFont.meta }
+    private var sizeFont: Font { isMac ? .ceSystem(size: 12.5) : CEFont.meta }
 
     private func open() async {
         await source.load(store)
@@ -2310,7 +2310,7 @@ private struct SingleImage: View {
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         VStack(alignment: .leading, spacing: 8) {
             Button {
                 if let url = source.url { preview = url } else { Task { await source.load(store, maxPixel: 2400) } }
@@ -2323,7 +2323,7 @@ private struct SingleImage: View {
                         ProgressView().controlSize(.small)
                     } else {
                         VStack(spacing: 6) {
-                            Image(systemName: "photo").font(.system(size: 18)).foregroundStyle(CE.ink3)
+                            Image(systemName: "photo").font(.ceSystem(size: 18)).foregroundStyle(CE.ink3)
                             if let error = source.error {
                                 Text(error).font(CEFont.note).foregroundStyle(CE.ink2).lineSpacing(CELeading.note)
                                     .multilineTextAlignment(.center)
@@ -2337,7 +2337,7 @@ private struct SingleImage: View {
                 .frame(maxWidth: .infinity, minHeight: 120)
                 .background(CE.bgDeep.opacity(0.5))
                 .clipShape(shape)
-                .overlay { shape.strokeBorder(Color.white.opacity(hovering ? 0.28 : 0.1)) }
+                .overlay { shape.strokeBorder(CE.wash.opacity(hovering ? 0.28 : 0.1)) }
                 .contentShape(shape)
                 .animation(.linear(duration: 0.12), value: hovering)
             }
@@ -2397,7 +2397,7 @@ private struct FileCard: View {
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous)
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -2443,7 +2443,7 @@ private struct FileCard: View {
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
-        .background(Color.white.opacity(0.05), in: shape)
+        .background(CE.wash.opacity(0.05), in: shape)
         .overlay { shape.strokeBorder(CE.line) }
         .quickLookPreview($preview)
         .modifier(AttachmentActions(attachment: attachment))
@@ -2478,7 +2478,7 @@ private struct PDFBlock: View {
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         VStack(alignment: .leading, spacing: 8) {
             ViewerBar(text: "\(attachment.displayName) · \(fileSizeText(attachment.size))") {
                 if let url = source.url {
@@ -2593,7 +2593,7 @@ private struct MediaBlock: View {
                     .frame(maxWidth: .infinity)
                     .frame(height: videoHeight)
                     .background(Color.black)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous))
                     .accessibilityLabel("\(attachment.displayName) 영상")
             } else if let audio {
                 AudioStrip(model: audio, name: attachment.displayName)
@@ -2695,14 +2695,14 @@ private struct AudioStrip: View {
     let name: String
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         HStack(spacing: 10) {
             Button { model.toggle() } label: {
                 Image(systemName: model.playing ? "pause.fill" : "play.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.ceSystem(size: 13, weight: .semibold))
                     .foregroundStyle(CE.ink)
                     .frame(width: 32, height: 32)
-                    .background(Color.white.opacity(0.1), in: Circle())
+                    .background(CE.wash.opacity(0.1), in: Circle())
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
@@ -2713,12 +2713,12 @@ private struct AudioStrip: View {
                 .controlSize(.small)
                 .accessibilityLabel("재생 위치")
             Text("\(clock(model.position)) / \(clock(model.duration))")
-                .font(isMac ? .system(size: 13) : CEFont.secondary).foregroundStyle(CE.ink2).monospacedDigit()
+                .font(isMac ? .ceSystem(size: 13) : CEFont.secondary).foregroundStyle(CE.ink2).monospacedDigit()
                 .fixedSize()
         }
         .padding(.leading, 2).padding(.trailing, 14)
         .frame(minHeight: 48)
-        .background(Color.white.opacity(0.05), in: shape)
+        .background(CE.wash.opacity(0.05), in: shape)
         .overlay { shape.strokeBorder(CE.line) }
     }
 
@@ -2821,7 +2821,7 @@ private struct ViewerBar<Actions: View>: View {
 
     private var label: some View {
         Text(text)
-            .font(isMac ? .system(size: 13) : CEFont.secondary).foregroundStyle(CE.ink2).monospacedDigit()
+            .font(isMac ? .ceSystem(size: 13) : CEFont.secondary).foregroundStyle(CE.ink2).monospacedDigit()
             .lineSpacing(CELeading.spacing(13, 1.4))
     }
 }
@@ -2838,7 +2838,7 @@ private struct ViewerNote: View {
         HStack(spacing: 8) {
             if loading { ProgressView().controlSize(.small) }
             Text(text)
-                .font(isMac ? .system(size: 14) : CEFont.note)
+                .font(isMac ? .ceSystem(size: 14) : CEFont.note)
                 .foregroundStyle(bad ? CE.danger : CE.ink2)
                 .lineSpacing(CELeading.spacing(14, 1.5))
                 .fixedSize(horizontal: false, vertical: true)
@@ -2980,15 +2980,15 @@ struct ViewerButtonStyle: ButtonStyle {
         @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: CERadius.r(11), style: .continuous)
             configuration.label
-                .font(isMac ? .system(size: 13.5, weight: .semibold) : CEFont.secondary.weight(.semibold))
+                .font(isMac ? .ceSystem(size: 13.5, weight: .semibold) : CEFont.secondary.weight(.semibold))
                 .lineLimit(1)
-                .foregroundStyle(!isEnabled ? CE.ink3 : on ? Color.white : CE.ink)
+                .foregroundStyle(!isEnabled ? CE.ink3 : on ? CE.onSelection : CE.ink)
                 .padding(.horizontal, 13)
                 .frame(height: 34)
-                .background(on ? CE.violet.opacity(0.42) : Color.white.opacity(fill), in: shape)
-                .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
+                .background(on ? CE.violet.opacity(0.42) : CE.wash.opacity(fill), in: shape)
+                .overlay { shape.strokeBorder(CE.wash.opacity(0.1)) }
                 // iPhone: 44pt touch target around the 34pt button.
                 .padding(.vertical, isMac ? 0 : 5)
                 .contentShape(Rectangle())
@@ -3013,12 +3013,12 @@ private struct FilterChipStyle: ButtonStyle {
         @State private var hovering = false
         var body: some View {
             configuration.label
-                .font(isMac ? .system(size: 13.5, weight: .medium) : CEFont.note.weight(.medium))
-                .foregroundStyle(on ? Color.white : hovering ? CE.ink : CE.ink2)
+                .font(isMac ? .ceSystem(size: 13.5, weight: .medium) : CEFont.note.weight(.medium))
+                .foregroundStyle(on ? CE.onSelection : hovering ? CE.ink : CE.ink2)
                 .padding(.horizontal, 13)
                 .frame(height: isMac ? 36 : 34)
-                .background(on ? CE.violet.opacity(0.42) : Color.white.opacity(configuration.isPressed ? 0.13 : hovering ? 0.10 : 0.05), in: Capsule())
-                .overlay { Capsule().strokeBorder(on ? Color.white.opacity(0.16) : CE.line) }
+                .background(on ? CE.violet.opacity(0.42) : CE.wash.opacity(configuration.isPressed ? 0.13 : hovering ? 0.10 : 0.05), in: CECapsule())
+                .overlay { CECapsule().strokeBorder(on ? CE.wash.opacity(0.16) : CE.line) }
                 // iPhone: 44pt touch target around the 34pt capsule.
                 .padding(.vertical, isMac ? 0 : 5)
                 .contentShape(Rectangle())
@@ -3041,7 +3041,7 @@ private struct HoverFillStyle: ButtonStyle {
         var body: some View {
             let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
             configuration.label
-                .background(Color.white.opacity(configuration.isPressed ? hover + 0.05 : hovering ? hover : 0), in: shape)
+                .background(CE.wash.opacity(configuration.isPressed ? hover + 0.05 : hovering ? hover : 0), in: shape)
                 .contentShape(shape)
                 .onHover { hovering = $0 }
         }

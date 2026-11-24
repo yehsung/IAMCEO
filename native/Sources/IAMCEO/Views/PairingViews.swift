@@ -119,7 +119,7 @@ struct MacPairingSheet: View {
                         QRCodeImage(text: link.url.absoluteString)
                             .frame(width: Self.qrSide, height: Self.qrSide)
                             .padding(14)
-                            .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                            .background(Color.white, in: RoundedRectangle(cornerRadius: CERadius.r(20), style: .continuous))
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel("iPhone 연결 QR 코드")
                     } else {
@@ -127,7 +127,7 @@ struct MacPairingSheet: View {
                         qrTile {
                             VStack(spacing: 14) {
                                 Image(systemName: "qrcode")
-                                    .font(.system(size: 34, weight: .light)).foregroundStyle(CE.ink3)
+                                    .font(.ceSystem(size: 34, weight: .light)).foregroundStyle(CE.ink3)
                                     .accessibilityHidden(true)
                                 Button("새 QR 만들기") { Task { await make() } }
                                     .ceProminentButton()
@@ -165,23 +165,23 @@ struct MacPairingSheet: View {
         inner()
             .frame(width: Self.qrSide, height: Self.qrSide)
             .padding(14)
-            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(CE.line) }
+            .background(CE.wash.opacity(0.04), in: RoundedRectangle(cornerRadius: CERadius.r(20), style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: CERadius.r(20), style: .continuous).strokeBorder(CE.line) }
     }
 
     /// Quiet pill under the QR: time left, or that it ran out.
     private func countdown(_ left: Int) -> some View {
         HStack(spacing: 5) {
             Image(systemName: left > 0 ? "clock" : "clock.badge.exclamationmark")
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.ceSystem(size: 10.5, weight: .semibold))
             Text(left > 0 ? "\(left / 60):\(String(format: "%02d", left % 60)) 남음" : "시간이 지났습니다")
                 .monospacedDigit()
         }
         .font(CEFont.meta.weight(.medium))
         .foregroundStyle(left > 0 ? CE.ink2 : CE.attention)
         .padding(.horizontal, 10).frame(height: 24)
-        .background(Color.white.opacity(0.06), in: Capsule())
-        .overlay { Capsule().strokeBorder(CE.line) }
+        .background(CE.wash.opacity(0.06), in: CECapsule())
+        .overlay { CECapsule().strokeBorder(CE.line) }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(left > 0 ? "\(left / 60)분 \(left % 60)초 동안 한 번 쓸 수 있습니다" : "QR 시간이 지났습니다")
     }
@@ -202,7 +202,7 @@ struct MacPairingSheet: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
+        .background(CE.wash.opacity(0.03), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
     }
 
@@ -251,7 +251,7 @@ struct PhonePairingSection: View {
                 .fixedSize(horizontal: false, vertical: true)
             Button { scanning = true } label: {
                 HStack(spacing: 7) {
-                    if store.isPairing { ProgressView().tint(.white) } else { Image(systemName: "qrcode.viewfinder") }
+                    if store.isPairing { ProgressView().tint(CE.onAccent) } else { Image(systemName: "qrcode.viewfinder") }
                     Text(store.isPairing ? String(localized: "연결하는 중") : String(localized: "QR 스캔"))
                 }
                 .frame(maxWidth: .infinity)
@@ -294,8 +294,8 @@ struct QRScannerSheet: View {
         CESheet(String(localized: "QR 스캔"), scrolls: false) {
             VStack(spacing: CESpace.m) {
                 QRScannerView(onScan: onScan)
-                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .overlay { RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(CE.line) }
+                    .clipShape(RoundedRectangle(cornerRadius: CERadius.r(20), style: .continuous))
+                    .overlay { RoundedRectangle(cornerRadius: CERadius.r(20), style: .continuous).strokeBorder(CE.line) }
                 Text("Mac 화면의 QR을 비추세요.")
                     .font(CEFont.note).foregroundStyle(CE.ink2)
             }

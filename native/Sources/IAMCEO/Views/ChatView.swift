@@ -131,7 +131,8 @@ struct ChatMineRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Spacer(minLength: isMac ? 96 : 40)
+            // 작업대 (flat): my message is a full-width block like the report lines, not a bubble on the right.
+            Spacer(minLength: CE.style.bubble == .flat ? 0 : isMac ? 96 : 40)
             VStack(alignment: .trailing, spacing: 4) {
                 bubble
                 footer
@@ -144,7 +145,8 @@ struct ChatMineRow: View {
                         .padding(.trailing, 4)
                 }
             }
-            .frame(maxWidth: 620, alignment: .trailing)
+            .frame(maxWidth: CE.style.bubble == .flat ? 720 : 620, alignment: .trailing)
+            if CE.style.bubble == .flat { Spacer(minLength: 0) }
         }
         // A footer with a reason line belongs to this bubble: keep clear air below it before the next message.
         .padding(.bottom, info != nil && (note != nil || !waits.isEmpty) || replyNote != nil ? 6 : 0)
@@ -164,11 +166,13 @@ struct ChatMineRow: View {
                 ChatAttachments(items: message.attachments, onBubble: true)
             }
         }
-        .foregroundStyle(Color.white)
+        .foregroundStyle(CE.palette.onOwnerBubble)
         .tint(ChatPalette.bubbleLink)
         .padding(.horizontal, 15).padding(.top, 10).padding(.bottom, 11)
+        .frame(maxWidth: CE.style.bubble == .flat ? .infinity : nil, alignment: .leading)
         .background(ChatPalette.bubble, in: shape)
-        .overlay { shape.strokeBorder(ChatPalette.bubbleRim, lineWidth: 1) }
+        .overlay { ChatOwnerBubbleEdge(shape: shape) }
+        .background { if CE.style.elevation == .shadow { shape.fill(ChatPalette.bubble).shadow(color: CE.shadow.opacity(CE.style.dark ? 0.4 : 0.14), radius: 8, y: 3) } }
         .chatMessageMenu(message)
     }
 
@@ -295,7 +299,7 @@ struct ChatSystemRow: View {
             .ceLineHeight(13, 1.5)
             .multilineTextAlignment(.center)
             .padding(.horizontal, 14).padding(.vertical, 6)
-            .background(ChatPalette.systemFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(ChatPalette.systemFill, in: RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous))
             .help(parseISODate(message.at).map(koDateTime) ?? "")
             .frame(maxWidth: 620)
             .frame(maxWidth: .infinity)
@@ -403,7 +407,7 @@ struct ChatReportRow: View {
     }
 
     private func cardActionIcon(_ symbol: String) -> some View {
-        Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(CE.ink2)
+        Image(systemName: symbol).font(.ceSystem(size: 12, weight: .semibold)).foregroundStyle(CE.ink2)
             .frame(width: isMac ? 22 : 32, height: isMac ? 22 : 32)
             .contentShape(Rectangle())
     }
@@ -522,7 +526,7 @@ private struct ChatReplyBubble: View {
         }
         .frame(width: 46, height: 30)
         .background(reduceTransparency ? CE.plateSolid : ChatPalette.cardFill, in: shape)
-        .overlay { shape.strokeBorder(reduceTransparency ? CE.lineStrong : Color.white.opacity(0.08), lineWidth: 1) }
+        .overlay { shape.strokeBorder(reduceTransparency ? CE.lineStrong : CE.isStandard ? CE.wash.opacity(0.08) : CE.line, lineWidth: CE.borderWidth) }
         .accessibilityHidden(true)
     }
 }
@@ -1099,7 +1103,7 @@ private struct ChatConversation: View {
             jump(proxy)
         }
         let label = HStack(spacing: 6) {
-            Image(systemName: "arrow.down").font(.system(size: 11, weight: .semibold))
+            Image(systemName: "arrow.down").font(.ceSystem(size: 11, weight: .semibold))
             Text(count > 0 ? "새 글 \(count)개" : "맨 아래로").monospacedDigit()
         }
         Group {
@@ -1311,7 +1315,7 @@ private struct ChatRecipientList: View {
             .padding(.horizontal, 8).padding(.vertical, 10)
         }
         .scrollIndicators(.never)
-        .background(CE.glassTint.opacity(0.22))
+        .background(CE.isStandard ? CE.glassTint.opacity(0.22) : CE.palette.sidebar.opacity(0.6))
     }
 
     private func row(_ member: Member?, scope: ChatScope, problems: [String: String]) -> some View {
@@ -1335,7 +1339,7 @@ private struct ChatRecipientList: View {
             .padding(.horizontal, 12).padding(.vertical, 7)
             .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
         }
-        .buttonStyle(RowButtonStyle(selected: selected, radius: 13))
+        .buttonStyle(RowButtonStyle(selected: selected, radius: CERadius.r(13)))
         .contextMenu {
             if !store.isArchive, let detail {
                 Button(detail.kind == "worker" ? "팀원 보기" : "\(rankName(detail.kind)) 보기") { router.openMember(detail.id) }
@@ -1407,7 +1411,7 @@ private struct ChatRecipientChips: View {
             .foregroundStyle(selected ? CE.ink : CE.ink2)
             .padding(.horizontal, 13)
             .frame(height: 34)
-            .background { ChatSelectionFill(shape: Capsule(), selected: selected, rest: 0.06) }
+            .background { ChatSelectionFill(shape: CECapsule(), selected: selected, rest: 0.06) }
             .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
@@ -1740,8 +1744,8 @@ private struct ChatNoteCapsule: View {
         .font(CEFont.meta)
         .padding(.horizontal, 10)
         .frame(height: 26)
-        .background(note.tone.color.opacity(0.1), in: Capsule())
-        .overlay { Capsule().strokeBorder(note.tone.color.opacity(0.22)) }
+        .background(note.tone.color.opacity(0.1), in: CECapsule())
+        .overlay { CECapsule().strokeBorder(note.tone.color.opacity(0.22)) }
         .help(note.text)
     }
 }
@@ -1786,7 +1790,7 @@ private struct ChatJumpChip: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Text(title).lineLimit(2).ceLineHeight(13.5, 1.35)
-                Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(CE.ink2)
+                Image(systemName: "chevron.right").font(.ceSystem(size: 10, weight: .semibold)).foregroundStyle(CE.ink2)
             }
             .font(ChatFont.chip)
             .foregroundStyle(CE.ink)
@@ -1811,12 +1815,12 @@ private struct ChatJumpBody<Label: View>: View {
     @State private var hovering = false
     /// Web: white .07 → .13 on hover; the open one violet .34 → .48. 120ms linear.
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         let fill = prominent ? (pressed ? 0.54 : hovering ? 0.48 : 0.34) : (pressed ? 0.17 : hovering ? 0.13 : 0.07)
         label
             .contentShape(shape)
-            .background(prominent ? CE.violet.opacity(fill) : Color.white.opacity(fill), in: shape)
-            .overlay { shape.strokeBorder(prominent ? CE.violet.opacity(0.8) : Color.white.opacity(0.1)) }
+            .background(prominent ? CE.violet.opacity(fill) : CE.wash.opacity(fill), in: shape)
+            .overlay { shape.strokeBorder(prominent ? CE.violet.opacity(0.8) : CE.wash.opacity(0.1)) }
             .animation(.linear(duration: 0.12), value: hovering)
             .onHover { hovering = $0 }
     }
@@ -1846,12 +1850,14 @@ private struct ChatSelectionFill<S: InsettableShape>: View {
     let selected: Bool
     var rest: Double = 0
     var body: some View {
-        if selected {
+        if selected && !CE.isStandard {
+            ThemedSelection(shape: shape)
+        } else if selected {
             shape
                 .fill(LinearGradient(colors: [CE.violet.opacity(0.34), CE.violet.opacity(0.2)], startPoint: .top, endPoint: .bottom))
                 .overlay { shape.strokeBorder(ChatPalette.selectionRim, lineWidth: 1) }
         } else if rest > 0 {
-            shape.fill(Color.white.opacity(rest))
+            shape.fill(CE.wash.opacity(rest))
         } else {
             Color.clear
         }
@@ -1882,7 +1888,7 @@ private struct ChatDeliveryExplanation: View {
 private struct ChatDraftMark: View {
     var body: some View {
         Image(systemName: "pencil")
-            .font(.system(size: 9, weight: .bold))
+            .font(.ceSystem(size: 9, weight: .bold))
             .foregroundStyle(CE.ink3)
             .help("쓰던 글이 있습니다")
             .accessibilityLabel("쓰던 글 있음")
@@ -1894,7 +1900,7 @@ private struct ChatProblemMark: View {
     var body: some View {
         let failed = kind == "failed"
         Image(systemName: failed ? "exclamationmark.circle.fill" : "pause.circle.fill")
-            .font(.system(size: 12))
+            .font(.ceSystem(size: 12))
             .foregroundStyle(failed ? CE.danger : CE.warn)
             .help(failed ? "전달 실패한 글이 있습니다" : "보류된 전달이 있습니다")
             .accessibilityLabel(failed ? "전달 실패한 글 있음" : "보류된 전달 있음")
@@ -1911,7 +1917,7 @@ private struct ChatBodyText: View {
             MarkdownText(text: text).environment(\.markdownOnAccent, true)
         } else {
             Text(Self.inline(text))
-                .font(.system(size: size))
+                .font(.ceSystem(size: size))
                 .lineSpacing(CELeading.spacing(size, 1.65))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
@@ -1934,63 +1940,71 @@ private struct ChatBodyText: View {
         var result = markdownInline(value)
         for run in result.runs where run.inlinePresentationIntent?.contains(.code) == true {
             result[run.range].backgroundColor = ChatPalette.bubbleCode
-            if run.link == nil { result[run.range].foregroundColor = Color.white }
+            if run.link == nil { result[run.range].foregroundColor = CE.palette.onOwnerBubble }
         }
         return result
     }
 }
 
 /// Web thread colours that are not foundation tokens.
+/// The theme supplies these (`ThemePalette.ownerBubble` …); the default theme's values are the web's below.
 private enum ChatPalette {
     /// .th-mine background rgb(72 50 176 / .9).
-    static let bubble = Color(red: 72 / 255, green: 50 / 255, blue: 176 / 255).opacity(0.9)
-    static let bubbleTo = Color(hex: 0xDAD2FF)
-    static let bubbleLink = Color(hex: 0xE6DFFF)
+    static var bubble: Color { CE.palette.ownerBubble }
+    /// The "<이름>에게" line on my bubble (#DAD2FF).
+    static var bubbleTo: Color { CE.palette.ownerMuted }
+    static var bubbleLink: Color { CE.isStandard ? Color(hex: 0xE6DFFF) : CE.palette.onOwnerBubble }
     /// .th-mine .md code background rgb(9 7 19 / .35).
-    static let bubbleCode = Color(red: 9 / 255, green: 7 / 255, blue: 19 / 255).opacity(0.35)
+    static var bubbleCode: Color { CE.palette.ownerCode }
     /// .th-card background rgb(15 11 32 / .72): a dark plate, not glass (hundreds of rows scroll).
-    static let cardFill = Color(red: 15 / 255, green: 11 / 255, blue: 32 / 255).opacity(0.72)
+    static var cardFill: Color { CE.palette.leadBubble }
     /// Bright top edge + faint ring (inset 0 1px .5px -.5px white .4, inset 0 0 0 1px white .07).
     static let bubbleRim = LinearGradient(stops: [
-        .init(color: .white.opacity(0.4), location: 0),
-        .init(color: .white.opacity(0.08), location: 0.22),
-        .init(color: .white.opacity(0.07), location: 1),
+        .init(color: CE.wash.opacity(0.4), location: 0),
+        .init(color: CE.wash.opacity(0.08), location: 0.22),
+        .init(color: CE.wash.opacity(0.07), location: 1),
     ], startPoint: .top, endPoint: .bottom)
     static let selectionRim = LinearGradient(stops: [
-        .init(color: .white.opacity(0.42), location: 0),
-        .init(color: .white.opacity(0.06), location: 0.3),
-        .init(color: .white.opacity(0.05), location: 1),
+        .init(color: CE.wash.opacity(0.42), location: 0),
+        .init(color: CE.wash.opacity(0.06), location: 0.3),
+        .init(color: CE.wash.opacity(0.05), location: 1),
     ], startPoint: .top, endPoint: .bottom)
     /// .th-system background rgb(15 11 32 / .66).
-    static let systemFill = Color(red: 15 / 255, green: 11 / 255, blue: 32 / 255).opacity(0.66)
+    static var systemFill: Color { CE.isStandard ? Color(red: 15 / 255, green: 11 / 255, blue: 32 / 255).opacity(0.66) : CE.chipBg }
 }
 
 private enum ChatBubbleShape {
-    /// Web radius 18 18 5 18: the tail corner points at the sender (bottom right).
-    static var shape: UnevenRoundedRectangle { UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 5, topTrailingRadius: 18, style: .continuous) }
+    /// Web radius 18 18 5 18: the tail corner points at the sender (bottom right). Themes: their bubble radius; the flat
+    /// style (작업대) is a block with the theme's small corner.
+    static var shape: UnevenRoundedRectangle {
+        let style = CE.style
+        let r = style.isStandard ? 18 : style.bubble == .flat ? style.controlRadius : style.bubbleRadius
+        let tail = style.isStandard ? 5 : min(5, r)
+        return UnevenRoundedRectangle(topLeadingRadius: r, bottomLeadingRadius: r, bottomTrailingRadius: tail, topTrailingRadius: r, style: .continuous)
+    }
 }
 
 private enum ChatFont {
     #if os(macOS)
-    static let cardTitle: Font = .system(size: 15.5, weight: .semibold)
-    static let who: Font = .system(size: 13.5, weight: .semibold)
-    static let chip: Font = .system(size: 13.5, weight: .semibold)
-    static let bubbleTo: Font = .system(size: 12.5, weight: .semibold)
-    static let emptyTitle: Font = .system(size: 16, weight: .semibold)
-    static let emptyBody: Font = .system(size: 14)
+    static var cardTitle: Font { CEFont.heading(15.5) }
+    static var who: Font { .ceSystem(size: 13.5, weight: .semibold) }
+    static var chip: Font { .ceSystem(size: 13.5, weight: .semibold) }
+    static var bubbleTo: Font { .ceSystem(size: 12.5, weight: .semibold) }
+    static var emptyTitle: Font { .ceSystem(size: 16, weight: .semibold) }
+    static var emptyBody: Font { .ceSystem(size: 14) }
     /// .th-retry 13 / 600.
-    static let footerAction: Font = .system(size: 13, weight: .semibold)
+    static var footerAction: Font { .ceSystem(size: 13, weight: .semibold) }
     /// .atv-file 13.5, name 550.
-    static let fileName: Font = .system(size: 13.5, weight: .medium)
+    static var fileName: Font { .ceSystem(size: 13.5, weight: .medium) }
     #else
-    static let cardTitle: Font = .callout.weight(.semibold)
-    static let who: Font = .footnote.weight(.semibold)
-    static let chip: Font = .footnote.weight(.semibold)
-    static let bubbleTo: Font = .caption.weight(.semibold)
-    static let emptyTitle: Font = .callout.weight(.semibold)
-    static let emptyBody: Font = .subheadline
-    static let footerAction: Font = .footnote.weight(.semibold)
-    static let fileName: Font = .footnote.weight(.medium)
+    static var cardTitle: Font { .callout.weight(.semibold) }
+    static var who: Font { .footnote.weight(.semibold) }
+    static var chip: Font { .footnote.weight(.semibold) }
+    static var bubbleTo: Font { .caption.weight(.semibold) }
+    static var emptyTitle: Font { .callout.weight(.semibold) }
+    static var emptyBody: Font { .subheadline }
+    static var footerAction: Font { .footnote.weight(.semibold) }
+    static var fileName: Font { .footnote.weight(.medium) }
     #endif
 }
 
@@ -2000,18 +2014,20 @@ private enum ChatFont {
 private struct ChatCardSurface: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: CERadius.card, style: .continuous)
-        if reduceTransparency {
+        let shape = RoundedRectangle(cornerRadius: CE.isStandard ? CERadius.card : CE.style.bubbleRadius, style: .continuous)
+        if !CE.isStandard {
+            ChatThemedCard(content: content, shape: shape)
+        } else if reduceTransparency {
             content.background(CE.plateSolid, in: shape).overlay { shape.strokeBorder(CE.lineStrong) }
         } else {
             content
                 .background(ChatPalette.cardFill, in: shape)
                 .overlay {
                     ZStack {
-                        shape.strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-                        shape.strokeBorder(Color.white.opacity(0.42), lineWidth: 0.5)
+                        shape.strokeBorder(CE.wash.opacity(0.08), lineWidth: 1)
+                        shape.strokeBorder(CE.wash.opacity(0.42), lineWidth: 0.5)
                             .mask(alignment: .top) {
-                                LinearGradient(colors: [.white, .white.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 8)
+                                LinearGradient(colors: [.white, CE.wash.opacity(0)], startPoint: .top, endPoint: .bottom).frame(height: 8)
                             }
                     }
                     .allowsHitTesting(false)
@@ -2100,7 +2116,7 @@ private struct ChatAttachmentItem: View {
     // MARK: Image (web .atv-thumb)
 
     private var thumbnail: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         return Button {
             if let fileURL { quickLook = fileURL } else { Task { await load() } }
         } label: {
@@ -2133,7 +2149,7 @@ private struct ChatAttachmentItem: View {
             }
             .frame(width: Self.thumbSize.width, height: Self.thumbSize.height)
             .clipShape(shape)
-            .overlay { shape.strokeBorder(Color.white.opacity(hovering ? 0.28 : 0.1), lineWidth: 1) }
+            .overlay { shape.strokeBorder(CE.wash.opacity(hovering ? 0.28 : 0.1), lineWidth: 1) }
             .contentShape(shape)
             .animation(.linear(duration: 0.12), value: hovering)
         }
@@ -2154,18 +2170,18 @@ private struct ChatAttachmentItem: View {
 
     /// 13.5 at 1.35, padding 6 14, radius 12, white .07 (hover .13) with a white .1 ring; name 550, size 12.5 ink-2.
     private var fileChip: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         return VStack(alignment: .leading, spacing: 6) {
             Button { openFile() } label: {
                 HStack(spacing: 10) {
                     Group {
                         if loading { ProgressView().controlSize(.mini) }
-                        else { Image(systemName: fileKindIcon(chatAttachmentKind(attachment))).font(.system(size: 13)) }
+                        else { Image(systemName: fileKindIcon(chatAttachmentKind(attachment))).font(.ceSystem(size: 13)) }
                     }
                     .foregroundStyle(onBubble ? ChatPalette.bubbleTo : CE.ink2)
                     .frame(width: 16)
                     Text(displayName).font(ChatFont.fileName)
-                        .foregroundStyle(onBubble ? Color.white : CE.ink)
+                        .foregroundStyle(onBubble ? CE.palette.onOwnerBubble : CE.ink)
                         .lineLimit(1).truncationMode(.middle)
                     Text(sizeText).font(CEFont.meta).monospacedDigit()
                         .foregroundStyle(onBubble ? ChatPalette.bubbleTo : CE.ink2)
@@ -2173,8 +2189,8 @@ private struct ChatAttachmentItem: View {
                 }
                 .padding(.horizontal, 14).padding(.vertical, 6)
                 .frame(minHeight: isMac ? 36 : 44)
-                .background(Color.white.opacity(hovering ? 0.13 : 0.07), in: shape)
-                .overlay { shape.strokeBorder(Color.white.opacity(0.1), lineWidth: 1) }
+                .background(CE.wash.opacity(hovering ? 0.13 : 0.07), in: shape)
+                .overlay { shape.strokeBorder(CE.wash.opacity(0.1), lineWidth: 1) }
                 .contentShape(shape)
                 .animation(.linear(duration: 0.12), value: hovering)
             }
@@ -2195,14 +2211,14 @@ private struct ChatAttachmentItem: View {
             }
             if showText, let data, let content = String(data: data, encoding: .utf8) {
                 Text(String(content.prefix(100_000)))
-                    .font(CEFont.mono).foregroundStyle(onBubble ? Color.white : CE.ink2)
+                    .font(CEFont.mono).foregroundStyle(onBubble ? CE.palette.onOwnerBubble : CE.ink2)
                     .lineSpacing(CELeading.spacing(12.5, 1.55))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12).padding(.vertical, 10)
                     .background(onBubble ? ChatPalette.bubbleCode : CE.bgDeep.opacity(0.5),
-                                in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                in: RoundedRectangle(cornerRadius: CERadius.r(10), style: .continuous))
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.circle")
@@ -2305,4 +2321,57 @@ func chatLeadLabel(_ lead: Member) -> String {
     if lead.name.isEmpty { return rank }
     let ranks = [rank] + (lead.kind == "conductor" ? ["총괄", "Lead"] : lead.kind == "root" ? ["본사 AI", "HQ AI"] : [])
     return ranks.contains { lead.name.contains($0) } ? lead.name : "\(rank) \(lead.name)"
+}
+
+/// The edge of my bubble: the default theme's lit rim; 말랑·서리 유리 none (the fill is the bubble); 작업대 an accent bar at the
+/// leading edge of the block; 또렷 an accent ring.
+private struct ChatOwnerBubbleEdge<S: InsettableShape>: View {
+    let shape: S
+    var body: some View {
+        let style = CE.style
+        Group {
+            if style.isStandard {
+                shape.strokeBorder(ChatPalette.bubbleRim, lineWidth: 1)
+            } else if style.bubble == .flat {
+                HStack(spacing: 0) {
+                    Rectangle().fill(CE.accent).frame(width: 3)
+                    Spacer(minLength: 0)
+                }
+                .clipShape(shape)
+            } else if style.bubble == .outline {
+                shape.strokeBorder(CE.accent, lineWidth: style.borderWidth)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// A report card in the themes other than the default, by the theme's message style:
+/// - bubble (서리 유리, 말랑): the lead bubble colour; a line and soft shadow, or (flat 말랑) the colour alone;
+/// - flat (작업대): no plate, a hairline across the top;
+/// - outline (또렷): the lead bubble colour inside the theme's 2pt line.
+private struct ChatThemedCard<Content: View, S: InsettableShape>: View {
+    let content: Content
+    let shape: S
+    var body: some View {
+        let style = CE.style
+        switch style.bubble {
+        case .flat:
+            content
+                .overlay(alignment: .top) { Rectangle().fill(CE.line).frame(height: style.borderWidth) }
+        case .outline:
+            content
+                .background(ChatPalette.cardFill, in: shape)
+                .overlay { shape.strokeBorder(CE.line, lineWidth: style.borderWidth) }
+        case .bubble:
+            content
+                .background(ChatPalette.cardFill, in: shape)
+                .overlay { if style.elevation != .flat { shape.strokeBorder(CE.line, lineWidth: style.borderWidth) } }
+                .background {
+                    if style.elevation == .shadow {
+                        shape.fill(ChatPalette.cardFill).shadow(color: CE.shadow.opacity(style.dark ? 0.4 : 0.08), radius: 10, y: 3)
+                    }
+                }
+        }
+    }
 }

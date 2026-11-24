@@ -33,11 +33,11 @@ struct DraftAttachmentChips: View {
             if file.isImage {
                 ComposerChipThumb(file: file).padding(.leading, -5)
             } else {
-                Image(systemName: "doc").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink2)
+                Image(systemName: "doc").font(.ceSystem(size: 10.5, weight: .semibold)).foregroundStyle(CE.ink2)
             }
             Text(file.name).lineLimit(1).truncationMode(.middle).frame(maxWidth: 200, alignment: .leading)
             Button { drafts.removeFile(file.id, for: key) } label: {
-                Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold))
+                Image(systemName: "xmark").font(.ceSystem(size: 8.5, weight: .bold))
             }
             .buttonStyle(ChipRemoveStyle())
             .accessibilityLabel("\(file.name) 빼기")
@@ -45,8 +45,8 @@ struct DraftAttachmentChips: View {
         .font(CEFont.meta.weight(.medium))
         .foregroundStyle(CE.ink)
         .padding(.leading, 9).frame(height: 28)
-        .background(Color.white.opacity(0.08), in: Capsule())
-        .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
+        .background(CE.wash.opacity(0.08), in: CECapsule())
+        .overlay { CECapsule().strokeBorder(CE.wash.opacity(0.1)) }
         .help(file.name)
     }
 
@@ -65,8 +65,8 @@ struct DraftAttachmentChips: View {
         .font(CEFont.meta.weight(.medium))
         .foregroundStyle(CE.ink)
         .padding(.horizontal, 9).frame(height: 28)
-        .background(Color.white.opacity(0.08), in: Capsule())
-        .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
+        .background(CE.wash.opacity(0.08), in: CECapsule())
+        .overlay { CECapsule().strokeBorder(CE.wash.opacity(0.1)) }
         .accessibilityElement(children: .combine)
     }
 
@@ -82,7 +82,7 @@ struct DraftAttachmentChips: View {
                 .buttonStyle(ChipRemoveStyle()).accessibilityLabel("\(failure.name) 빼기")
         }
         .font(CEFont.meta).padding(.leading, 9).frame(height: 28)
-        .background(Color.white.opacity(0.08), in: Capsule())
+        .background(CE.wash.opacity(0.08), in: CECapsule())
         .help(friendlyLoadError(APIError(status: 0, message: failure.detail), what: "첨부", verb: "올리지"))
     }
 }
@@ -103,7 +103,7 @@ struct AttachmentPickerButton: View {
     #endif
 
     private var icon: some View {
-        Image(systemName: "paperclip").font(.system(size: 17)).frame(width: 44, height: 44)
+        Image(systemName: "paperclip").font(.ceSystem(size: 17)).frame(width: 44, height: 44)
     }
 
     var body: some View {

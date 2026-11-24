@@ -12,9 +12,9 @@ import UIKit
 
 private enum TeamFont {
     #if os(macOS)
-    static let fact: Font = .system(size: 14)
-    static let label: Font = .system(size: 13)
-    static let role: Font = .system(size: 13)
+    static let fact: Font = .ceSystem(size: 14)
+    static let label: Font = .ceSystem(size: 13)
+    static let role: Font = .ceSystem(size: 13)
     #else
     static let fact: Font = .subheadline
     static let label: Font = .footnote
@@ -146,7 +146,7 @@ private struct TeamStartPanel: View {
                         }
                     } label: {
                         HStack(spacing: 6) {
-                            if busy { ProgressView().controlSize(.small).tint(.white) }
+                            if busy { ProgressView().controlSize(.small).tint(CE.onAccent) }
                             Text(busy ? "시작하는 중" : "총괄 시작")
                         }
                     }
@@ -315,16 +315,16 @@ private struct TeamFilterChip: View {
                 if let count { Text("\(count)").monospacedDigit().fontWeight(.medium) }
             }
             #if os(macOS)
-            .font(.system(size: 13.5, weight: .semibold))
+            .font(.ceSystem(size: 13.5, weight: .semibold))
             #else
             .font(.footnote.weight(.semibold))
             #endif
             .foregroundStyle(selected || hovering ? CE.ink : CE.ink2)
             .padding(.horizontal, isMac ? 13 : 14)
             .frame(minHeight: isMac ? 36 : 44)
-            .background(selected ? CE.violet.opacity(0.42) : Color(red: 11 / 255, green: 8 / 255, blue: 26 / 255).opacity(0.55), in: Capsule())
-            .overlay { Capsule().strokeBorder(selected ? CE.violet.opacity(0.9) : Color.white.opacity(0.1)) }
-            .contentShape(Capsule())
+            .background(selected ? CE.violet.opacity(0.42) : Color(red: 11 / 255, green: 8 / 255, blue: 26 / 255).opacity(0.55), in: CECapsule())
+            .overlay { CECapsule().strokeBorder(selected ? CE.violet.opacity(0.9) : CE.wash.opacity(0.1)) }
+            .contentShape(CECapsule())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -864,7 +864,7 @@ struct MemberDetailView: View {
         let shape = RoundedRectangle(cornerRadius: CERadius.card, style: .continuous)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: icon).font(.system(size: isMac ? 13.5 : 15, weight: .semibold)).foregroundStyle(tone.color)
+                Image(systemName: icon).font(.ceSystem(size: isMac ? 13.5 : 15, weight: .semibold)).foregroundStyle(tone.color)
                 Text(title).font(CEFont.rowTitle).foregroundStyle(CE.ink)
                     .lineSpacing(CELeading.spacing(14.5, 1.35))
                     .fixedSize(horizontal: false, vertical: true)
@@ -908,7 +908,7 @@ struct MemberDetailView: View {
                                             hasDeliveryNotices: store.deliveryNotices != nil)
                                     .contentShape(Rectangle())
                             }
-                            .buttonStyle(RowButtonStyle(radius: 8))
+                            .buttonStyle(RowButtonStyle(radius: CERadius.r(8)))
                             .help("대화방에서 이 말 보기")
                         }
                     }
@@ -1149,11 +1149,11 @@ struct MemberDetailView: View {
         } label: {
             // As tall as the 32pt buttons beside it, so the row keeps one height.
             Image(systemName: "ellipsis")
-                .font(.system(size: 13, weight: .bold))
+                .font(.ceSystem(size: 13, weight: .bold))
                 .foregroundStyle(CE.ink2)
                 .frame(width: isMac ? 32 : 38, height: isMac ? 32 : 38)
-                .background(Color.white.opacity(0.06), in: Capsule())
-                .overlay { Capsule().strokeBorder(Color.white.opacity(0.1)) }
+                .background(CE.wash.opacity(0.06), in: CECapsule())
+                .overlay { CECapsule().strokeBorder(CE.wash.opacity(0.1)) }
                 .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
                 .contentShape(Rectangle())
         }
@@ -1300,7 +1300,7 @@ struct MemberDetailView: View {
                 // A change that closes and reopens the session is confirmed first; a stored-only change applies directly.
                 Button { if reopens { confirmConfig = true } else { Task { await applyConfig(m) } } } label: {
                     HStack(spacing: 6) {
-                        if busy { ProgressView().controlSize(.small).tint(.white) }
+                        if busy { ProgressView().controlSize(.small).tint(CE.onAccent) }
                         Text(busy ? "적용하는 중" : "변경 적용")
                     }
                 }
@@ -1690,9 +1690,9 @@ private struct TeamContextBar: View {
         let value = Int(min(max(pct, 0), 100).rounded())
         let due = value >= compactAt
         HStack(spacing: 8) {
-            Capsule().fill(Color.white.opacity(0.12)).frame(width: 72, height: 5)
+            CECapsule().fill(CE.wash.opacity(0.12)).frame(width: 72, height: 5)
                 .overlay(alignment: .leading) {
-                    Capsule().fill(due ? CE.attention : CE.live).frame(width: 72 * CGFloat(value) / 100, height: 5)
+                    CECapsule().fill(due ? CE.attention : CE.live).frame(width: 72 * CGFloat(value) / 100, height: 5)
                 }
             Text("\(value)%").font(CEFont.secondary).monospacedDigit().foregroundStyle(CE.ink)
             if due { Tag(String(localized: "압축 기준 도달"), tone: .attention) }
@@ -1732,7 +1732,7 @@ struct ActivityList: View {
                 Spacer(minLength: 0)
                 if loading { ProgressView().controlSize(.mini) }
                 Button { Task { await reload() } } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 26)
+                    Image(systemName: "arrow.clockwise").font(.ceSystem(size: 11, weight: .semibold)).frame(width: 26, height: 26)
                         .frame(minWidth: isMac ? nil : 44, minHeight: isMac ? nil : 44)
                         .contentShape(Rectangle())
                 }
@@ -2039,7 +2039,7 @@ struct NewMemberView: View {
     private var addButton: some View {
         Button { Task { await add() } } label: {
             HStack(spacing: 6) {
-                if busy { ProgressView().controlSize(.small).tint(.white) }
+                if busy { ProgressView().controlSize(.small).tint(CE.onAccent) }
                 Text(busy ? "추가하는 중" : "추가")
             }
         }
@@ -2108,7 +2108,7 @@ struct NewMemberView: View {
     }
 
     #if os(macOS)
-    private static let codeFont: Font = .system(size: 14, design: .monospaced)
+    private static let codeFont: Font = .ceSystem(size: 14, design: .monospaced)
     #else
     private static let codeFont: Font = .system(.subheadline, design: .monospaced)
     #endif
@@ -2154,8 +2154,8 @@ private struct DetailPlate<Content: View>: View {
             .environment(\.ceInsideGlass, true)
         if insideGlass {
             inner
-                .background(Color.white.opacity(isMac ? 0.035 : 0.045), in: shape)
-                .overlay { shape.strokeBorder(Color.white.opacity(0.065)) }
+                .background(CE.wash.opacity(isMac ? 0.035 : 0.045), in: shape)
+                .overlay { shape.strokeBorder(CE.wash.opacity(0.065)) }
         } else {
             inner.cardGlass(shape)
         }
@@ -2194,13 +2194,13 @@ private struct TeamSelect<Content: View>: View {
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.ceSystem(size: 10, weight: .semibold))
                     .foregroundStyle(isEnabled ? CE.ink2 : CE.ink3)
             }
             .padding(.horizontal, 12)
             .frame(minWidth: 170, minHeight: isMac ? 36 : 44, alignment: .leading)
             .background(CE.bgDeep.opacity(0.5), in: shape)
-            .overlay { shape.strokeBorder(Color.white.opacity(isEnabled && hovering ? 0.2 : 0.12)) }
+            .overlay { shape.strokeBorder(CE.wash.opacity(isEnabled && hovering ? 0.2 : 0.12)) }
             .contentShape(shape)
         }
         .menuStyle(.button)
@@ -2213,8 +2213,8 @@ private struct TeamSelect<Content: View>: View {
     }
 
     #if os(macOS)
-    private static var font: Font { .system(size: 13.5) }
-    private static var monoFont: Font { .system(size: 13, design: .monospaced) }
+    private static var font: Font { .ceSystem(size: 13.5) }
+    private static var monoFont: Font { .ceSystem(size: 13, design: .monospaced) }
     #else
     private static var font: Font { .subheadline }
     private static var monoFont: Font { .system(.subheadline, design: .monospaced) }
@@ -2233,7 +2233,7 @@ private extension View {
     func detailField() -> some View {
         self.textFieldStyle(.plain)
             .padding(.horizontal, 11).padding(.vertical, 8)
-            .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
+            .background(CE.wash.opacity(0.05), in: RoundedRectangle(cornerRadius: CERadius.control, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: CERadius.control, style: .continuous).strokeBorder(CE.line) }
     }
 }
@@ -2250,7 +2250,7 @@ private struct TeamFoldStyle: DisclosureGroupStyle {
             } label: {
                 HStack(spacing: 9) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 10.5, weight: .bold))
+                        .font(.ceSystem(size: 10.5, weight: .bold))
                         .foregroundStyle(CE.ink2)
                         .rotationEffect(.degrees(configuration.isExpanded ? 90 : 0))
                     configuration.label
@@ -2414,7 +2414,7 @@ struct TeamMemberStatusBadge: View {
                 .lineLimit(1)
         }
         .padding(.leading, 8).padding(.trailing, 9).frame(minHeight: 24)
-        .background(Self.fill(info.tone), in: Capsule())
+        .background(Self.fill(info.tone), in: CECapsule())
         .help(info.explanation)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("CLI 상태 \(info.label). \(info.explanation)")
@@ -2427,7 +2427,7 @@ struct TeamMemberStatusBadge: View {
         case .approval: CE.approval.opacity(0.17)
         case .danger: CE.error.opacity(0.15)
         case .success: CE.success.opacity(0.14)
-        case .neutral: Color.white.opacity(0.06)
+        case .neutral: CE.wash.opacity(0.06)
         case .dim: Color.clear
         }
     }

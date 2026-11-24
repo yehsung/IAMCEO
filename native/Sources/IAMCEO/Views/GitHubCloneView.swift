@@ -80,7 +80,7 @@ struct GitHubCloneView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     // web .input: the search well with its glass, focus ring and all.
                     HStack(spacing: 9) {
-                        Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .medium)).foregroundStyle(CE.ink3)
+                        Image(systemName: "magnifyingglass").font(.ceSystem(size: 13, weight: .medium)).foregroundStyle(CE.ink3)
                             .accessibilityHidden(true)
                         TextField("검색", text: $search, prompt: Text("저장소 이름으로 찾기"))
                             .labelsHidden().font(SetupFont.input).autocorrectionDisabled()
@@ -103,7 +103,7 @@ struct GitHubCloneView: View {
                         }.padding(5)
                     }
                     .frame(height: isMac ? 300 : 280)
-                    .background(Color.white.opacity(0.025), in: shape)
+                    .background(CE.wash.opacity(0.025), in: shape)
                     .overlay { shape.strokeBorder(CE.line) }
                 }
             } else {
@@ -130,12 +130,12 @@ struct GitHubCloneView: View {
 
     /// Where it lands: the final folder path as a tile, with the place to change it.
     private var destinationSection: some View {
-        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(13), style: .continuous)
         return SetupField(String(localized: "받을 위치")) {
             HStack(spacing: 12) {
-                Image(systemName: "folder.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(CE.accent)
+                Image(systemName: "folder.fill").font(.ceSystem(size: 14, weight: .semibold)).foregroundStyle(CE.accent)
                     .frame(width: 30, height: 30)
-                    .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(CE.violet.opacity(0.16), in: RoundedRectangle(cornerRadius: CERadius.r(8), style: .continuous))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(preview.isEmpty ? (parent.isEmpty ? String(localized: "받을 위치를 골라 주세요") : parent) : preview)
@@ -155,8 +155,8 @@ struct GitHubCloneView: View {
                     .disabled(cloning || loading)
             }
             .padding(.leading, 12).padding(.trailing, 10).padding(.vertical, 10)
-            .background(Color.white.opacity(0.04), in: shape)
-            .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
+            .background(CE.wash.opacity(0.04), in: shape)
+            .overlay { shape.strokeBorder(CE.wash.opacity(0.1)) }
             .accessibilityElement(children: .combine)
             .accessibilityLabel(preview.isEmpty ? String(localized: "받을 위치: \(parent)") : String(localized: "최종 폴더: ") + preview)
         }
@@ -168,7 +168,7 @@ struct GitHubCloneView: View {
         return Button { selectedRepo = repository.nameWithOwner; address = "" } label: {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "book.closed")
-                    .font(.system(size: 14, weight: .medium)).foregroundStyle(selected ? CE.accent : CE.ink3)
+                    .font(.ceSystem(size: 14, weight: .medium)).foregroundStyle(selected ? CE.accent : CE.ink3)
                     .frame(width: 18).padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 7) {
@@ -257,7 +257,7 @@ private struct RepoRowStyle: ButtonStyle {
         let selected: Bool
         @State private var hovering = false
         var body: some View {
-            let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: CERadius.r(10), style: .continuous)
             configuration.label
                 .contentShape(shape)
                 .background {
@@ -265,7 +265,7 @@ private struct RepoRowStyle: ButtonStyle {
                         shape.fill(CE.violet.opacity(configuration.isPressed ? 0.3 : 0.24))
                             .overlay { shape.strokeBorder(CE.violet.opacity(0.9), lineWidth: 1.5) }
                     } else {
-                        shape.fill(Color.white.opacity(configuration.isPressed ? 0.09 : hovering ? 0.06 : 0))
+                        shape.fill(CE.wash.opacity(configuration.isPressed ? 0.09 : hovering ? 0.06 : 0))
                     }
                 }
                 .onHover { hovering = $0 }

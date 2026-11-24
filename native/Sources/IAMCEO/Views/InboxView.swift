@@ -381,7 +381,7 @@ struct InboxView: View {
             .accessibilityHint("팀원 상세를 엽니다")
             Button { copyCommand(command, member: member.id) } label: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.ceSystem(size: 13, weight: .medium))
                     .foregroundStyle(copied ? CE.success : CE.ink2)
                     .frame(width: isMac ? 32 : 40, height: isMac ? 32 : 44)
                     .contentShape(Rectangle())
@@ -600,7 +600,7 @@ struct InboxView: View {
                 }
                 .padding(.vertical, 12).padding(.horizontal, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .background(CE.wash.opacity(0.05), in: RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous))
                 .padding(.top, 2)
             }
         }
@@ -1381,7 +1381,7 @@ struct OptionTile: View {
     @State private var hovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(14), style: .continuous)
         // Web .ibx-opt: min 48, padding 11 14, gap 3; label 15 / 600 at 1.4, description 13 at 1.5 ink-2.
         Button(action: action) {
             VStack(alignment: .leading, spacing: 3) {
@@ -1394,7 +1394,7 @@ struct OptionTile: View {
                     if option.needsNote { Tag(String(localized: "메모 필요")) }
                     Spacer(minLength: 0)
                     if picked {
-                        Image(systemName: "checkmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                        Image(systemName: "checkmark").font(.ceSystem(size: 13, weight: .bold)).foregroundStyle(CE.onSelection)
                             .accessibilityHidden(true)
                     }
                 }
@@ -1419,7 +1419,7 @@ struct OptionTile: View {
 
     private var labelFont: Font {
         #if os(macOS)
-        .system(size: 15, weight: .semibold)
+        .ceSystem(size: 15, weight: .semibold)
         #else
         CEFont.rowTitle
         #endif
@@ -1429,12 +1429,12 @@ struct OptionTile: View {
     private var fill: Color {
         if picked { return CE.violet.opacity(0.5) }
         if recommended && !somethingPicked { return CE.violet.opacity(lit ? 0.32 : 0.2) }
-        return Color.white.opacity(lit ? 0.11 : 0.06)
+        return CE.wash.opacity(lit ? 0.11 : 0.06)
     }
     private var stroke: (color: Color, width: CGFloat) {
         if picked { return (CE.accent, 2) }
         if recommended { return somethingPicked ? (CE.violet.opacity(0.5), 1) : (CE.violet.opacity(0.9), 1.5) }
-        return (Color.white.opacity(0.14), 1)
+        return (CE.wash.opacity(0.14), 1)
     }
 }
 
@@ -1442,10 +1442,10 @@ struct OptionTile: View {
 private struct RecommendedBadge: View {
     var body: some View {
         Text("권장")
-            .font(isMac ? .system(size: 12, weight: .semibold) : CEFont.caption.weight(.semibold))
-            .foregroundStyle(.white)
+            .font(isMac ? .ceSystem(size: 12, weight: .semibold) : CEFont.caption.weight(.semibold))
+            .foregroundStyle(CE.onAccent)
             .padding(.horizontal, 7).frame(minWidth: 20, minHeight: 20)
-            .background(CE.accentFill, in: Capsule())
+            .background(CE.accentFill, in: CECapsule())
             .fixedSize()
     }
 }
@@ -1610,7 +1610,7 @@ private struct AnswerFlow: View {
         // Web .ibx-flow: 12.5 / 600, gap 5, a 12×8 arrow.
         HStack(spacing: 5) {
             Text("보냄").foregroundStyle(CE.success)
-            Image(systemName: "arrow.right").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(CE.ink3)
+            Image(systemName: "arrow.right").font(.ceSystem(size: 9.5, weight: .semibold)).foregroundStyle(CE.ink3)
             Text("받음").foregroundStyle(received ? CE.success : CE.ink3)
         }
         .font(CEFont.meta.weight(.semibold))
@@ -1671,19 +1671,19 @@ private struct InboxSegmentItem: View {
                 }
             }
             .font(segmentFont)
-            .foregroundStyle(selected ? Color.white : hovering ? CE.ink : CE.ink2)
+            .foregroundStyle(selected ? CE.onSelection : hovering ? CE.ink : CE.ink2)
             .lineLimit(1)
             .padding(.horizontal, stretch ? 8 : 14)
             .frame(maxWidth: stretch ? .infinity : nil, minHeight: isMac ? 40 : 44)
             .background {
                 if selected {
-                    Capsule().fill(CE.violet.opacity(0.42))
-                        .overlay { Capsule().strokeBorder(CE.violet.opacity(0.9)) }
+                    CECapsule().fill(CE.violet.opacity(0.42))
+                        .overlay { CECapsule().strokeBorder(CE.violet.opacity(0.9)) }
                         .shadow(color: CE.violet.opacity(0.45), radius: 10, y: 2)
                         .matchedGeometryEffect(id: "drop", in: drop)
                 }
             }
-            .contentShape(Capsule())
+            .contentShape(CECapsule())
             .animation(.linear(duration: 0.12), value: hovering)
         }
         .buttonStyle(.plain)
@@ -1694,7 +1694,7 @@ private struct InboxSegmentItem: View {
 
     private var segmentFont: Font {
         #if os(macOS)
-        .system(size: 13.5, weight: .semibold)
+        .ceSystem(size: 13.5, weight: .semibold)
         #else
         CEFont.rowTitle
         #endif
@@ -1707,12 +1707,12 @@ private struct InboxCount: View {
     var accent = false
     var body: some View {
         Text("\(count)")
-            .font(isMac ? .system(size: 12, weight: .semibold) : CEFont.caption.weight(.semibold))
+            .font(isMac ? .ceSystem(size: 12, weight: .semibold) : CEFont.caption.weight(.semibold))
             .monospacedDigit()
-            .foregroundStyle(accent ? Color.white : CE.ink)
+            .foregroundStyle(accent ? CE.onAccent : CE.ink)
             .padding(.horizontal, 6)
             .frame(minWidth: 20, minHeight: 20)
-            .background(accent ? CE.accentFill : Color.white.opacity(0.12), in: Capsule())
+            .background(accent ? CE.accentFill : CE.wash.opacity(0.12), in: CECapsule())
             .fixedSize()
     }
 }
@@ -1785,10 +1785,10 @@ private struct DisclosureLink: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Text(title)
-                Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold))
+                Image(systemName: "chevron.down").font(.ceSystem(size: 10, weight: .semibold))
                     .rotationEffect(.degrees(expanded ? 180 : 0))
             }
-            .font(isMac ? .system(size: 13.5, weight: .semibold) : CEFont.note.weight(.semibold))
+            .font(isMac ? .ceSystem(size: 13.5, weight: .semibold) : CEFont.note.weight(.semibold))
             .foregroundStyle(hovering ? CE.ink : CE.accent)
             .frame(minHeight: isMac ? 30 : 44)
             .contentShape(Rectangle())
@@ -1841,7 +1841,7 @@ private struct DecisionThumb: View {
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
         Button {
             if let fileURL { quickLook = fileURL } else {
                 Task {
@@ -1855,18 +1855,18 @@ private struct DecisionThumb: View {
                     image.resizable().scaledToFill().frame(width: width, height: height)
                 } else {
                     ZStack {
-                        Color.white.opacity(0.04)
+                        CE.wash.opacity(0.04)
                         if loading {
                             ProgressView().controlSize(.small)
                         } else {
-                            Image(systemName: "photo").font(.system(size: 18)).foregroundStyle(CE.ink3)
+                            Image(systemName: "photo").font(.ceSystem(size: 18)).foregroundStyle(CE.ink3)
                         }
                     }
                     .frame(width: height, height: height)
                 }
             }
             .clipShape(shape)
-            .overlay { shape.strokeBorder(Color.white.opacity(hovering ? 0.22 : 0.12)) }
+            .overlay { shape.strokeBorder(CE.wash.opacity(hovering ? 0.22 : 0.12)) }
             .contentShape(shape)
         }
         .buttonStyle(.plain)
@@ -1911,14 +1911,14 @@ private struct FileChip: View {
         let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
         Button(action: action) {
             HStack(spacing: 7) {
-                Image(systemName: "doc.text").font(.system(size: 14, weight: .medium))
+                Image(systemName: "doc.text").font(.ceSystem(size: 14, weight: .medium))
                 Text(title.map { "자료 보기: \($0)" } ?? "자료 보기").lineLimit(1).truncationMode(.middle)
             }
-            .font(isMac ? .system(size: 14, weight: .medium) : CEFont.body.weight(.medium)).foregroundStyle(CE.accent)
+            .font(isMac ? .ceSystem(size: 14, weight: .medium) : CEFont.body.weight(.medium)).foregroundStyle(CE.accent)
             .padding(.leading, 11).padding(.trailing, 14)
             .frame(minHeight: isMac ? 36 : 44)
-            .background(Color.white.opacity(hovering ? 0.09 : 0.05), in: shape)
-            .overlay { shape.strokeBorder(Color.white.opacity(0.1)) }
+            .background(CE.wash.opacity(hovering ? 0.09 : 0.05), in: shape)
+            .overlay { shape.strokeBorder(CE.wash.opacity(0.1)) }
             .contentShape(shape)
         }
         .buttonStyle(.plain)

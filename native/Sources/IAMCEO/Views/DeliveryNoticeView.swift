@@ -138,7 +138,7 @@ private struct DeliveryNoticeRow: View {
 
     /// The message as a quoted well (at most four lines; the full text is in 원문 보기).
     private func quoted(_ text: String) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(10), style: .continuous)
         return Text(text).font(CEFont.body).foregroundStyle(CE.ink)
             .lineLimit(4)
             .ceLineHeight(14.5, 1.55)

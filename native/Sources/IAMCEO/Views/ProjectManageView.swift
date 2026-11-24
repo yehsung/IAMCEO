@@ -398,10 +398,10 @@ private struct QuietLinkLabel: View {
     let trailingChevron: Bool
     var body: some View {
         HStack(spacing: 4) {
-            if let icon { Image(systemName: icon).font(.system(size: 9.5, weight: .bold)).accessibilityHidden(true) }
+            if let icon { Image(systemName: icon).font(.ceSystem(size: 9.5, weight: .bold)).accessibilityHidden(true) }
             Text(title)
             if trailingChevron {
-                Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold)).accessibilityHidden(true)
+                Image(systemName: "chevron.right").font(.ceSystem(size: 8, weight: .bold)).accessibilityHidden(true)
             }
         }
         .font(CEFont.meta.weight(.semibold))

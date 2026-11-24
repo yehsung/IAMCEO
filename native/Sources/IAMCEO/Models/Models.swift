@@ -676,6 +676,8 @@ struct Bootstrap: Codable, Sendable, Equatable {
     var server: ServerVersionInfo? = nil
     /// D5: 앱과 서버가 실제로 맞지 않을 때만 실린다.
     var compat: CompatState? = nil
+    /// 0.2.11: 설치된 CLI 마다 지금 판·최신 판·업데이트 진행(CLIUpdateModels.swift). 옛 서버는 nil.
+    var cliUpdates: [CLIUpdateInfo]? = nil
 }
 extension Bootstrap {
     init(from decoder: Decoder) throws {
@@ -695,6 +697,8 @@ extension Bootstrap {
         tailnet = c.lenient(TailnetState.self, forKey: ModelKey("tailnet"))
         server = c.lenient(ServerVersionInfo.self, forKey: ModelKey("server"))
         compat = c.lenient(CompatState.self, forKey: ModelKey("compat"))
+        // 읽지 못한 CLI 하나만 버린다. 칸이 배열이 아니면 '없음'(옛 서버처럼).
+        cliUpdates = c.lenientArray(CLIUpdateInfo.self, forKey: ModelKey("cliUpdates"))
     }
 }
 

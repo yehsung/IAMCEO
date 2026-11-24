@@ -222,6 +222,7 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
     @ObservationIgnored private var openingHome = false
     @ObservationIgnored private var foreignHomeNoticeShown = false
     @ObservationIgnored private var tailnetOff = TailnetOffTracker()
+    @ObservationIgnored private var cliUpdateNotices = CLIUpdateNoticeTracker(defaults: nil)
     private static let enabledKey = "iamceo.macNotifications.enabled.v1"
     /// userInfo key of an operating notice (not tied to a decision, report or member).
     nonisolated static let noticeKey = "iamceoNotice"
@@ -229,6 +230,7 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
     init(defaults: UserDefaults? = .standard, delivery: (any MacNotificationDelivering)? = nil) {
         self.defaults = defaults; self.delivery = delivery ?? SystemMacNotifications()
         enabled = defaults?.bool(forKey: Self.enabledKey) ?? false
+        cliUpdateNotices = CLIUpdateNoticeTracker(defaults: defaults)
         super.init()
     }
 
@@ -292,6 +294,23 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// 0.2.11: CLI 새 판. 서버는 스크립트 알림을 맡는 동안(macScriptNotifications 가 false 가 아님) 자기 알림을 낸다. 이 앱이 Mac 알림을
+    /// 맡으면 같은 글을 여기서 판마다 한 번 띄운다. 맡지 않는 동안 본 판은 처리한 것으로 적어, 나중에 맡아도 옛 판을 다시 알리지 않는다.
+    @discardableResult
+    func noteCLIUpdates(_ updates: [CLIUpdateInfo]?, serverID: String, appOwnsNotifications: Bool) -> Task<Void, Never>? {
+        let fresh = cliUpdateNotices.take(updates, serverID: serverID, appOwnsNotifications: enabled && appOwnsNotifications)
+        guard !fresh.isEmpty else { return nil }
+        return Task { [weak self] in
+            guard let self else { return }
+            for info in fresh {
+                do {
+                    try await self.delivery.deliverNotice(identifier: CLIUpdateNoticeTracker.identifier(server: serverID, info: info),
+                                                          title: CLIUpdateText.available([info]), body: CLIUpdateText.macNotificationBody)
+                } catch { self.permissionNotice = friendlyLoadError(error, what: "Mac 알림", verb: "띄우지") }
+            }
+        }
+    }
+
     /// The main window is in front, so its status strips are being read.
     private var mainWindowInFront: Bool {
         NSApp.isActive && NSApp.keyWindow?.identifier?.rawValue == "IAMCEO.MainWindow"
@@ -304,6 +323,11 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
             noteTailnet(store.bootstrap?.tailnet, serverID: serverID,
                         appOwnsNotifications: store.serverIsThisMac && store.connectionStatus == .connected && !store.showsOffline
                             && !store.isRestarting && store.bootstrap?.settings.macScriptNotifications == false)
+            // 0.2.11: 서버의 말이 지금 것일 때만(연결됨) 본다. 다른 Mac 의 서버는 그 Mac 의 앱이 알린다.
+            if store.serverIsThisMac, store.connectionStatus == .connected, !store.showsOffline, !store.isRestarting {
+                noteCLIUpdates(store.bootstrap?.cliUpdates, serverID: serverID,
+                               appOwnsNotifications: store.bootstrap?.settings.macScriptNotifications == false)
+            }
         }
         let badgeSignature = store.projects.map { "\($0.id):\($0.needsCount ?? -1):\($0.inboxCount):\($0.blockedCount)" }.joined(separator: ",")
         if badgeSignature != storeBadgeSignature {
@@ -467,9 +491,20 @@ final class MacNotificationService: NSObject, UNUserNotificationCenterDelegate {
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let envelope = (response.notification.request.content.userInfo["iamceoMac"] as? Data)
             .flatMap { try? JSONDecoder().decode(MacNotificationEnvelope.self, from: $0) }
+        let notice = response.notification.request.content.userInfo[Self.noticeKey] as? String
         completionHandler()
         if response.actionIdentifier == UNNotificationDefaultActionIdentifier, let envelope {
             Task { @MainActor in self.receiveTap(envelope) }
+        } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier, let notice, notice.contains(":cli_update:") {
+            // 0.2.11: CLI 새 판 알림은 설정 › 실행 환경을 연다.
+            // 알림 id(<서버>:cli_update:<cli>:<판>)의 CLI 확인 창까지 띄운다(올릴 수 있을 때).
+            let parts = notice.components(separatedBy: ":")
+            let cli = parts.count >= 4 ? parts[parts.count - 2] : nil
+            Task { @MainActor in
+                NSApp.activate(ignoringOtherApps: true)
+                if let cli { SettingsNavigation.shared.requestUpdate(cli: cli) } else { SettingsView.showRuntime() }
+                self.router?.showSettings = true
+            }
         }
     }
 }

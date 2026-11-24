@@ -22411,6 +22411,259 @@
         }
       }
     },
+    "%@ 업데이트가 있습니다" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update available: %@"
+          }
+        }
+      }
+    },
+    "설정 › AI 모델 › 실행 환경에서 업데이트할 수 있습니다." : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You can update it in Settings › AI models › Runtime."
+          }
+        }
+      }
+    },
+    "새 판 %@ · IAMCEO가 확인한 판" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "New version %@ · checked by IAMCEO"
+          }
+        }
+      }
+    },
+    "새 판 %@ · 아직 IAMCEO가 확인하지 않은 판" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "New version %@ · not yet checked by IAMCEO"
+          }
+        }
+      }
+    },
+    "이 Mac의 터미널에서 직접 업데이트하세요: %@" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update it yourself in Terminal on the Mac: %@"
+          }
+        }
+      }
+    },
+    "이 설치 방식은 IAMCEO가 업데이트하지 못합니다. 깐 방법으로 직접 업데이트하세요." : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "IAMCEO can't update this kind of install. Update it the way you installed it."
+          }
+        }
+      }
+    },
+    "내려받는 중…" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Downloading…"
+          }
+        }
+      }
+    },
+    "설치 중…" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Installing…"
+          }
+        }
+      }
+    },
+    "새 판을 확인하는 중…" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking the new version…"
+          }
+        }
+      }
+    },
+    "업데이트하는 중…" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Updating…"
+          }
+        }
+      }
+    },
+    "%@으로 올렸습니다" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Updated to %@"
+          }
+        }
+      }
+    },
+    "%@로 올렸습니다" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Updated to %@"
+          }
+        }
+      }
+    },
+    "적용 중: %lld명 남음" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Applying: %lld left"
+          }
+        }
+      }
+    },
+    "업데이트하지 못했습니다. 옛 판이 그대로 남아 있습니다." : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't update. The old version is still in place."
+          }
+        }
+      }
+    },
+    "직접 할 명령: %@" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Command to run yourself: %@"
+          }
+        }
+      }
+    },
+    "지금 판" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "current version"
+          }
+        }
+      }
+    },
+    "IAMCEO가 화면 견본으로 확인한 판입니다." : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "IAMCEO has checked this version against its screen samples."
+          }
+        }
+      }
+    },
+    "아직 IAMCEO가 확인하지 않은 판이라 화면 판독이 어긋날 수 있습니다." : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "IAMCEO hasn't checked this version yet, so reading its screens may go wrong."
+          }
+        }
+      }
+    },
+    "떠 있는 총괄·팀장 %lld명은 쉬는 때에 같은 대화로 다시 열려 새 판을 씁니다(일하는 중이면 그 턴이 끝난 뒤)." : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld running leads and staff reopen in the same conversation when idle and use the new version (after the current turn if they are working)."
+          }
+        }
+      }
+    },
+    "서버가 있는 Mac에서 실행할 명령: %@" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Command run on the server's Mac: %@"
+          }
+        }
+      }
+    },
+    "실패하면 옛 판이 그대로 남습니다." : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "If it fails, the old version stays in place."
+          }
+        }
+      }
+    },
+    "업데이트를 시작하지 못했습니다." : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't start the update."
+          }
+        }
+      }
+    },
+    "업데이트" : {
+      "comment" : "0.2.11 CLI 업데이트(설정 › 실행 환경·상태 띠·Mac 알림)",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update"
+          }
+        }
+      }
+    },
     "server.text.chat.member_error" : {
       "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
       "localizations" : {
@@ -23801,6 +24054,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "CLI 계정이 바뀌어(대표가 다른 계정으로 로그인) 같은 대화를 새 계정으로 이어 열었습니다"
+          }
+        }
+      }
+    },
+    "server.text.activity.cli_update_reopen" : {
+      "comment" : "Y(0.2.6) 서버가 만든 글의 틀. {이름} 은 값, {이름:이} 는 한국어 조사. 원본 shared/server-text.ts",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The CLI was updated, so the same conversation was reopened with the new version"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CLI를 새 판으로 업데이트해 같은 대화를 새 판으로 이어 열었습니다"
           }
         }
       }

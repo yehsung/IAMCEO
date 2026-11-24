@@ -140,7 +140,7 @@ extension AppStore {
               let bootstrap, let confirmed = lastSuccessfulSyncAt else { return nil }
         var saved = bootstrap
         // 진단·장애 같은 그때뿐인 값은 남기지 않는다(낡은 경고를 지금 것처럼 보이지 않게).
-        saved.apiOutage = nil; saved.runtime = nil; saved.compat = nil
+        saved.apiOutage = nil; saved.runtime = nil; saved.compat = nil; saved.cliUpdates = nil
         let current = state.flatMap { $0.project.id == selectedProjectID && !$0.project.archived ? $0 : nil }
         return LastSeenSnapshot(namespace: writeNamespace, savedAt: confirmed, serverID: serverID, bootstrap: saved, state: current)
     }

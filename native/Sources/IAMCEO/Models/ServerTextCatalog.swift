@@ -88,6 +88,7 @@ enum ServerTextCatalog {
         case "activity.login_reopen_continue": return String(localized: "server.text.activity.login_reopen_continue", defaultValue: "다시 로그인해 로그인 오류로 멈춘 세션을 같은 대화로 이어 엽니다")
         case "activity.login_reopen_new": return String(localized: "server.text.activity.login_reopen_new", defaultValue: "다시 로그인해 로그인 오류로 멈춘 세션을 새 세션으로 엽니다")
         case "activity.account_reopen": return String(localized: "server.text.activity.account_reopen", defaultValue: "CLI 계정이 바뀌어(대표가 다른 계정으로 로그인) 같은 대화를 새 계정으로 이어 열었습니다")
+        case "activity.cli_update_reopen": return String(localized: "server.text.activity.cli_update_reopen", defaultValue: "CLI를 새 판으로 업데이트해 같은 대화를 새 판으로 이어 열었습니다")
         case "activity.orphan_compact_own": return String(localized: "server.text.activity.orphan_compact_own", defaultValue: "압축을 받은 터미널이 끝나 그 압축을 닫았습니다. 밀린 전달을 이어 갑니다")
         case "activity.orphan_compact_left": return String(localized: "server.text.activity.orphan_compact_left", defaultValue: "넣지 못한 압축이 확인 대기로 남아 있어 닫았습니다. 밀린 전달을 이어 갑니다")
         case "activity.stale_turn_cleared": return String(localized: "server.text.activity.stale_turn_cleared", defaultValue: "끝난 턴의 표시가 남아 전달이 멈춰 있었습니다. 표시를 지우고 다시 보냅니다")

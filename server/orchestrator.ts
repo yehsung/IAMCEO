@@ -608,6 +608,8 @@ export class Orchestrator implements OrchestratorApi {
   private accountEpochs: CliAccountEpochs | null = null;
   /** 0.2.8: 로그인 뒤 멈춘 팀장을 다시 여는 일(시험이 기다린다). */
   accountReopening: Promise<void> = Promise.resolve();
+  /** 0.2.11: CLI 별 업데이트 세대(api_recovery_state 의 cli_update_epochs). 처음 쓸 때 읽는다. */
+  private updateEpochs: Partial<Record<CliProvider, number>> | null = null;
   /** K(E2): 도구 승인 카드와 그 답을 기다리는 훅(server/tool-permission.ts). */
   readonly toolPermissions: ToolPermissions;
   private settingsWriting = false;
@@ -2460,6 +2462,8 @@ export class Orchestrator implements OrchestratorApi {
       const sameProvider = patch.cli === member.cli;
       // 0.2.8: 다른 계정으로 로그인한 뒤 계정만 바뀐 세션을 같은 대화로 다시 여는 것(설정은 그대로)이면 인계 글 없이 활동 한 줄만 남긴다.
       const accountOnly = !freshSession && sameProvider && !usage && !account && this.accountOnlyPending(member);
+      // 0.2.11: CLI 를 새 판으로 올린 뒤 같은 대화를 새 판으로 다시 여는 것(설정·계정은 그대로)도 인계 글 없이 활동 한 줄만 남긴다.
+      const updateOnly = !freshSession && sameProvider && !usage && !account && !accountOnly && this.updateOnlyPending(member);
       let continued = false;
       this.store.transaction(() => {
         this.endExecution(member, "interrupted", textRef(freshSession ? "why.fresh_session" : "why.settings_changed"));
@@ -2488,8 +2492,9 @@ export class Orchestrator implements OrchestratorApi {
       ].join("\n");
       // 사용 한도로 멈춘 팀장의 모델만 바꿔 같은 대화를 이어 열었다: 이어가기 글(하던 일이 없었으면 활동 한 줄)이 모델을 바꿨다고 이미 알린다.
       // 같은 대화라 역할·상황도 그대로다. 인계 글을 다음 턴에 붙이지 않는다(일반 설정 변경과 새 세션·다른 CLI 는 지금처럼 넣는다).
-      const handoffNeeded = !((usage || loginStopped || accountOnly) && sameProvider && resumable) && !pristine;
+      const handoffNeeded = !((usage || loginStopped || accountOnly || updateOnly) && sameProvider && resumable) && !pristine;
       if (accountOnly && resumable) this.store.appendActivity(member.id, "system", textRef("activity.account_reopen"));
+      if (updateOnly && resumable) this.store.appendActivity(member.id, "system", textRef("activity.cli_update_reopen"));
       if (handoffNeeded) this.store.enqueue({ projectId: project.id, memberId: member.id, kind: "system", text: formatSystem(handoff), wake: false });
       const fresh = this.store.requireMember(member.id);
       this.openRunner(fresh);
@@ -4855,7 +4860,9 @@ export class Orchestrator implements OrchestratorApi {
     const account = this.accountEpoch(member.cli);
     // Gemini: auto 가 들지 않은 팀장은 대신하는 모드로 다시 연다(칸이 다르면 쉴 때 같은 대화를 이어 연다). 칸이 없으면 예전 적용 기록과 글자까지 같다.
     const geminiMode = this.geminiAutoFallback(member) ? { geminiMode: "auto-fallback" as const } : {};
-    return { model, effort, staffModel: staff.model, staffEffort: staff.effort, ...(account ? { account } : {}), ...geminiMode };
+    // 0.2.11: 앱에서 이 CLI 를 새 판으로 올린 뒤면 그 세대. 한 번도 없었으면 칸을 두지 않는다(예전 세션의 적용 기록과 글자까지 같다).
+    const cliUpdate = this.updateEpoch(member.cli);
+    return { model, effort, staffModel: staff.model, staffEffort: staff.effort, ...(account ? { account } : {}), ...geminiMode, ...(cliUpdate ? { cliUpdate } : {}) };
   }
 
   /**
@@ -4900,6 +4907,57 @@ export class Orchestrator implements OrchestratorApi {
   private accountEpoch(cli: Member["cli"]): number {
     return this.epochs()[cli === "codex" ? "codex" : cli === "gemini" ? "gemini" : "claude"].epoch;
   }
+  // ---- 0.2.11: CLI 새 판 적용 ----
+  private updateEpochState(): Partial<Record<CliProvider, number>> {
+    if (!this.updateEpochs) {
+      let saved: Partial<Record<CliProvider, unknown>> | null = null;
+      try { saved = this.store.loadApiRecovery<Partial<Record<CliProvider, unknown>>>("cli_update_epochs"); } catch { saved = null; }
+      this.updateEpochs = {};
+      for (const cli of CLI_PROVIDERS) {
+        const value = saved?.[cli];
+        if (Number.isInteger(value) && (value as number) > 0) this.updateEpochs[cli] = value as number;
+      }
+    }
+    return this.updateEpochs;
+  }
+  /** 그 CLI 의 업데이트 세대(올린 적이 없으면 0). CLI 마다 따로다: Codex 를 올려도 Claude 팀장은 다시 열지 않는다. */
+  private updateEpoch(cli: Member["cli"]): number {
+    return this.updateEpochState()[cli === "codex" ? "codex" : cli === "gemini" ? "gemini" : "claude"] ?? 0;
+  }
+  /** 이 세션이 지금 업데이트 세대가 아닌 판으로 떠 있다(설정·계정은 같다). */
+  private updateOnlyPending(member: Member): boolean {
+    const want = this.desiredConfig(member), have = this.store.getAppliedConfig(member.id);
+    if (!have || (want.cliUpdate ?? 0) === (have.cliUpdate ?? 0)) return false;
+    return want.model === (have.model ?? null) && want.effort === (have.effort ?? null) && want.staffModel === (have.staffModel ?? null)
+      && want.staffEffort === (have.staffEffort ?? null) && (want.account ?? 0) === (have.account ?? 0) && (want.geminiMode ?? null) === (have.geminiMode ?? null);
+  }
+  /** 새 판을 적용할 대상: 이 서버가 띄운 core 세션 가운데 보관하지 않은 프로젝트의 그 CLI 총괄·팀장(잠든 팀장은 깨울 때 새 판으로 뜬다). */
+  private updateTargets(cli: CliProvider): Member[] {
+    return this.store.listAllMembers().filter(m => m.cli === cli && m.origin === "runner" && this.backendOf(m) === "core"
+      && m.status !== "asleep" && m.status !== "offline" && (!!m.sessionId || !!m.paneId) && !this.store.getProject(m.projectId)?.archived);
+  }
+  /**
+   * 앱에서 대표가 CLI 를 새 판으로 올렸다(server/cli-update.ts). 그 CLI 의 업데이트 세대를 올린다: 떠 있는 총괄·팀장은 쉬는 때에
+   * (일하는 중이면 그 턴이 끝난 뒤) 같은 대화로 다시 열려 새 판을 쓴다(설정·계정 적용과 같은 길: configPending → syncConfig → switchProvider).
+   * 새 세션을 만들지 않는다. 잠든 팀장은 깨우지 않는다(깨울 때 새 판으로 뜬다). 답은 다음 차례에 다시 열 수.
+   */
+  async cliUpdated(cli: CliProvider): Promise<{ atNextTurn: number }> {
+    const state = this.updateEpochState();
+    state[cli] = (state[cli] ?? 0) + 1;
+    try { this.store.saveApiRecovery("cli_update_epochs", state); } catch (e) { console.warn("업데이트 세대를 저장하지 못했습니다:", (e as Error).message); }
+    const live = this.updateTargets(cli);
+    const pending = live.filter(m => this.configPending(m));
+    for (const m of pending) void this.pump(m.id);
+    return { atNextTurn: pending.length };
+  }
+  /** 그 CLI 로 떠 있는 총괄·팀장 수와, 새 판으로 다시 열기를 기다리는 수(앱의 '적용 중: N명 남음'). */
+  cliUpdateStatus(cli: CliProvider): { live: number; pending: number } {
+    const live = this.updateTargets(cli);
+    const epoch = this.updateEpoch(cli);
+    const pending = epoch ? live.filter(m => (this.store.getAppliedConfig(m.id)?.cliUpdate ?? 0) !== epoch && this.configPending(m)).length : 0;
+    return { live: live.length, pending };
+  }
+
   /** 이 세션이 지금 계정이 아닌 세대로 떠 있다(설정의 나머지는 같다). */
   private accountOnlyPending(member: Member): boolean {
     const want = this.desiredConfig(member), have = this.store.getAppliedConfig(member.id);
@@ -5031,7 +5089,8 @@ export class Orchestrator implements OrchestratorApi {
     if (this.runtime(member.id).configGaveUp === JSON.stringify(want) || deferred?.signature === JSON.stringify(want)) {
       // 0.2.8: 계정만 바뀐 세션은 다시 열기를 영영 포기하지 않는다(입력칸 글·펌프 경합으로 실패했어도). 옛 계정으로 남으면 Codex 는 토큰을 갱신하지
       // 못하고, Claude 는 대표가 바꾼 계정을 쓰지 않는다. 실패한 설정의 재시도와 같은 간격(configRetryMs, 두 번째부터 5배)이 지나면 다시 해 본다.
-      if (!(deferred?.failed && deferred.signature === JSON.stringify(want) && this.accountOnlyPending(member))) return false;
+      // 0.2.11: 새 판만 다른 세션도 같다(옛 판으로 남으면 대표가 올린 판을 쓰지 않는다).
+      if (!(deferred?.failed && deferred.signature === JSON.stringify(want) && (this.accountOnlyPending(member) || this.updateOnlyPending(member)))) return false;
       const retryAt = (Date.parse(deferred.failedAt ?? "") || 0) + this.timings.configRetryMs * ((deferred.attempts ?? 1) > 1 ? 5 : 1);
       if (Date.now() < retryAt) return false;
     }
@@ -5040,7 +5099,9 @@ export class Orchestrator implements OrchestratorApi {
       // 0.2.8: 앱에서 다른 계정으로 로그인했다. 이 세션은 이전 계정으로 떠 있다.
       || (want.account ?? 0) !== (have?.account ?? 0)
       // 0.2.10: Gemini 의 auto 가 들지 않아 대신하는 모드로 바꾼다(또는 서버를 다시 켜 auto 를 다시 해 본다).
-      || (want.geminiMode ?? null) !== (have?.geminiMode ?? null);
+      || (want.geminiMode ?? null) !== (have?.geminiMode ?? null)
+      // 0.2.11: 앱에서 이 CLI 를 새 판으로 올렸다. 이 세션은 옛 판으로 떠 있다.
+      || (want.cliUpdate ?? 0) !== (have?.cliUpdate ?? 0);
   }
 
   /** 쉬는 세션을 새 설정으로 다시 연다(같은 대화를 이어 띄운다). 이번 전달을 그대로 이어가도 되면 true. */

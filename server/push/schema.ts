@@ -7,6 +7,8 @@ export function extendPushSchema(db: Database): void {
   // 0.2.7(D4-3): tailnet_off(서버 Mac 의 Tailscale 꺼짐을 iPhone 에도). 같은 방식으로 종류 목록만 넓힌다(판 번호 없음).
   // 이전 판 서버는 이 종류를 만들지 않고, 남아 있는 그런 사건은 지금 사건이 아니라 보내지 않고 거둔다(isEventCurrent).
   widenPushEventKinds(db, "'tailnet_off'", "'todo_created','report_blocked'", "'todo_created','report_blocked','tailnet_off'");
+  // 0.2.11: cli_update(서버 Mac 의 AI 도구 새 판, 판마다 한 번). 같은 방식(판 번호 없음). 이전 판 서버는 모르는 종류를 지금 사건으로 보지 않아 보내지 않는다.
+  widenPushEventKinds(db, "'cli_update'", "'todo_created','report_blocked','tailnet_off'", "'todo_created','report_blocked','tailnet_off','cli_update'");
   // 0.2.6 Y: 그 iPhone 이 알림을 받을 언어(ko|en). 등록·설정 바꾸기 요청의 Accept-Language 로 정한다. 없으면(NULL, 옛 앱·옛 행) 한국어.
   // 열만 더한다(판 번호 없음). 이전 판 서버는 이 열을 모른 채 지나간다.
   if (!db.query<{ name: string }, []>("PRAGMA table_info(push_devices)").all().some(c => c.name === "language")) db.exec("ALTER TABLE push_devices ADD COLUMN language TEXT");

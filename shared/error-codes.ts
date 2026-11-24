@@ -552,6 +552,21 @@ export const ERROR_CODES = {
   file_tidy_batch_not_found: { ko: "판 정리 기록을 찾을 수 없습니다", en: "That version tidy-up was not found" },
   file_tidy_cycle: { ko: "판 사슬이 고리가 되는 잇기가 있어 적용하지 않았습니다. 바꾼 것은 없습니다", en: "Not applied: a link would make the versions loop back on themselves. Nothing was changed" },
   // ---- 끝 ----
+  // ---- 0.2.11: AI 도구(CLI) 원클릭 업데이트(GET·POST /api/cli-updates). 실패하면 옛 판이 남는다 ----
+  cli_update_unknown_cli: { ko: "모르는 CLI입니다", en: "Unknown CLI" },
+  cli_update_not_installed: { ko: "이 Mac에 그 CLI가 설치되어 있지 않습니다", en: "That CLI isn't installed on this Mac" },
+  cli_update_unsupported: { ko: "이 설치 방식은 IAMCEO가 업데이트하지 못합니다. 깐 방법으로 직접 업데이트하세요", en: "IAMCEO can't update this kind of install. Update it the way you installed it" },
+  cli_update_none: { ko: "새 판이 없습니다. 이미 최신 판입니다", en: "There's no new version. It's already up to date" },
+  cli_update_changed: { ko: "확인한 뒤로 최신 판이 바뀌었습니다. 다시 확인한 뒤 업데이트하세요", en: "The latest version changed since you checked. Check again, then update" },
+  cli_update_running: { ko: "이 CLI는 이미 업데이트하는 중입니다", en: "This CLI is already being updated" },
+  cli_update_test_mode: { ko: "시험 모드의 서버라 실제 업데이트 명령을 돌리지 않았습니다", en: "This server is in test mode, so it didn't run the real update command" },
+  cli_update_failed: { ko: "업데이트 명령이 실패했습니다. 옛 판이 그대로 남아 있습니다", en: "The update command failed. The old version is still in place" },
+  cli_update_timeout: { ko: "업데이트가 시간 안에 끝나지 않아 멈췄습니다. 옛 판이 그대로 남아 있을 수 있습니다", en: "The update didn't finish in time, so it was stopped. The old version may still be in place" },
+  cli_update_needs_input: { ko: "업데이트 명령이 암호나 확인을 물어 멈췄습니다. IAMCEO는 대신 답하지 않습니다. 이 Mac의 터미널에서 직접 업데이트하세요", en: "The update command asked for a password or a confirmation, so it was stopped. IAMCEO never answers for you. Update it yourself in Terminal on the Mac" },
+  cli_update_spawn_failed: { ko: "업데이트 명령을 실행하지 못했습니다", en: "Couldn't run the update command" },
+  cli_update_unchanged: { ko: "명령은 끝났지만 판이 그대로입니다", en: "The command finished, but the version didn't change" },
+  cli_update_unverified: { ko: "업데이트 뒤 판을 읽지 못했습니다. 터미널에서 판을 확인하세요", en: "Couldn't read the version after the update. Check the version in Terminal" },
+  // ---- 끝 ----
 } as const satisfies Record<string, ErrorCodeText>;
 
 export type ErrorCode = keyof typeof ERROR_CODES;

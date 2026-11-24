@@ -672,6 +672,11 @@ export interface Settings {
    * en 이면 역할 지침 끝에 영어로 쓰라는 줄이 붙는다. [대표]·[총괄] 같은 서버 머리말은 바뀌지 않는다.
    */
   reportLanguage?: ReportLanguage;
+  /**
+   * 0.2.11: AI 도구(CLI) 새 판 알림(설정 › 알림). 끄면 새 판의 iPhone 푸시·Mac 알림·앱 위쪽 띠를 내지 않는다(점검표의 '새 판 X'·업데이트 단추는 그대로).
+   * 기본 켬. 늘 내려 보내 앱이 '이 서버는 이 칸을 안다'고 알게 한다(없으면 옛 서버: 앱은 칸을 그리지 않는다).
+   */
+  notifyCliUpdates?: boolean;
 }
 
 /** B1: 대표에게 쓰는 글의 언어. */
@@ -753,6 +758,11 @@ export interface Bootstrap {
   /** D9: 이 Mac 의 Claude Code·Codex 버전과 견본 확인 여부. 아직 읽지 못했으면 없다.
    * 이름이 cli 가 아닌 것은 위의 cli(문자열)를 출시된 앱이 문자열로 풀기 때문이다. */
   cliVersions?: CliVersionInfo[];
+  /**
+   * 0.2.11: 설치된 CLI 마다 지금 판·최신 판·업데이트 진행(server/cli-update.ts). 서버가 아직 아무것도 모르면 없다.
+   * 진행이 바뀌면 서버가 projects 사건으로 스냅샷을 다시 읽게 한다(새 실시간 사건 종류를 만들지 않는다).
+   */
+  cliUpdates?: CliUpdateInfo[];
   /** D5: 이 서버의 버전과 API 단계. 버전 머리글(APP_HEADERS)을 보낸 앱에만 싣는다. 머리글이 없는 출시 앱(0.2.2·0.2.3)에는 없다. */
   server?: ServerVersionInfo;
   /** D5: 앱과 서버가 실제로 맞지 않을 때만 싣는다(업데이트 피로를 막는다). 버전 머리글이 없으면 싣지 않는다. */
@@ -1219,4 +1229,63 @@ export interface CliAccountsResponse {
 }
 export interface StartCliLoginReq { cli: CliAccountCli; restart?: boolean }
 export interface CliLoginCodeReq { code: string }
+// ---- 끝 ----
+
+// ---- 0.2.11: AI 도구(CLI) 새 판 알림과 원클릭 업데이트(server/cli-update.ts) ----
+/**
+ * CLI 를 깐 방식. 서버가 실제로 쓰는 실행 파일(server/config.ts resolveCliExecutable)의 실제 경로(realpath)로 가린다.
+ * brew_cask: <prefix>/Caskroom/<cask>/… · brew_formula: <prefix>/Cellar/<formula>/… · npm_global: <prefix>/lib/node_modules/<패키지>/… ·
+ * claude_native: ~/.local/share/claude/versions/… (`claude update`) · agy_self: Antigravity CLI 는 스스로 업데이트한다(`agy update`) · unknown: 모른다(직접 업데이트 안내만).
+ */
+export type CliInstallMethod = "brew_cask" | "brew_formula" | "npm_global" | "claude_native" | "agy_self" | "unknown";
+export const CLI_INSTALL_METHODS = ["brew_cask", "brew_formula", "npm_global", "claude_native", "agy_self", "unknown"] as const satisfies readonly CliInstallMethod[];
+/** downloading 내려받는 중 · installing 설치 중 · verifying 판을 다시 읽어 확인하는 중 · done 끝(새 판) · failed 실패(옛 판이 남는다). */
+export type CliUpdatePhase = "downloading" | "installing" | "verifying" | "done" | "failed";
+/** 대표가 누른 업데이트 한 번. 서버는 CLI 마다 마지막 한 번만 기억한다(서버를 다시 켜면 없다). */
+export interface CliUpdateRun {
+  id: string;
+  cli: CliProvider;
+  /** 누를 때의 판과 목표 판(그때 읽은 최신 판). */
+  from: string | null;
+  to: string | null;
+  phase: CliUpdatePhase;
+  startedAt: string;
+  endedAt: string | null;
+  /** 끝난 뒤 다시 읽은 판. 아직 없거나 읽지 못했으면 null. */
+  installed: string | null;
+  /** 실패 까닭(ERROR_CODES 의 코드와 문장). 실패가 아니면 null. */
+  error: { code: string; message: string } | null;
+  /** 실패했을 때 대표가 터미널에서 직접 할 명령. */
+  manualCommand: string | null;
+}
+/** 서버가 쓰는 CLI 하나의 지금 판·최신 판·업데이트 상태. 설치된 CLI 만 싣는다. */
+export interface CliUpdateInfo {
+  cli: CliProvider;
+  /** 지금 판(서버가 쓰는 실행 파일의 --version). 모르면 null. */
+  current: string | null;
+  /** 공개 주소에서 사용자 정보 없이 읽은 최신 판. 아직 읽지 못했으면 null. */
+  latest: string | null;
+  /** latest 가 current 보다 새 판이다. */
+  available: boolean;
+  /** latest 가 IAMCEO 가 화면·기록 견본으로 확인한 판(VERIFIED_CLI_VERSIONS)이다. 아니면 확인 창이 '아직 확인하지 않은 판'이라고 알린다. */
+  latestVerified: boolean;
+  method: CliInstallMethod;
+  /** 서버가 이 설치 방식의 업데이트 명령을 돌릴 수 있다. false 면 manualCommand(없으면 직접 업데이트 안내)만 보인다. */
+  oneClick: boolean;
+  /** 터미널에서 직접 할 명령(예: brew upgrade --cask claude-code@latest). 설치 방식을 모르면 null. */
+  manualCommand: string | null;
+  /** 최신 판을 읽은 곳(사람이 읽는 짧은 이름, 예: Homebrew cask claude-code@latest). */
+  source: string | null;
+  /** 최신 판을 마지막으로 읽은 시각(ISO). */
+  checkedAt: string | null;
+  /** 진행 중이거나 마지막으로 끝난 업데이트. */
+  run?: CliUpdateRun;
+  /** 지금 이 CLI 로 떠 있는 총괄·팀장 수(업데이트 뒤 쉴 때 같은 대화로 다시 열리는 대상). 모르면 없다. */
+  liveSessions?: number;
+  /** 업데이트 뒤 새 판으로 다시 열기를 아직 기다리는 총괄·팀장 수('적용 중: N명 남음'). 기다리는 팀장이 없으면 없다. */
+  pendingReopen?: number;
+}
+export interface CliUpdatesResponse { updates: CliUpdateInfo[] }
+/** POST /api/cli-updates/:cli. to: 대표가 확인 창에서 본 목표 판. 지금 최신 판과 다르면 409 cli_update_changed(다시 확인하게 한다). */
+export interface StartCliUpdateReq { to?: string }
 // ---- 끝 ----

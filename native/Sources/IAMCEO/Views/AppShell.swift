@@ -1272,6 +1272,22 @@ struct StatusStrips: View {
            let compat = CompatNotice(store.bootstrap, onThisMac: store.serverIsThisMac) {
             items.append(Strip(id: "compat", tone: .attention, icon: "arrow.up.circle", text: compat.text, lines: 3))
         }
+        // 0.2.11: AI 도구(CLI) 새 판. 이 기기에서 '보기'를 누른 판은 다시 띄우지 않는다. 서버의 말이 지금 것일 때만.
+        if !store.isDemo, !offline, !store.isRestarting, store.connectionStatus == .connected {
+            let server = store.serverID ?? store.writeNamespace
+            // 설정 › 알림의 'AI 도구 새 판 알림'을 꺼 두었으면 띠를 내지 않는다(실행 환경의 새 판 표시·업데이트 단추는 그대로).
+            let fresh = CLIUpdateSeen.shared.strip(server: server, store.bootstrap?.cliUpdates, settings: store.bootstrap?.settings)
+            if !fresh.isEmpty {
+                // 새 판이 하나이고 서버가 올릴 수 있으면 '업데이트': 실행 환경을 열고 그 CLI 의 확인 창을 바로 띄운다. 그 밖은 '보기'.
+                let one = CLIUpdateText.oneClickTarget(fresh)
+                items.append(Strip(id: "cli-update", tone: .accent, icon: "arrow.down.circle", text: CLIUpdateText.available(fresh),
+                                   actionTitle: one == nil ? String(localized: "보기") : String(localized: "업데이트"), action: {
+                    CLIUpdateSeen.shared.markSeen(server: server, fresh)
+                    if let one { SettingsNavigation.shared.requestUpdate(cli: one.cli) } else { SettingsView.showRuntime() }
+                    router.showSettings = true
+                }, lines: 2))
+            }
+        }
         if let notice = store.connectionNotice {
             items.append(Strip(id: "connection-check", tone: .neutral, icon: "arrow.triangle.2.circlepath", text: notice, busy: true))
         }

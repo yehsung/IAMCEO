@@ -254,7 +254,8 @@ enum SampleWorkspaceData {
    "macScriptNotifications": true,
    "boardTidyHours": 0,
    "permissionAcknowledged": true,
-   "reportLanguage": "ko"
+   "reportLanguage": "ko",
+   "notifyCliUpdates": true
   },
   "projects": [
    {
@@ -4397,7 +4398,8 @@ enum SampleWorkspaceData {
    "macScriptNotifications": true,
    "boardTidyHours": 0,
    "permissionAcknowledged": true,
-   "reportLanguage": "en"
+   "reportLanguage": "en",
+   "notifyCliUpdates": true
   },
   "projects": [
    {

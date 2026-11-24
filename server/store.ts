@@ -174,6 +174,11 @@ export interface AppliedConfig {
    * 다르면 쉴 때 같은 대화를 다시 연다(Orchestrator.onGeminiMode).
    */
   geminiMode?: "auto-fallback";
+  /**
+   * 0.2.11: 이 세션을 띄울 때의 CLI 업데이트 세대(orchestrator 의 cli_update_epochs). 앱에서 그 CLI 를 새 판으로 올린 적이 없으면 없다(0).
+   * 세대가 다르면 쉴 때 같은 대화를 새 판으로 다시 연다(Orchestrator.cliUpdated).
+   */
+  cliUpdate?: number;
 }
 
 export interface NewDecision {
@@ -471,6 +476,8 @@ export const DEFAULT_SETTINGS: Settings = {
   permissionAcknowledged: true,
   // B1: 늘 내려 보내 앱이 '이 서버는 보고 언어를 안다'고 알게 한다. settings 표의 키 하나라 옛 판으로 되돌려도 무시된다.
   reportLanguage: "ko",
+  // 0.2.11: AI 도구 새 판 알림. 같은 까닭으로 늘 내려 보낸다(settings 표의 키 하나, 옛 판은 무시한다).
+  notifyCliUpdates: true,
 };
 
 /** 대표가 새 프로젝트를 만들며 신뢰한다고 답한 폴더(프로젝트 id → 그때의 폴더). settings 표의 별도 키라 스키마를 바꾸지 않는다. */

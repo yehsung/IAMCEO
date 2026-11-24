@@ -147,6 +147,8 @@ extension AppStore {
                 target = result.target
             } else { target = link.target }
             var route = NotificationRoute(target: target)
+            route.openRuntime = link.kind == "cli_update"
+            route.updateCLI = link.kind == "cli_update" ? link.updateCLI : nil
             let projectID: String?
             switch target {
             case .home: projectID = nil

@@ -24,6 +24,10 @@ struct NotificationRoute {
     var chatTarget: String? = nil
     var chatMessageID: String? = nil
     var notice: String? = nil
+    /// 0.2.11: CLI 새 판 알림(cli_update). 첫 화면으로 간 뒤 설정 › 실행 환경을 연다.
+    var openRuntime = false
+    /// 그 알림의 CLI. 있으면 그 CLI 의 확인 창까지 띄운다(올릴 수 있을 때).
+    var updateCLI: String? = nil
 }
 
 /// Cross-screen navigation shared by every view: which screen is shown and which item is open in it.
@@ -167,6 +171,10 @@ final class Router {
         case .unknown: return
         }
         navigationNotice = route.notice
+        if route.openRuntime {
+            if let cli = route.updateCLI { SettingsNavigation.shared.requestUpdate(cli: cli) } else { SettingsNavigation.shared.requestRuntime() }
+            showSettings = true
+        }
     }
 
     /// Closes every sheet the shell presents, so a confirmation can open: an alert cannot open over a sheet. The

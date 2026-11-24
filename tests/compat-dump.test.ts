@@ -27,7 +27,7 @@ import { Store } from "../server/store.ts";
 import { LAST_ERROR_CODES } from "../server/text-refs.ts";
 import { TOOL_PERMISSION_OPTIONS, toolActionRef, toolPermissionCard, toolPermissionCardTexts } from "../server/tool-permission.ts";
 import { appHeadersDumpDir, loadReleases, type AppHeaders } from "../scripts/compat-decoders/run.ts";
-import { API_LEVEL, APP_HEADERS, DEFAULT_GEMINI_RANKS, type DeviceAccessList } from "../shared/types.ts";
+import { API_LEVEL, APP_HEADERS, DEFAULT_GEMINI_RANKS, type CliUpdateInfo, type DeviceAccessList } from "../shared/types.ts";
 import { ERROR_CODES } from "../shared/error-codes.ts";
 import { sinceParam, textRef } from "../shared/server-text.ts";
 import { createIsolatedRuntime } from "./fixtures/isolated-runtime.ts";
@@ -61,6 +61,20 @@ const HEADER_APPS = loadReleases().flatMap(release => release.appHeaders
 
 /** 출시 앱이 실제로 받는 사건 종류. 이 가운데 하나라도 못 받으면 덤프가 모자란 것이다. */
 const EVENT_TYPES = ["hello", "projects", "project", "member", "member_removed", "decision", "todo", "work", "message", "file", "activity", "settings"] as const;
+
+/** 0.2.11 cliUpdates 견본: 새 판 있음(진행 중), 끝남(다시 열기 기다림), 모르는 방식. */
+const COMPAT_CLI_UPDATES: CliUpdateInfo[] = [
+  { cli: "claude", current: "2.1.331", latest: "2.1.332", available: true, latestVerified: false, method: "brew_cask", oneClick: true,
+    manualCommand: "brew upgrade --cask claude-code@latest", source: "Homebrew cask claude-code@latest", checkedAt: "2026-11-25T00:00:00.000Z", liveSessions: 3,
+    run: { id: "6f0d9a52-1f8c-4c8e-9d43-2a0f0e5c7b11", cli: "claude", from: "2.1.331", to: "2.1.332", phase: "installing", startedAt: "2026-11-25T00:01:00.000Z",
+      endedAt: null, installed: null, error: null, manualCommand: "brew upgrade --cask claude-code@latest" } },
+  { cli: "codex", current: "0.172.0", latest: "0.172.0", available: false, latestVerified: false, method: "npm_global", oneClick: true,
+    manualCommand: "npm install -g @openai/codex@latest", source: "npm @openai/codex", checkedAt: "2026-11-25T00:00:00.000Z", liveSessions: 2, pendingReopen: 1,
+    run: { id: "0b6f3c1e-7d2a-4f5b-8e9c-1a2b3c4d5e6f", cli: "codex", from: "0.166.0", to: "0.172.0", phase: "done", startedAt: "2026-11-25T00:01:00.000Z",
+      endedAt: "2026-11-25T00:02:00.000Z", installed: "0.172.0", error: null, manualCommand: "npm install -g @openai/codex@latest" } },
+  { cli: "gemini", current: "1.5.16", latest: "1.5.17", available: true, latestVerified: false, method: "unknown", oneClick: false,
+    manualCommand: null, source: "Antigravity CLI", checkedAt: null },
+];
 
 class FakeRunner implements Runner {
   readonly kind = "core";
@@ -102,7 +116,10 @@ test("출시 앱이 읽는 실제 응답과 실시간 사건을 빠짐없이 받
     push: { store: pushStore, providers: () => [
       { environment: "sandbox", bundleId: "com.yehsung.iamceo", state: "unconfigured", lastError: null },
       { environment: "production", bundleId: "com.yehsung.iamceo", state: "ready", lastError: null, via: "relay" }] },
-    daemon: () => ({ ready: true, buildId: "compat-dump-build", version: VERSION }) };
+    daemon: () => ({ ready: true, buildId: "compat-dump-build", version: VERSION }),
+    // 0.2.11: 스냅샷의 새 칸 cliUpdates(설치된 CLI 마다 지금 판·최신 판·업데이트 진행). 출시 앱은 모르는 칸이라 버리고 지나가야 한다.
+    cliUpdates: { list: () => COMPAT_CLI_UPDATES, info: cli => COMPAT_CLI_UPDATES.find(info => info.cli === cli) ?? COMPAT_CLI_UPDATES[0]!,
+      check: async () => COMPAT_CLI_UPDATES, update: () => { throw new Error("덤프 시험은 업데이트를 돌리지 않는다"); } } };
   let server: RunningServer | undefined;
   const sockets: WebSocket[] = [];
   try {

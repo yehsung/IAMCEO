@@ -11,7 +11,16 @@ final class SettingsNavigation {
     static let shared = SettingsNavigation()
     var pendingRuntime = false
     private(set) var revision = 0
+    /// 0.2.11: 실행 환경을 연 뒤 확인 창을 바로 띄울 CLI(새 판 띠의 '업데이트', CLI 새 판 알림). 그 줄이 보이면 한 번 꺼내 쓴다.
+    private(set) var pendingUpdate: (cli: String, at: Date)?
     func requestRuntime() { pendingRuntime = true; revision &+= 1 }
+    func requestUpdate(cli: String) { pendingUpdate = (cli, Date()); requestRuntime() }
+    /// 그 CLI 의 요청이 30초 안에 있었으면 꺼내며 true. 늦게 나타난 줄이 오래된 요청으로 확인 창을 띄우지 않게 한다.
+    func takeUpdate(cli: String, now: Date = Date()) -> Bool {
+        guard let pending = pendingUpdate, pending.cli == cli else { return false }
+        pendingUpdate = nil
+        return now.timeIntervalSince(pending.at) < 30
+    }
 }
 
 enum SettingsCloseAction: Equatable {
@@ -1078,6 +1087,8 @@ struct SettingsView: View {
     @State private var highlightRuntime = false
     /// B3·D8: the runtime check list and the diagnostics file of the connected server.
     @State private var doctor = DoctorPanel()
+    /// 0.2.11: 점검표의 CLI 줄에 붙는 새 판·업데이트(CLIUpdateModels.swift).
+    @State private var cliUpdates = CLIUpdatesPanel()
     #if os(macOS)
     @State private var settingsWindow: NSWindow?
     #endif
@@ -1162,7 +1173,7 @@ struct SettingsView: View {
         switch section {
         case .general: return Self.generalEdited(draft, base)
         case .ai: return RankSettingsEditing.signature(draft) != RankSettingsEditing.signature(base) || pendingEmptyCustom
-        case .notifications: return draft.notifyMac != base.notifyMac || macAlerts != baseMacAlerts
+        case .notifications: return draft.notifyMac != base.notifyMac || draft.notifyCliUpdates != base.notifyCliUpdates || macAlerts != baseMacAlerts
         case .connection: return false
         }
     }
@@ -1594,7 +1605,9 @@ struct SettingsView: View {
                 if let report {
                     ForEach(Array(report.checks.enumerated()), id: \.element.id) { index, check in
                         if index > 0 { RowDivider(inset: 0) }
-                        DoctorCheckRow(check: check)
+                        DoctorCheckRow(check: check) {
+                            if let info = cliUpdate(for: check.id) { CLIUpdateLine(info: info, panel: cliUpdates) }
+                        }
                     }
                 } else {
                     SettingsRow(String(localized: "실행 엔진"), hint: runtime?.core.detail, monoHint: true) { DotValue(tone: coreState(runtime).tone, text: coreState(runtime).text) }
@@ -1620,9 +1633,36 @@ struct SettingsView: View {
         // A new connection reads its own list; coming back to this part keeps the last one while it re-reads.
         .task(id: store.isDemo ? nil : store.api.map { ObjectIdentifier($0) }) {
             guard !store.isDemo else { return }
+            cliUpdates.attach(store.api)
             await doctor.attach(store.api)
         }
+        // 0.2.11: 서버 스냅샷이 따라잡은 이 기기 값은 버린다. 업데이트가 끝나면(끝·실패) 점검표를 다시 읽는다(판·'새 판' 글이 바뀐다).
+        .onChange(of: store.bootstrap?.cliUpdates) { _, updates in cliUpdates.noteServer(updates) }
+        .onChange(of: cliUpdateEndings) { _, _ in Task { await doctor.load(store.api) } }
+        // 도는 업데이트가 있는 동안은 실시간 소식이 늦어도 진행이 보이게 몇 초마다 읽는다(옛 서버면 읽지 않는다).
+        .task(id: cliUpdateActive) {
+            guard cliUpdateActive else { return }
+            for _ in 0..<600 {
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                await cliUpdates.load(store.api)
+                if !cliUpdateActive { return }
+            }
+        }
     }
+
+    /// 0.2.11: 점검표 id(claude·codex·gemini)의 CLI 새 판 상태. 샘플·옛 서버(칸 없음)는 nil.
+    private func cliUpdate(for checkID: String) -> CLIUpdateInfo? {
+        guard !store.isDemo, ["claude", "codex", "gemini"].contains(checkID), let updates = store.bootstrap?.cliUpdates else { return nil }
+        return cliUpdates.shown(checkID, server: updates)
+    }
+    private var shownCLIUpdates: [CLIUpdateInfo] {
+        ["claude", "codex", "gemini"].compactMap(cliUpdate(for:))
+    }
+    /// 끝난 업데이트들의 표시. 바뀌면(새로 끝남) 점검표를 다시 읽는다.
+    private var cliUpdateEndings: String {
+        shownCLIUpdates.compactMap { info in info.run.flatMap { $0.active ? nil : "\($0.id):\($0.phase)" } }.joined(separator: ",")
+    }
+    private var cliUpdateActive: Bool { shownCLIUpdates.contains { $0.run?.active == true } }
 
     /// D8: only the Mac app on the server's own Mac makes the file (the server takes the request from this Mac only).
     private var showsDiagnostics: Bool {
@@ -1674,21 +1714,28 @@ struct SettingsView: View {
 
     /// One item of the check list, laid out like a settings row: the item, what was found and how to fix it at the
     /// left (hint type), the state at the right. The fix is in the attention colour only when something needs doing.
-    private struct DoctorCheckRow: View {
+    private struct DoctorCheckRow<Footer: View>: View {
         let check: DoctorCheck
+        /// 0.2.11: 줄의 왼쪽 글 아래에 붙는 것(CLI 줄의 새 판·업데이트).
+        let footer: Footer
+        init(check: DoctorCheck, @ViewBuilder footer: () -> Footer) { self.check = check; self.footer = footer() }
         var body: some View {
-            HStack(alignment: .center, spacing: 16) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(check.title).font(SetupFont.row).foregroundStyle(CE.ink)
-                    if let detail = check.detail, !detail.isEmpty { line(detail, tone: CE.ink2) }
-                    if let fix = check.fix, !fix.isEmpty { line(fix, tone: check.needsAction ? CE.attention : CE.ink2) }
+            // 붙는 것(단추가 든다)은 한 덩이로 읽는 줄 밖에 둔다: 줄을 합쳐 읽어도 단추는 따로 누를 수 있다.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .center, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(check.title).font(SetupFont.row).foregroundStyle(CE.ink)
+                        if let detail = check.detail, !detail.isEmpty { line(detail, tone: CE.ink2) }
+                        if let fix = check.fix, !fix.isEmpty { line(fix, tone: check.needsAction ? CE.attention : CE.ink2) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    DotValue(tone: check.tone, text: check.stateLabel)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                DotValue(tone: check.tone, text: check.stateLabel)
+                .accessibilityElement(children: .combine)
+                footer
             }
             .padding(.vertical, 12)
             .frame(minHeight: isMac ? 56 : 52)
-            .accessibilityElement(children: .combine)
         }
         private func line(_ text: String, tone: Color) -> some View {
             Text(text).font(SetupFont.hint).foregroundStyle(tone)
@@ -1866,6 +1913,22 @@ struct SettingsView: View {
             macNotifyGroup
             PushSettingsView()
             #endif
+            cliUpdateNotifyGroup
+        }
+    }
+
+    /// 0.2.11: 'AI 도구 새 판 알림'(서버 설정이라 이 서버에 붙은 모든 기기에 같다). 이 칸을 모르는 옛 서버(nil)에서는 그리지 않는다.
+    @ViewBuilder private var cliUpdateNotifyGroup: some View {
+        if draft.notifyCliUpdates != nil {
+            SettingsGroup(String(localized: "AI 도구")) {
+                SettingsRow(String(localized: "AI 도구 새 판 알림"),
+                            hint: String(localized: "Claude Code·Codex·Antigravity CLI에 새 판이 나오면 iPhone 알림, Mac 알림, 앱 위쪽 띠로 알립니다. 꺼도 실행 환경의 새 판 표시와 업데이트 단추는 그대로 있습니다.")) {
+                    Toggle("AI 도구 새 판 알림", isOn: Binding(get: { draft.notifyCliUpdates ?? true },
+                                                          set: { draft.notifyCliUpdates = $0 }))
+                        .labelsHidden().settingsSwitch()
+                }
+            }
+            .disabled(!editable || saving)
         }
     }
 
@@ -2129,6 +2192,8 @@ struct SettingsView: View {
         if mine.compactAtPct != previous.compactAtPct { next.compactAtPct = mine.compactAtPct }
         if mine.maxAwakeWorkers != previous.maxAwakeWorkers { next.maxAwakeWorkers = mine.maxAwakeWorkers }
         if mine.notifyMac != previous.notifyMac { next.notifyMac = mine.notifyMac }
+        // 0.2.11: 새 서버만 이 칸을 안다(옛 서버의 값은 nil 이라 고칠 것이 없다).
+        if mine.notifyCliUpdates != previous.notifyCliUpdates, next.notifyCliUpdates != nil { next.notifyCliUpdates = mine.notifyCliUpdates }
         if mine.boardTidyHours != previous.boardTidyHours { next.boardTidyHours = mine.boardTidyHours }
         if mine.reportLanguage != previous.reportLanguage { next.reportLanguage = mine.reportLanguage }
         next = RankSettingsEditing.rebase(previous: previous, mine: mine, onto: next)
@@ -2194,8 +2259,11 @@ struct SettingsView: View {
         if kind == .runtime {
             // B3: the check list is read beside the runtime diagnostics; its own failure shows under the card.
             async let checks: Void = doctor.load(store.api)
+            // 0.2.11: CLI 최신 판도 다시 읽는다(옛 서버의 404 는 조용히 넘어간다).
+            async let updates: Void = cliUpdates.load(store.isDemo ? nil : store.api, refresh: true)
             await store.refreshDiagnostics()
             await checks
+            await updates
         } else { await store.refresh() }
         guard store.lastUpdated == before, let error = store.errorMessage else { return }
         if kind == .sync { syncError = friendlyError(error) } else { runtimeError = friendlyError(error) }
@@ -2250,7 +2318,8 @@ struct SettingsView: View {
     /// Compares only what this screen edits, with model names normalized the way they are saved.
     /// B1: the report language is part of it, so changing only the language can be saved and another device's change shows up here.
     static func signature(_ settings: Settings) -> String {
-        var parts = [settings.permissionMode, "\(settings.maxConcurrentTurns)", "\(settings.compactAtPct)", "\(settings.maxAwakeWorkers)", "\(settings.notifyMac)", "\(Int(settings.boardTidyHours.rounded()))", settings.reportLanguage ?? ""]
+        var parts = [settings.permissionMode, "\(settings.maxConcurrentTurns)", "\(settings.compactAtPct)", "\(settings.maxAwakeWorkers)", "\(settings.notifyMac)", "\(Int(settings.boardTidyHours.rounded()))", settings.reportLanguage ?? "",
+                     settings.notifyCliUpdates.map { "\($0)" } ?? ""]
         parts += RankSettingsEditing.signature(settings)
         return parts.joined(separator: "|")
     }

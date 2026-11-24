@@ -7,6 +7,13 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 0.2.11 — 출시 전
+
+- **AI 도구에 새 판이 나오면 알리고, 앱에서 한 번에 올립니다.** 서버가 이 Mac의 Claude Code·Codex·Antigravity CLI가 깔린 방식(Homebrew·npm·Claude 자체 설치·agy 자체 업데이트)을 실행 파일의 실제 위치로 알아보고, 그 방식이 실제로 깔 최신 판을 공개 주소에서 6시간마다 확인합니다(계정 정보는 보내지 않습니다). 새 판이 보이면 판마다 한 번 앱 위쪽의 띠, Mac 알림, iPhone 알림('Codex 0.172.0 업데이트가 있습니다.')으로 알리고, 설정 › AI 모델 › 실행 환경의 그 CLI 줄에 '새 판 X'가 붙습니다. '업데이트'를 누르면 확인 창이 그 판을 IAMCEO가 아직 확인하지 않았는지(화면 판독이 어긋날 수 있습니다)와 떠 있는 총괄·팀장이 쉴 때 다시 열린다는 것을 알리고, 누르면 서버가 그 방식의 명령(`brew upgrade --cask …`, `npm install -g …`, `claude update`, `agy update`)을 돌립니다. 내려받는 중·설치 중·확인 중·끝이 보이고, 끝나면 판을 다시 읽어 확인합니다. 암호나 확인을 묻는 명령은 기다리지 않고 멈추며, 실패하면 옛 판이 그대로 남고 까닭과 터미널에서 직접 할 명령을 보입니다. 저절로 올리지는 않습니다(누를 때만).
+- 설정 › 알림의 'AI 도구 새 판 알림'(기본 켬)을 끄면 iPhone 알림·Mac 알림·앱 위쪽 띠를 내지 않습니다. 이 서버에 붙은 모든 기기에 같이 적용되고, 실행 환경의 '새 판' 표시와 업데이트 단추는 그대로 있습니다.
+- **새 판은 대화를 끊지 않고 적용됩니다.** 업데이트가 끝나면 그 CLI로 떠 있는 총괄·팀장은 쉬는 때에(일하는 중이면 그 턴이 끝난 뒤) 같은 대화로 다시 열려 새 판을 씁니다. 새 세션을 만들지 않고, 잠든 팀장은 깨울 때 새 판으로 뜹니다. 그동안 실행 환경에 '적용 중: N명 남음'이 보입니다. IAMCEO 밖(터미널)에서 올린 판은 팀장이 다음에 새로 뜰 때부터 씁니다.
+- 이전 앱은 새 판 띠와 단추를 보이지 않지만 점검표의 '새 판 X'는 보입니다. iPhone 알림은 알림 중계를 이 판으로 다시 배포한 뒤부터 중계를 거쳐 갑니다(이 Mac의 알림 키로 보내는 설치는 바로 갑니다).
+
 ### 0.2.10 — 2026-11-23
 
 - **Gemini를 쓸 수 있습니다.** 총괄과 팀장을 Google의 Antigravity CLI(`agy`)로 띄웁니다. Claude Code·Codex처럼 내 계정 로그인으로 돕니다. 새 팀장·팀장 실행 설정·새 프로젝트에서 CLI를 Gemini로 고르거나, 총괄에게 Gemini로 띄워 달라고 하면 됩니다. 모델은 Antigravity CLI가 알려 주는 목록 그대로입니다(요금제에 든 Claude·GPT-OSS 모델도 함께 보입니다). 역할 지침, IAMCEO 도구 연결, 사건 기록 훅은 그 세션에만 넣고, `~/.gemini`의 설정과 프로젝트 폴더에는 아무것도 쓰지 않습니다. Antigravity CLI는 도구 연결을 첫 입력 때에야 띄우므로, IAMCEO가 팀장을 띄우거나 다시 연 뒤 첫 지시 앞에 `/mcp`로 연결을 먼저 띄웁니다(팀장 터미널에 MCP 관리 창이 잠깐 열렸다 닫힙니다). 옛 Gemini CLI(`gemini` 명령)는 지원하지 않습니다.
@@ -198,6 +205,13 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### 0.2.11 — unreleased
+
+- **New versions of the AI tools are announced, and the app updates them in one tap.** The server works out how Claude Code, Codex and the Antigravity CLI were installed on this Mac (Homebrew, npm, Claude's own installer, agy's self-update) from where the executable really lives, and checks the version that install method would actually get from public addresses every 6 hours (no account details are sent). When a new version shows up you're told once per version: a strip at the top of the app, a Mac notification and an iPhone notification ("Codex 0.172.0 update is available."), and the CLI's row in Settings › AI models › Runtime says "new version X". Pressing "Update" asks first — whether IAMCEO hasn't checked that version yet (screen reading may be off) and that running leads and staff reopen when idle — then the server runs that method's command (`brew upgrade --cask …`, `npm install -g …`, `claude update`, `agy update`). You see downloading, installing, checking and done, and the version is read again to confirm. A command that asks for a password or a confirmation is stopped instead of waiting; if it fails the old version stays, with the reason and the command to run yourself in Terminal. Nothing updates on its own.
+- Turning off "New AI tool versions" in Settings › Notifications (on by default) stops the iPhone notification, the Mac notification and the strip at the top of the app. It applies to every device on this server; the new-version note and the Update button in Runtime stay.
+- **A new version is applied without cutting the conversation.** After the update, leads and staff running on that CLI reopen the same conversation when idle (after the current turn if they're working) and use the new version. No new session is made; a sleeping member starts on the new version when woken. Runtime shows "Applying: N left" meanwhile. A version you install outside IAMCEO (in Terminal) is used from the member's next fresh start.
+- Older apps don't show the strip or the button but do show "new version X" in the check list. iPhone notifications through the relay start once the relay is redeployed with this version (installs that send with this Mac's own key get them right away).
 
 ### 0.2.10 — 2026-11-23
 

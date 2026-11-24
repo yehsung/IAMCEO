@@ -6,7 +6,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
-import { CLI_INFO, DOCTOR_CHECK_IDS, DOCTOR_ROLES_CHECK_ID, type CliProvider, type CliVersionInfo, type DoctorCheck, type DoctorReport, type EngineStatus, type RuntimeInfo, type TailnetHttpsStatus, type TailnetStatus } from "../shared/types.ts";
+import { CLI_INFO, DOCTOR_CHECK_IDS, DOCTOR_ROLES_CHECK_ID, type CliProvider, type CliUpdateInfo, type CliVersionInfo, type DoctorCheck, type DoctorReport, type EngineStatus, type RuntimeInfo, type TailnetHttpsStatus, type TailnetStatus } from "../shared/types.ts";
 import { readCliVersions, type CliBins } from "./cli-version.ts";
 import { CORE_VERSION, defaultCoreBin, detectTailscaleIp, VERSION, type Config } from "./config.ts";
 import { roleCustomizations, type RoleCustomization } from "./roles.ts";
@@ -82,6 +82,8 @@ export interface DoctorFacts {
   /** Gemini 팀장의 상태줄 기록에서 본, 대화가 돌던 마지막 시각(ISO). 본 적이 없으면 null 이거나 없다. */
   geminiActiveAt?: string | null;
   cliVersions: CliVersionInfo[] | null;
+  /** 0.2.11: 서버가 읽은 CLI 마다의 최신 판(server/cli-update.ts). 새 판이 있으면 그 CLI 줄에 '새 판 X'. 모르면 없다. */
+  cliUpdates?: CliUpdateInfo[] | null;
   tailscale: TailscaleFacts;
   service: ServiceFacts;
   backup: BackupFacts | null;
@@ -166,10 +168,16 @@ function versionOf(f: DoctorFacts, provider: CliProvider): string | null {
   return f.cliVersions?.find(info => info.provider === provider)?.version ?? null;
 }
 
+/** 0.2.11: 그 CLI 에 새 판이 있으면 판 뒤에 붙일 ' · 새 판 X'. 앱(옛 앱 포함)과 iamceo doctor 가 그대로 보인다. */
+function newVersionNote(f: DoctorFacts, provider: CliProvider, lang: DoctorLang): string {
+  const update = f.cliUpdates?.find(info => info.cli === provider);
+  return update?.available && update.latest ? t(lang, ` · 새 판 ${update.latest}`, ` · new version ${update.latest}`) : "";
+}
+
 function claudeCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
   const p = f.providers.claude;
   const version = versionOf(f, "claude");
-  const installed = t(lang, `설치됨${version ? ` · ${version}` : ""}`, `Installed${version ? ` · ${version}` : ""}`);
+  const installed = t(lang, `설치됨${version ? ` · ${version}` : ""}`, `Installed${version ? ` · ${version}` : ""}`) + newVersionNote(f, "claude", lang);
   if (!p.installed) {
     return check("claude", "fail", "Claude Code", t(lang, "Claude Code를 찾지 못했습니다", "Claude Code was not found"),
       t(lang, "Claude Code를 설치하고(claude.com/claude-code) 터미널에서 claude를 한 번 실행해 로그인하세요.",
@@ -187,7 +195,7 @@ function claudeCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
 function codexCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck {
   const p = f.providers.codex;
   const version = versionOf(f, "codex");
-  const installed = t(lang, `설치됨${version ? ` · ${version}` : ""}`, `Installed${version ? ` · ${version}` : ""}`);
+  const installed = t(lang, `설치됨${version ? ` · ${version}` : ""}`, `Installed${version ? ` · ${version}` : ""}`) + newVersionNote(f, "codex", lang);
   if (!p.installed) {
     if (f.codexInUse) {
       return check("codex", "fail", "Codex", t(lang, "Codex를 쓰는 총괄·팀장이 있는데 Codex를 찾지 못했습니다", "Some sessions use Codex, but Codex was not found"),
@@ -228,7 +236,7 @@ function geminiCheck(f: DoctorFacts, lang: DoctorLang): DoctorCheck | null {
         `Install the Antigravity CLI (curl -fsSL https://antigravity.google/cli/install.sh | bash), then ${firstRun}`) };
   }
   const version = versionOf(f, "gemini");
-  const installed = t(lang, `Antigravity CLI 설치됨${version ? ` · ${version}` : ""}`, `Antigravity CLI installed${version ? ` · ${version}` : ""}`);
+  const installed = t(lang, `Antigravity CLI 설치됨${version ? ` · ${version}` : ""}`, `Antigravity CLI installed${version ? ` · ${version}` : ""}`) + newVersionNote(f, "gemini", lang);
   const activeAt = f.geminiActiveAt ? Date.parse(f.geminiActiveAt) : NaN;
   const age = f.now.getTime() - activeAt;
   if (Number.isFinite(age) && age <= GEMINI_ACTIVE_RECENT_MS) {
@@ -610,6 +618,8 @@ export interface ServerDoctorInput {
   geminiMemberIds?: readonly string[] | null;
   backupIntervalMs?: number;
   probes?: Partial<DoctorProbes>;
+  /** 0.2.11: 서버가 읽은 최신 판. */
+  cliUpdates?: CliUpdateInfo[] | null;
   now?: Date;
 }
 
@@ -647,6 +657,7 @@ export async function serverDoctorFacts(input: ServerDoctorInput): Promise<Docto
     geminiInUse: geminiMemberIds ? geminiMemberIds.length > 0 : null,
     geminiActiveAt: geminiMemberIds ? geminiLastActiveAt(config.home, geminiMemberIds) : null,
     cliVersions,
+    cliUpdates: input.cliUpdates ?? null,
     tailscale: {
       auto: input.config.hostsAuto !== false,
       address: input.detectedTailnet[0] ?? null,

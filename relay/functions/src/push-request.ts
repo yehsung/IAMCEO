@@ -26,8 +26,9 @@ export type PushRequestResult = { ok: true; value: PushRequest } | { ok: false; 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TOKEN = /^(?:[0-9a-fA-F]{2}){1,512}$/;
 // 0.2.7(D4-3): tailnet_off(서버 Mac 의 Tailscale 꺼짐). 이 판 전의 중계는 모르는 종류라 거절한다(400, 그 전달만 실패. Mac 은 중계를 멈추지 않는다).
-const KINDS: readonly string[] = [...PUSH_KINDS, "test", "tailnet_off"];
-const TARGET_KEYS = new Set(["screen", "projectId", "decisionId", "memberId", "messageId", "groupId"]);
+// 0.2.11: cli_update(서버 Mac 의 AI 도구 새 판). target 에 cli·version 이 더 든다(글을 그 값으로 만든다. 검사는 buildAPNsPayload).
+const KINDS: readonly string[] = [...PUSH_KINDS, "test", "tailnet_off", "cli_update"];
+const TARGET_KEYS = new Set(["screen", "projectId", "decisionId", "memberId", "messageId", "groupId", "cli", "version"]);
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

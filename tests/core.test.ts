@@ -407,7 +407,9 @@ describe("store", () => {
       // w1: 새로 만든 DB 는 대표가 권한 방식을 확인하기 전이다.
       permissionAcknowledged: false,
       // w2 B1: 보고 언어는 늘 내려간다(앱이 이 값이 있을 때만 설정 줄을 보인다).
-      reportLanguage: "ko" });
+      reportLanguage: "ko",
+      // 0.2.11: AI 도구 새 판 알림(기본 켬). 같은 까닭으로 늘 내려간다.
+      notifyCliUpdates: true });
     expect(s.patchSettings({ compactAtPct: 60 }).compactAtPct).toBe(60);
     expect(ev.at(-1)).toMatchObject({ type: "settings" });
     expect(new Store(db, bus).getSettings().compactAtPct).toBe(60);

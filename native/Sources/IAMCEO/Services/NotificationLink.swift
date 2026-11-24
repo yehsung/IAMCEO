@@ -8,6 +8,8 @@ struct NotificationLink: Sendable, Equatable {
     let eventID: String?
     let kind: String?
     let target: PushTarget
+    /// 0.2.11: cli_update 알림의 CLI(target.cli). 누르면 그 CLI 의 확인 창까지 띄운다. 다른 알림은 nil.
+    var updateCLI: String? = nil
 
     init?(url: URL) {
         guard let parsed = Self.parse(url: url) else { return nil }
@@ -50,13 +52,18 @@ struct NotificationLink: Sendable, Equatable {
               let version = object["v"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version == 1,
               let value = try? JSONDecoder().decode(PushNotificationMetadata.self, from: metadata),
               value.v == 1, uuid(value.serverId), uuid(value.eventId),
-              let targetObject = object["target"] as? [String: Any], valid(value.target, keys: Set(targetObject.keys)) else { return nil }
+              let targetObject = object["target"] as? [String: Any] else { return nil }
+        // 0.2.11: CLI 새 판(cli_update)의 target 은 {screen:"home", cli, version} 세 열쇠다. 누르면 설정 › 실행 환경을 연다.
+        let validTarget = value.kind == "cli_update" ? value.target == .home && cliUpdateTarget(targetObject) : valid(value.target, keys: Set(targetObject.keys))
+        guard validTarget else { return nil }
         switch (value.kind, value.target) {
         case ("test", .home), ("decision", .inbox), ("approval_wait", .team), ("error", .team), ("report_complete", .chat),
-             ("todo_created", .projectHome), ("report_blocked", .chat): break
+             ("todo_created", .projectHome), ("report_blocked", .chat), ("cli_update", .home): break
         default: return nil
         }
-        return NotificationLink(serverID: value.serverId, eventID: value.eventId, kind: value.kind, target: value.target)
+        var link = NotificationLink(serverID: value.serverId, eventID: value.eventId, kind: value.kind, target: value.target)
+        if value.kind == "cli_update" { link.updateCLI = targetObject["cli"] as? String }
+        return link
     }
 
     private static func valid(_ target: PushTarget, keys: Set<String>) -> Bool {
@@ -73,6 +80,13 @@ struct NotificationLink: Sendable, Equatable {
                 && identifier(project) && identifier(message) && (member.map(identifier) ?? true) && (group.map(uuid) ?? true)
         case .unknown: return false
         }
+    }
+    /// cli_update 의 target: 열쇠가 정확히 screen·cli·version 이고, cli 는 이 앱이 아는 CLI, version 은 숫자.숫자.숫자[-…] 40자 이하.
+    static func cliUpdateTarget(_ object: [String: Any]) -> Bool {
+        guard Set(object.keys) == ["screen", "cli", "version"], object["screen"] as? String == "home",
+              let cli = object["cli"] as? String, ["claude", "codex", "gemini"].contains(cli),
+              let version = object["version"] as? String, version.utf8.count <= 40 else { return false }
+        return version.range(of: #"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?\z"#, options: .regularExpression) != nil
     }
     private static func uuid(_ text: String) -> Bool {
         text.utf8.count == 36 && UUID(uuidString: text) != nil

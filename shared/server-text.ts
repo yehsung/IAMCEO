@@ -132,6 +132,8 @@ export const SERVER_TEXTS = {
   "activity.login_reopen_continue": { ko: "다시 로그인해 로그인 오류로 멈춘 세션을 같은 대화로 이어 엽니다", en: "Signed in again; reopening the session stopped by the sign-in error in the same conversation" },
   "activity.login_reopen_new": { ko: "다시 로그인해 로그인 오류로 멈춘 세션을 새 세션으로 엽니다", en: "Signed in again; opening a new session for the session stopped by the sign-in error" },
   "activity.account_reopen": { ko: "CLI 계정이 바뀌어(대표가 다른 계정으로 로그인) 같은 대화를 새 계정으로 이어 열었습니다", en: "The CLI account changed (the owner signed in with another account), so the same conversation was reopened with the new account" },
+  // 0.2.11: 대표가 앱에서 CLI 를 새 판으로 올린 뒤 쉬는 때에 같은 대화를 새 판으로 다시 열었다(Orchestrator.cliUpdated). 출시 앱은 이 코드를 몰라 받은 문장(보고 언어)을 그대로 보인다.
+  "activity.cli_update_reopen": { ko: "CLI를 새 판으로 업데이트해 같은 대화를 새 판으로 이어 열었습니다", en: "The CLI was updated, so the same conversation was reopened with the new version" },
   "activity.orphan_compact_own": { ko: "압축을 받은 터미널이 끝나 그 압축을 닫았습니다. 밀린 전달을 이어 갑니다", en: "The terminal that received the compaction closed, so the compaction was closed. Pending deliveries continue" },
   "activity.orphan_compact_left": { ko: "넣지 못한 압축이 확인 대기로 남아 있어 닫았습니다. 밀린 전달을 이어 갑니다", en: "A compaction that was never entered was left waiting for confirmation, so it was closed. Pending deliveries continue" },
   "activity.stale_turn_cleared": { ko: "끝난 턴의 표시가 남아 전달이 멈춰 있었습니다. 표시를 지우고 다시 보냅니다", en: "A finished turn was still marked as running and held up delivery. Cleared the mark and sending again" },

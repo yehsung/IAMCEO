@@ -1,44 +1,72 @@
 import SwiftUI
 
 /// Design tokens. Content sits on calm plates; glass is reserved for chrome (sidebar, toolbar, tab bar, composer, sticky bars).
-/// Tokens copied from the web client (web/src/styles/tokens.css), which the owner prefers.
+/// Tokens copied from the web client (web/src/styles/tokens.css), which the owner prefers. Every token reads the theme on
+/// screen (`ThemeStore`); the default theme's values are 0.2.10's, unchanged.
 enum CE {
-    static let bg = Color(hex: 0x090713)
-    static let bgDeep = Color(hex: 0x05040B)
-    static let plateSolid = Color(hex: 0x16112C)
-    static let plateRaisedSolid = Color(hex: 0x1D1638)
-    static let plate = Color.white.opacity(0.045)
-    static let plateRaised = Color.white.opacity(0.08)
-    static let line = Color.white.opacity(0.08)
-    static let lineStrong = Color.white.opacity(0.14)
-    static let ink = Color(hex: 0xF5F2FF)
-    static let ink2 = Color(hex: 0xC2BBDF)
-    static let ink3 = Color(hex: 0x8F88B2)
-    static let accent = Color(hex: 0xB9A8FF)       // --focus: links, selection rings
-    static let accentFill = Color(hex: 0x6D4DF2)   // --accent-fill: fills under white text (badges, send)
-    static let violet = Color(hex: 0x7A5BFF)
-    static let orchid = Color(hex: 0xB35CFF)
-    static let indigo = Color(hex: 0x3D45FF)
-    static let rose = Color(hex: 0xFF6FB8)
-    static let ice = Color(hex: 0xA8ECFF)
+    /// The theme on screen. Read inside a view body, it subscribes that view to theme changes.
+    static var style: ThemeStyle { ThemeStore.shared.style }
+    static var palette: ThemePalette { ThemeStore.shared.style.palette }
+    /// The default (0.2.10) look: the aurora, its glass cards and violet light.
+    static var isStandard: Bool { style.isStandard }
+
+    static var bg: Color { palette.bg }
+    static var bgDeep: Color { palette.bgDeep }
+    static var plateSolid: Color { palette.plateSolid }
+    static var plateRaisedSolid: Color { palette.plateRaisedSolid }
+    static var plate: Color { palette.plate }
+    static var plateRaised: Color { palette.plateRaised }
+    static var line: Color { palette.line }
+    static var lineStrong: Color { palette.lineStrong }
+    static var ink: Color { palette.ink }
+    static var ink2: Color { palette.ink2 }
+    static var ink3: Color { palette.ink3 }
+    static var accent: Color { palette.accent }       // --focus: links, selection rings
+    static var accentFill: Color { palette.accentFill }   // --accent-fill: fills under white text (badges, send)
+    /// Text on `accentFill` (white in the default theme).
+    static var onAccent: Color { palette.onAccent }
+    static var violet: Color { palette.violet }
+    static var orchid: Color { palette.orchid }
+    static var indigo: Color { palette.indigo }
+    static var rose: Color { palette.rose }
+    static var ice: Color { palette.ice }
     // Member states (--st-*) and semantic text colours (--ok/--warn/--danger)
-    static let live = Color(hex: 0xB9A8FF)         // 일하는 중
-    static let attention = Color(hex: 0xFFB070)    // 내 답 기다림
-    static let approval = Color(hex: 0xFF8A80)     // 승인 창 앞
-    static let danger = Color(hex: 0xFF8A9B)       // 오류 · 실패 (text)
-    static let error = Color(hex: 0xFF5A62)        // 오류 dot
-    static let success = Color(hex: 0x6FE3B2)      // 받음 · 완료
-    static let warn = Color(hex: 0xFFC773)         // 보류
-    static let idle = Color(hex: 0xA6A6AE)         // 대기
-    static let dim = Color(hex: 0x8F88B2)          // 잠듦 · 안 보임 (hollow ring)
-    /// Primary button gradient (web .gbtn--primary).
-    static let primaryGradient = LinearGradient(colors: [Color(red: 134/255, green: 104/255, blue: 252/255).opacity(0.88), Color(red: 104/255, green: 68/255, blue: 246/255).opacity(0.84), Color(red: 92/255, green: 54/255, blue: 234/255).opacity(0.88)], startPoint: .top, endPoint: .bottom)
+    static var live: Color { palette.live }         // 일하는 중
+    static var attention: Color { palette.attention }    // 내 답 기다림
+    static var approval: Color { palette.approval }     // 승인 창 앞
+    static var danger: Color { palette.danger }       // 오류 · 실패 (text)
+    static var error: Color { palette.error }        // 오류 dot
+    static var success: Color { palette.success }      // 받음 · 완료
+    static var warn: Color { palette.warn }         // 보류
+    static var idle: Color { palette.idle }         // 대기
+    static var dim: Color { palette.dim }          // 잠듦 · 안 보임 (hollow ring)
+    /// Overlay ink: what hover, pressed, chips and quiet rings are drawn in at a low opacity. White on a dark theme, the
+    /// text colour on a light one (a white .06 hover vanishes on a light background).
+    static var wash: Color { palette.wash }
+    /// Text on a `violet` wash (selected tab, row or choice): white in the default theme.
+    static var onSelection: Color { palette.onSelection }
+    /// Shadow colour.
+    static var shadow: Color { palette.shadow }
+    /// Theme surfaces (the default theme draws its own glass instead; these are its solid equivalents).
+    static var surface: Color { palette.surface }
+    static var surfaceAlt: Color { palette.surfaceAlt }
+    static var chipBg: Color { palette.chipBg }
+    static var codeText: Color { palette.codeText }
+    /// Primary button gradient (web .gbtn--primary). Other themes: their accent fill.
+    static var primaryGradient: LinearGradient {
+        if isStandard {
+            return LinearGradient(colors: [Color(red: 134/255, green: 104/255, blue: 252/255).opacity(0.88), Color(red: 104/255, green: 68/255, blue: 246/255).opacity(0.84), Color(red: 92/255, green: 54/255, blue: 234/255).opacity(0.88)], startPoint: .top, endPoint: .bottom)
+        }
+        return LinearGradient(colors: [palette.accentFill, palette.accentFill], startPoint: .top, endPoint: .bottom)
+    }
     /// Text-heavy glass tint (web .glass-tint: rgb(9 7 19 / .52)).
-    static let glassTint = Color(red: 9/255, green: 7/255, blue: 19/255)
+    static var glassTint: Color { palette.glassTint }
     /// Card tint, used at 55%. The web card is rgb(12 9 28 / .6) over a `saturate(175%)` backdrop; SwiftUI has no
     /// backdrop saturation, so the tint carries the blue that saturation adds to the violet aurora (measured on screen:
     /// card interiors land on the web's dark, saturated violet instead of a neutral navy).
-    static let cardTint = Color(red: 13/255, green: 8/255, blue: 46/255)
+    static var cardTint: Color { palette.cardTint }
+    /// Border width of boxes in this theme (1; 또렷 2).
+    static var borderWidth: CGFloat { style.borderWidth }
 }
 
 /// Semantic tone: color carries meaning, never decoration.
@@ -64,68 +92,107 @@ extension Color {
 
 /// macOS uses fixed compact sizes for a dense desk; iOS uses Dynamic Type styles.
 /// Web type scale (base 15px). macOS uses the same point sizes; iOS maps to Dynamic Type styles of the same size.
+/// Themes: Mac sizes are multiplied by the theme's scale (never below 1), headings take the theme's weight and design,
+/// the body its design; the default theme's fonts are 0.2.10's.
 enum CEFont {
+    private static var style: ThemeStyle { CE.style }
     #if os(macOS)
-    static let pageTitle: Font = .system(size: 17, weight: .semibold)
-    static let title: Font = .system(size: 16.5, weight: .semibold)
-    static let section: Font = .system(size: 14, weight: .semibold)
-    static let rowTitle: Font = .system(size: 14.5, weight: .semibold)
-    static let body: Font = .system(size: 14.5)
+    static var pageTitle: Font { heading(17) }
+    static var title: Font { heading(16.5) }
+    static var section: Font { heading(14) }
+    static var rowTitle: Font { .ceSystem(size: 14.5, weight: .semibold) }
+    static var body: Font { .ceSystem(size: 14.5) }
     /// Notes, hints, errors and status lines (web 13.5px: .tm-note, .form__error, .offline-band).
-    static let note: Font = .system(size: 13.5)
+    static var note: Font { .ceSystem(size: 13.5) }
     /// Row sub-lines (web 13px: .hm-row__sub, .fl-row__summary).
-    static let secondary: Font = .system(size: 13)
+    static var secondary: Font { .ceSystem(size: 13) }
     /// Meta, times, hints (web 12.5px, the most common small size).
-    static let meta: Font = .system(size: 12.5)
+    static var meta: Font { .ceSystem(size: 12.5) }
     /// Counts and rail sub-lines, the few places the web really uses 12px.
-    static let caption: Font = .system(size: 12)
-    static let micro: Font = .system(size: 11.5, weight: .bold)
-    static let mono: Font = .system(size: 12.5, design: .monospaced)
-    static let number: Font = .system(size: 20, weight: .semibold, design: .rounded)
+    static var caption: Font { .ceSystem(size: 12) }
+    static var micro: Font { .ceSystem(size: 11.5, weight: .bold) }
+    static var mono: Font { .ceSystem(size: 12.5, design: .monospaced) }
+    static var number: Font { .ceSystem(size: 20, weight: .semibold, design: .rounded) }
     #else
-    static let pageTitle: Font = .headline
-    static let title: Font = .headline
-    static let section: Font = .subheadline.weight(.semibold)
-    static let rowTitle: Font = .subheadline.weight(.semibold)
-    static let body: Font = .subheadline
-    static let note: Font = .footnote
-    static let secondary: Font = .footnote
-    static let meta: Font = .caption
-    static let caption: Font = .caption
-    static let micro: Font = .caption2.weight(.bold)
-    static let mono: Font = .system(.caption, design: .monospaced)
-    static let number: Font = .system(.title2, design: .rounded, weight: .semibold)
+    static var pageTitle: Font { style.isStandard ? .headline : styled(.headline, heading: true) }
+    static var title: Font { style.isStandard ? .headline : styled(.headline, heading: true) }
+    static var section: Font { style.isStandard ? .subheadline.weight(.semibold) : styled(.subheadline, heading: true) }
+    static var rowTitle: Font { style.isStandard ? .subheadline.weight(.semibold) : styled(.subheadline, weight: .semibold) }
+    static var body: Font { style.isStandard ? .subheadline : styled(.subheadline) }
+    static var note: Font { style.isStandard ? .footnote : styled(.footnote) }
+    static var secondary: Font { style.isStandard ? .footnote : styled(.footnote) }
+    static var meta: Font { style.isStandard ? .caption : styled(.caption) }
+    static var caption: Font { style.isStandard ? .caption : styled(.caption) }
+    static var micro: Font { style.isStandard ? .caption2.weight(.bold) : styled(.caption2, weight: .bold) }
+    static var mono: Font { .system(.caption, design: .monospaced) }
+    static var number: Font { .system(.title2, design: .rounded, weight: .semibold) }
+
+    /// A Dynamic Type style in the theme's design; headings in the heading design and weight.
+    private static func styled(_ textStyle: Font.TextStyle, weight: Font.Weight? = nil, heading: Bool = false) -> Font {
+        let design = (heading ? style.headingDesign : nil) ?? style.bodyDesign ?? .default
+        let font = Font.system(textStyle, design: design)
+        if heading { return font.weight(style.headingWeight) }
+        if let weight { return font.weight(weight) }
+        return font
+    }
     #endif
 
     /// Markdown headings inside reports, decisions and documents: each level clearly above the reading size.
     #if os(macOS)
-    static let heading1: Font = .system(size: 16, weight: .semibold)
-    static let heading2: Font = .system(size: 14.5, weight: .semibold)
-    static let heading3: Font = .system(size: 13.5, weight: .semibold)
+    static var heading1: Font { heading(16) }
+    static var heading2: Font { heading(14.5) }
+    static var heading3: Font { heading(13.5) }
     #else
-    static let heading1: Font = .title3.weight(.semibold)
-    static let heading2: Font = .headline
-    static let heading3: Font = .callout.weight(.semibold)
+    static var heading1: Font { style.isStandard ? .title3.weight(.semibold) : styled(.title3, heading: true) }
+    static var heading2: Font { style.isStandard ? .headline : styled(.headline, heading: true) }
+    static var heading3: Font { style.isStandard ? .callout.weight(.semibold) : styled(.callout, heading: true) }
     #endif
+
+    /// A heading at a web size: semibold in the default theme, the theme's heading weight and design otherwise.
+    static func heading(_ size: CGFloat) -> Font {
+        if style.isStandard { return .ceSystem(size: size, weight: .semibold) }
+        return .ceSystem(size: size, weight: style.headingWeight, design: style.headingDesign)
+    }
+}
+
+extension Font {
+    /// `.system(size:weight:design:)` for the theme on screen: Mac sizes scale with the theme (the default theme's scale
+    /// is 1, so 0.2.10's sizes), and a theme's body design (말랑: rounded) applies where none is given. Calls the same
+    /// `system` overload the plain call would, so the default theme draws exactly as before.
+    static func ceSystem(size: CGFloat, weight: Font.Weight? = nil, design: Font.Design? = nil) -> Font {
+        let style = ThemeStore.shared.style
+        let size = size * style.fixedFontScale
+        let design = design ?? style.bodyDesign
+        switch (weight, design) {
+        case (nil, nil): return .system(size: size)
+        case (let weight?, nil): return .system(size: size, weight: weight)
+        case (nil, let design?): return .system(size: size, design: design)
+        case (let weight?, let design?): return .system(size: size, weight: weight, design: design)
+        }
+    }
 }
 
 /// Line height. SwiftUI's `lineSpacing` is extra space on top of the system font's own line (~1.2), so a web
 /// `line-height: L` on `size`-point text becomes `size * (L - 1.2)`. Every Text that can wrap gets one of these:
 /// without it multi-line text renders at ~1.2, 2.5-5pt per line tighter than the web.
 enum CELeading {
+    /// Themes scale the size with their type and add their line-height boost (never below the web's).
     static func spacing(_ size: CGFloat, _ lineHeight: CGFloat) -> CGFloat {
-        max(0, ((size * (lineHeight - 1.2)) * 2).rounded() / 2)
+        let style = ThemeStore.shared.style
+        let size = size * style.leadingScale
+        let lineHeight = lineHeight + style.lineBoost
+        return max(0, ((size * (lineHeight - 1.2)) * 2).rounded() / 2)
     }
     /// 14.5 at 1.5 (body paragraphs, row text).
-    static let body = spacing(14.5, 1.5)
+    static var body: CGFloat { spacing(14.5, 1.5) }
     /// 13.5 at 1.45 (notes, errors, hints).
-    static let note = spacing(13.5, 1.45)
+    static var note: CGFloat { spacing(13.5, 1.45) }
     /// 13 at 1.45 (row sub-lines).
-    static let secondary = spacing(13, 1.45)
+    static var secondary: CGFloat { spacing(13, 1.45) }
     /// 12.5 at 1.4 (meta lines that wrap).
-    static let meta = spacing(12.5, 1.4)
+    static var meta: CGFloat { spacing(12.5, 1.4) }
     /// 16 at 1.35 (titles that wrap).
-    static let title = spacing(16, 1.35)
+    static var title: CGFloat { spacing(16, 1.35) }
 }
 
 extension View {
@@ -135,20 +202,49 @@ extension View {
     }
 }
 
+/// Spacing (web steps). Roomier themes scale it; none goes under the web's.
 enum CESpace {
-    static let xs: CGFloat = 4
-    static let s: CGFloat = 8
-    static let m: CGFloat = 12
-    static let l: CGFloat = 16
-    static let xl: CGFloat = 20
-    static let xxl: CGFloat = 28
+    static var xs: CGFloat { scaled(4) }
+    static var s: CGFloat { scaled(8) }
+    static var m: CGFloat { scaled(12) }
+    static var l: CGFloat { scaled(16) }
+    static var xl: CGFloat { scaled(20) }
+    static var xxl: CGFloat { scaled(28) }
+    /// A web spacing value in this theme (rounded to the half point).
+    static func scaled(_ value: CGFloat) -> CGFloat {
+        let scale = ThemeStore.shared.style.spaceScale
+        return scale == 1 ? value : (value * scale * 2).rounded() / 2
+    }
 }
 
 enum CERadius {
-    static let plate: CGFloat = 22     // web .glass--regular
-    static let card: CGFloat = 18      // web inner cards (.tm-card, .ibx-card)
-    static let control: CGFloat = 12   // inputs, option tiles
-    static let row: CGFloat = 10       // list rows
+    static var plate: CGFloat { r(22) }     // web .glass--regular
+    static var card: CGFloat { r(18) }      // web inner cards (.tm-card, .ibx-card)
+    static var control: CGFloat { r(12) }   // inputs, option tiles
+    static var row: CGFloat { r(10) }       // list rows
+    /// A 0.2.10 corner radius in the theme on screen (the default theme: the same value).
+    static func r(_ value: CGFloat) -> CGFloat { ThemeStore.shared.style.radius(value) }
+}
+
+/// A capsule, or for the squared themes (작업대, 또렷) a rounded rectangle at the theme's control radius: tags, badges,
+/// tabs, chips and the send button lose their pills there. The default theme draws `Capsule`'s own path.
+struct CECapsule: InsettableShape {
+    private var radius: CGFloat?
+    private var inset: CGFloat = 0
+    init() {
+        let style = ThemeStore.shared.style
+        radius = style.squareCapsules ? style.controlRadius : nil
+    }
+    func path(in rect: CGRect) -> Path {
+        let rect = rect.insetBy(dx: inset, dy: inset)
+        if let radius { return RoundedRectangle(cornerRadius: max(0, radius - inset), style: .continuous).path(in: rect) }
+        return Capsule().path(in: rect)
+    }
+    func inset(by amount: CGFloat) -> CECapsule {
+        var copy = self
+        copy.inset += amount
+        return copy
+    }
 }
 
 #if os(macOS)
@@ -171,6 +267,18 @@ struct AmbientBackground: View {
     var body: some View {
         GeometryReader { geo in
             let vmax = max(geo.size.width, geo.size.height)
+            if CE.isStandard {
+                aurora(geo, vmax: vmax)
+            } else {
+                ThemedBackdrop(size: geo.size)
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func aurora(_ geo: GeometryProxy, vmax: CGFloat) -> some View {
             ZStack {
                 CE.bg
                 RadialGradient(colors: [CE.indigo.opacity(0.14), .clear], center: UnitPoint(x: 0.5, y: 1.15), startRadius: 0, endRadius: vmax * 0.7)
@@ -191,10 +299,29 @@ struct AmbientBackground: View {
                     }
                 }
             }
+    }
+}
+
+/// The backdrop of every theme but the default: the theme's background colour. 서리 유리 lays two faint accent lights on it
+/// so its see-through sidebar has something to frost; the flat and hairline themes stay a plain colour. Reduce
+/// Transparency: the plain colour.
+private struct ThemedBackdrop: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    let size: CGSize
+    var body: some View {
+        let vmax = max(size.width, size.height)
+        ZStack {
+            CE.bg
+            if CE.style.sidebar == .glass && !reduceTransparency {
+                let glow = CE.accent.opacity(CE.style.dark ? 0.16 : 0.12)
+                EllipticalGradient(colors: [glow, glow.opacity(0)])
+                    .frame(width: vmax * 0.7, height: vmax * 0.5)
+                    .position(x: size.width * 0.1, y: size.height * 0.2)
+                EllipticalGradient(colors: [glow.opacity(0.7), glow.opacity(0)])
+                    .frame(width: vmax * 0.6, height: vmax * 0.42)
+                    .position(x: size.width * 0.85, y: size.height * 0.95)
+            }
         }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
     }
 }
 
@@ -203,11 +330,20 @@ struct GlassRim<S: InsettableShape>: View {
     let shape: S
     var strong = false
     var body: some View {
+        if CE.isStandard { auroraRim } else {
+            // Other themes: the theme's hairline, a touch lighter on top (frost on light glass, a faint edge on dark).
+            shape.strokeBorder(LinearGradient(colors: [CE.line, CE.line.opacity(0.7)], startPoint: .top, endPoint: .bottom),
+                               lineWidth: strong ? max(1.4, CE.borderWidth) : CE.borderWidth)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private var auroraRim: some View {
         shape.strokeBorder(
             LinearGradient(stops: [
-                .init(color: .white.opacity(strong ? 0.62 : 0.5), location: 0),
-                .init(color: .white.opacity(0.12), location: 0.32),
-                .init(color: .white.opacity(0.05), location: 0.6),
+                .init(color: CE.wash.opacity(strong ? 0.62 : 0.5), location: 0),
+                .init(color: CE.wash.opacity(0.12), location: 0.32),
+                .init(color: CE.wash.opacity(0.05), location: 0.6),
                 .init(color: CE.ice.opacity(0.28), location: 1),
             ], startPoint: .topLeading, endPoint: .bottomTrailing),
             lineWidth: strong ? 1.4 : 1.15
@@ -233,15 +369,25 @@ private struct GlassChrome<S: InsettableShape>: ViewModifier {
     let interactive: Bool
     func body(content: Content) -> some View {
         if #available(macOS 26.0, iOS 26.0, *) {
-            content.glassEffect(ceGlass(tint: tint ?? CE.glassTint.opacity(0.45), interactive: interactive), in: shape)
+            content.glassEffect(ceGlass(tint: tint ?? CE.glassTint.opacity(Self.tintStrength), interactive: interactive), in: shape)
                 .overlay { GlassRim(shape: shape) }
         } else if reduceTransparency {
             content.background(CE.plateRaisedSolid, in: shape).overlay { shape.strokeBorder(CE.lineStrong) }
         } else {
             content
-                .background((tint ?? CE.glassTint).opacity(0.45), in: shape)
+                .background((tint ?? CE.glassTint).opacity(Self.tintStrength), in: shape)
                 .background(.ultraThinMaterial, in: shape)
                 .overlay { GlassRim(shape: shape) }
+        }
+    }
+    /// How much of the chrome tint lies on the glass: 0.45 in the default theme; the see-through theme (서리 유리) less,
+    /// the solid and tinted themes nearly all of it (their chrome reads as a colour, not as glass).
+    private static var tintStrength: Double {
+        switch CE.style.sidebar {
+        case .aurora: 0.45
+        case .glass: 0.5
+        case .tinted: 0.85
+        case .solid: 0.94
         }
     }
 }
@@ -307,15 +453,17 @@ extension View {
         let shape = RoundedRectangle(cornerRadius: CERadius.control, style: .continuous)
         return self.textFieldStyle(.plain)
             #if os(macOS)
-            .font(.system(size: 15))
+            .font(.ceSystem(size: 15))
             #else
             .font(CEFont.body)
             #endif
             .padding(.horizontal, 13).padding(.vertical, 10)
             .frame(minHeight: 44)
-            .background(CE.bgDeep.opacity(0.5), in: shape)
+            .background(CE.isStandard ? CE.bgDeep.opacity(0.5) : CE.surface, in: shape)
             .overlay {
-                shape.strokeBorder(focused ? CE.accent.opacity(0.85) : Color.white.opacity(0.12), lineWidth: focused ? 1.5 : 1)
+                // Other themes: the field is the surface colour with the theme's strong line (it must stand out on a card).
+                shape.strokeBorder(focused ? CE.accent.opacity(0.85) : CE.isStandard ? CE.wash.opacity(0.12) : CE.lineStrong,
+                                   lineWidth: focused ? max(1.5, CE.borderWidth) : CE.borderWidth)
             }
     }
 
@@ -336,10 +484,10 @@ private struct CEButtonMetrics {
     init(_ size: ControlSize, prominent: Bool) {
         #if os(macOS)
         switch size {
-        case .mini: font = .system(size: 12.5, weight: .semibold); horizontal = 11; height = 26
-        case .small: font = .system(size: 13.5, weight: .semibold); horizontal = 14; height = 32
-        case .large, .extraLarge: font = .system(size: 16, weight: .semibold); horizontal = 26; height = 52
-        default: font = .system(size: 15, weight: .semibold); horizontal = 20; height = 44
+        case .mini: font = .ceSystem(size: 12.5, weight: .semibold); horizontal = 11; height = 26
+        case .small: font = .ceSystem(size: 13.5, weight: .semibold); horizontal = 14; height = 32
+        case .large, .extraLarge: font = .ceSystem(size: 16, weight: .semibold); horizontal = 26; height = 52
+        default: font = .ceSystem(size: 15, weight: .semibold); horizontal = 20; height = 44
         }
         #else
         font = CEFont.rowTitle.weight(.semibold)
@@ -352,7 +500,7 @@ private extension View {
     /// iPhone: at least a 44pt hit target around the visible capsule. Mac: the capsule itself.
     @ViewBuilder func ceButtonHitArea() -> some View {
         #if os(macOS)
-        self.contentShape(Capsule())
+        self.contentShape(CECapsule())
         #else
         self.frame(minHeight: 44).contentShape(Rectangle())
         #endif
@@ -370,6 +518,31 @@ struct CEFilledButtonStyle: ButtonStyle {
         @State private var hovering = false
         var body: some View {
             let metrics = CEButtonMetrics(controlSize, prominent: true)
+            if CE.isStandard { aurora(metrics) } else { themed(metrics) }
+        }
+
+        /// Other themes: the accent fill with its own text colour, a soft shadow only where the theme casts shadows.
+        private func themed(_ metrics: CEButtonMetrics) -> some View {
+            configuration.label
+                .font(metrics.font)
+                .tracking(-0.15)
+                .lineLimit(1)
+                .padding(.horizontal, metrics.horizontal)
+                .frame(minHeight: metrics.height)
+                .foregroundStyle(CE.onAccent)
+                .background {
+                    CECapsule().fill(CE.accentFill)
+                        .shadow(color: CE.shadow.opacity(isEnabled && CE.style.elevation == .shadow ? 0.22 : 0), radius: 6, y: 3)
+                }
+                .brightness(isEnabled && hovering && !configuration.isPressed ? (CE.style.dark ? 0.06 : -0.05) : 0)
+                .opacity(isEnabled ? 1 : 0.4)
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(.spring(response: 0.3, dampingFraction: 0.55), value: configuration.isPressed)
+                .ceButtonHitArea()
+                .onHover { hovering = $0 }
+        }
+
+        private func aurora(_ metrics: CEButtonMetrics) -> some View {
             // web .gbtn--primary: violet gradient, a glossy top half, a soft lilac glow along the bottom, a deep violet
             // shadow and a dark text shadow; hover brightens 7%, press shrinks to .97; disabled keeps its colour at 40%.
             configuration.label
@@ -381,18 +554,18 @@ struct CEFilledButtonStyle: ButtonStyle {
                 .foregroundStyle(Color.white)
                 .shadow(color: Color(red: 28 / 255, green: 8 / 255, blue: 92 / 255).opacity(0.45), radius: 0.5, y: 1)
                 .background {
-                    Capsule().fill(CE.primaryGradient)
+                    CECapsule().fill(CE.primaryGradient)
                         .overlay {
-                            Capsule().fill(LinearGradient(stops: [
-                                .init(color: .white.opacity(0.14), location: 0), .init(color: .white.opacity(0.025), location: 0.44),
+                            CECapsule().fill(LinearGradient(stops: [
+                                .init(color: CE.wash.opacity(0.14), location: 0), .init(color: CE.wash.opacity(0.025), location: 0.44),
                                 .init(color: .clear, location: 0.52),
                             ], startPoint: .top, endPoint: .bottom))
                         }
                         .overlay {
-                            Capsule().fill(LinearGradient(colors: [.clear, Color(red: 222 / 255, green: 208 / 255, blue: 1).opacity(0.3)],
+                            CECapsule().fill(LinearGradient(colors: [.clear, Color(red: 222 / 255, green: 208 / 255, blue: 1).opacity(0.3)],
                                                           startPoint: .center, endPoint: .bottom))
                         }
-                        .overlay { GlassRim(shape: Capsule()) }
+                        .overlay { GlassRim(shape: CECapsule()) }
                         .shadow(color: CE.violet.opacity(isEnabled ? 0.55 : 0), radius: 12, y: 8)
                         .shadow(color: Color(red: 16 / 255, green: 6 / 255, blue: 52 / 255).opacity(isEnabled ? 0.5 : 0), radius: 3, y: 2)
                 }
@@ -416,6 +589,30 @@ struct CEQuietButtonStyle: ButtonStyle {
         @State private var hovering = false
         var body: some View {
             let metrics = CEButtonMetrics(controlSize, prominent: false)
+            if CE.isStandard { aurora(metrics) } else { themed(metrics) }
+        }
+
+        /// Other themes: a quiet surface with the theme's line; hover and press deepen it with the overlay ink.
+        private func themed(_ metrics: CEButtonMetrics) -> some View {
+            let shape = CECapsule()
+            return configuration.label
+                .font(metrics.font)
+                .tracking(-0.15)
+                .lineLimit(1)
+                .padding(.horizontal, metrics.horizontal)
+                .frame(minHeight: metrics.height)
+                .foregroundStyle(isEnabled ? CE.ink : CE.ink3)
+                .background(isEnabled ? CE.surface : Color.clear, in: shape)
+                .background(CE.wash.opacity(!isEnabled ? 0 : configuration.isPressed ? 0.12 : hovering ? 0.07 : 0), in: shape)
+                .overlay { shape.strokeBorder(isEnabled ? CE.lineStrong : CE.line, lineWidth: CE.borderWidth) }
+                .shadow(color: CE.shadow.opacity(isEnabled && CE.style.elevation == .shadow ? 0.12 : 0), radius: 4, y: 2)
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(.spring(response: 0.3, dampingFraction: 0.55), value: configuration.isPressed)
+                .ceButtonHitArea()
+                .onHover { hovering = $0 }
+        }
+
+        private func aurora(_ metrics: CEButtonMetrics) -> some View {
             // web .gbtn--glass: a top-lit white gradient over the glass, a rim, and a soft dark shadow under it.
             configuration.label
                 .font(metrics.font)
@@ -424,10 +621,10 @@ struct CEQuietButtonStyle: ButtonStyle {
                 .padding(.horizontal, metrics.horizontal)
                 .frame(minHeight: metrics.height)
                 .foregroundStyle(isEnabled ? CE.ink : CE.ink3)
-                .background(LinearGradient(colors: [Color.white.opacity(fill.top), Color.white.opacity(fill.bottom)],
-                                           startPoint: .top, endPoint: .bottom), in: Capsule())
-                .background(.ultraThinMaterial.opacity(isEnabled ? 1 : 0.5), in: Capsule())
-                .overlay { if isEnabled { GlassRim(shape: Capsule()) } else { Capsule().strokeBorder(CE.line) } }
+                .background(LinearGradient(colors: [CE.wash.opacity(fill.top), CE.wash.opacity(fill.bottom)],
+                                           startPoint: .top, endPoint: .bottom), in: CECapsule())
+                .background(.ultraThinMaterial.opacity(isEnabled ? 1 : 0.5), in: CECapsule())
+                .overlay { if isEnabled { GlassRim(shape: CECapsule()) } else { CECapsule().strokeBorder(CE.line) } }
                 .shadow(color: Color(red: 4 / 255, green: 2 / 255, blue: 14 / 255).opacity(isEnabled ? 0.45 : 0), radius: 8, y: 6)
                 .scaleEffect(configuration.isPressed ? 0.97 : 1)
                 .animation(.spring(response: 0.3, dampingFraction: 0.55), value: configuration.isPressed)
@@ -458,7 +655,7 @@ struct CEGhostButtonStyle: ButtonStyle {
                 .padding(.horizontal, metrics.horizontal)
                 .frame(minHeight: metrics.height)
                 .foregroundStyle(!isEnabled ? CE.ink3 : hovering ? CE.ink : CE.ink2)
-                .background(Color.white.opacity(!isEnabled ? 0 : configuration.isPressed ? 0.10 : hovering ? 0.07 : 0), in: Capsule())
+                .background(CE.wash.opacity(!isEnabled ? 0 : configuration.isPressed ? 0.10 : hovering ? 0.07 : 0), in: CECapsule())
                 .ceButtonHitArea()
                 .onHover { hovering = $0 }
         }
@@ -483,19 +680,40 @@ struct RowButtonStyle: ButtonStyle {
             configuration.label
                 .contentShape(shape)
                 .background {
-                    if selected {
+                    if selected && !CE.isStandard {
+                        ThemedSelection(shape: shape)
+                    } else if selected {
                         shape.fill(LinearGradient(colors: [CE.violet.opacity(0.34), CE.violet.opacity(0.22)], startPoint: .top, endPoint: .bottom))
                             .overlay {
-                                shape.strokeBorder(Color.white.opacity(0.4), lineWidth: 0.5)
+                                shape.strokeBorder(CE.wash.opacity(0.4), lineWidth: 0.5)
                                     .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .clear, location: 0.35)],
                                                          startPoint: .top, endPoint: .bottom))
                             }
-                            .overlay { shape.strokeBorder(Color.white.opacity(0.05)) }
+                            .overlay { shape.strokeBorder(CE.wash.opacity(0.05)) }
                     } else {
-                        shape.fill(Color.white.opacity(configuration.isPressed ? 0.09 : hovering ? 0.06 : 0))
+                        shape.fill(CE.wash.opacity(configuration.isPressed ? 0.09 : hovering ? 0.06 : 0))
                     }
                 }
                 .onHover { hovering = $0 }
         }
+    }
+}
+
+/// A selected row, tab or item in the themes other than the default: the accent at a light wash, and — where the theme
+/// draws state as bars (작업대, 또렷) or as flat colour — a solid accent bar at the leading edge instead of a rim.
+struct ThemedSelection<S: InsettableShape>: View {
+    let shape: S
+    var body: some View {
+        let style = CE.style
+        ZStack(alignment: .leading) {
+            shape.fill(CE.violet.opacity(style.dark ? 0.32 : 0.14))
+            if style.statusShape == .bar {
+                Rectangle().fill(CE.accent).frame(width: 3)
+            } else {
+                shape.strokeBorder(CE.violet.opacity(style.dark ? 0.55 : 0.4), lineWidth: style.borderWidth)
+            }
+        }
+        .clipShape(shape)
+        .allowsHitTesting(false)
     }
 }

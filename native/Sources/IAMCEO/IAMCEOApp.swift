@@ -216,8 +216,8 @@ private struct MainWindow: View {
             .environment(store)
             .environment(router)
             .environment(drafts)
-            .preferredColorScheme(.dark)
-            .tint(CE.accent)
+            // The theme's colour scheme, accent and type (the default theme: dark and violet, as in 0.2.10).
+            .themeRoot()
             #if os(macOS)
             // Sidebar ≤320 + detail ≥560 fit inside this minimum (see AppShell.desk).
             .frame(minWidth: 1040, minHeight: 680)
@@ -296,8 +296,7 @@ private struct SettingsWindow: View {
             .environment(store)
             .environment(router)
             .environment(drafts)
-            .preferredColorScheme(.dark)
-            .tint(CE.accent)
+            .themeRoot()
             .background { AppWindowReader { settingsWindow = $0 } }
             .onChange(of: router.mainWindowRequest) { _, _ in
                 if let main = NSApp.windows.first(where: { $0.identifier?.rawValue == "IAMCEO.MainWindow" }) {

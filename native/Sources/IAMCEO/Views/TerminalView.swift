@@ -101,9 +101,9 @@ struct TerminalView: View {
                     .allowsHitTesting(!missingTerminal)
                     .accessibilityHidden(missingTerminal)
                     .overlay { if missingTerminal { sleepingTerminal } }
-                    .background(Color(red: 11/255, green: 9/255, blue: 24/255))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(CE.line) }
+                    .background(TerminalColors.background)
+                    .clipShape(RoundedRectangle(cornerRadius: CERadius.r(12)))
+                    .overlay { RoundedRectangle(cornerRadius: CERadius.r(12)).strokeBorder(CE.line) }
                 if let notice = session.notice {
                     // web .tm-note: 13.5 at line-height 1.5.
                     Text(friendlyError(TerminalPresentation.message(notice))).font(CEFont.note).foregroundStyle(CE.attention)
@@ -251,7 +251,8 @@ struct TerminalWindowContent: View {
             if present, retained == nil { retained = store.members.first { $0.id == memberID } }
         }
         .frame(minWidth: 640, minHeight: 400)
-        .preferredColorScheme(.dark).tint(CE.accent)
+        // The window's chrome follows the theme; the terminal surface itself stays dark in every theme (TerminalColors).
+        .themeRoot()
     }
 }
 

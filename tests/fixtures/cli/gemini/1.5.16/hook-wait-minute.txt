@@ -1,0 +1,21 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.16
+     ▀▀▀▀▀▀       Gemini 3.8 Flash (Low)
+    ▀▀▀▀▀▀▀▀      /private/tmp/iamceo-cli-fixture/work
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.
+
+  [대표 직접] "Use your run_command tool to run exactly: mkdir -p sub . Do not use any other tool first. Then reply with one short sentence."
+  #259ef5e5-b61b-49b8-93e4-ecba38fbb272
+  #iamceo_jHgpbUiINCchlFzsc-idiw
+  #iamceo_b_yfBgCgAQ_dvi7aWoOJ2Yjg
+
+○ Running (mkdir -p sub .) (ctrl+o to expand)
+⣾  Running command... 1m 1s
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 2%

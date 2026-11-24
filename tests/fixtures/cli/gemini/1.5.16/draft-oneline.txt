@@ -1,0 +1,15 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.16
+     ▀▀▀▀▀▀       Gemini 3.8 Flash (Low)
+    ▀▀▀▀▀▀▀▀      /private/tmp/iamceo-cli-fixture/work
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+
+ ┃ Gemini 4 Carbon now available!
+ ┃ Both Carbon and Argon are now included as part of the entire Gemini entitlement, so you can use them for much longer.
+ ┃ esc to dismiss
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> hello draft one line
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 0%

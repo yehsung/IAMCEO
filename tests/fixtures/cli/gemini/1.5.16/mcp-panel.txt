@@ -1,0 +1,18 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.16
+     ▀▀▀▀▀▀       Gemini 3.8 Flash (Low)
+    ▀▀▀▀▀▀▀▀      /private/tmp/iamceo-cli-fixture/work
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+MCP Servers
+
+Plugins (~/.gemini/config/plugins)
+>  ✓ iamceo  Tools: status, ask, post, file, todo, +3 more
+
+Keyboard: ↑/↓ Navigate  enter Actions  esc Exit
+
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 0%

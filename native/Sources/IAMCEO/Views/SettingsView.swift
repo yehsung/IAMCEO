@@ -93,50 +93,50 @@ private struct SettingsCloseGuard: NSViewRepresentable {
 enum SetupFont {
     #if os(macOS)
     /// web .su-brand 13/700.
-    static let brand: Font = .ceSystem(size: 13, weight: .bold)
+    static var brand: Font { .ceSystem(size: 13, weight: .bold) }
     /// web .su-title 24/680.
-    static let title: Font = .ceSystem(size: 24, weight: .bold)
+    static var title: Font { .ceSystem(size: 24, weight: .bold) }
     /// web .su-lead 14.5 at 1.55.
-    static let lead: Font = .ceSystem(size: 14.5)
+    static var lead: Font { .ceSystem(size: 14.5) }
     /// web .field__label 13/600 ink-2.
-    static let label: Font = .ceSystem(size: 13, weight: .semibold)
+    static var label: Font { .ceSystem(size: 13, weight: .semibold) }
     /// Row titles (web .st-pj__name, .st-rank__who 14.5/620).
-    static let row: Font = .ceSystem(size: 14.5, weight: .semibold)
+    static var row: Font { .ceSystem(size: 14.5, weight: .semibold) }
     /// web .st-panel__title 16/650: the caption of a settings group.
-    static let caption: Font = .ceSystem(size: 16, weight: .semibold)
+    static var caption: Font { CEFont.heading(16) }
     /// Choice tile titles (web .choice 14/600).
-    static let choice: Font = .ceSystem(size: 14, weight: .semibold)
+    static var choice: Font { .ceSystem(size: 14, weight: .semibold) }
     /// Typed text in a full-size well (web .input 15).
-    static let input: Font = .ceSystem(size: 15)
+    static var input: Font { .ceSystem(size: 15) }
     /// Values in the compact wells and menus inside a settings row.
-    static let select: Font = .ceSystem(size: 14)
+    static var select: Font { .ceSystem(size: 14) }
     /// Plain values at the right of a row (web .st-facts dd 14).
-    static let value: Font = .ceSystem(size: 14)
+    static var value: Font { .ceSystem(size: 14) }
     /// Hints and helper text (web .su-hint 12.5 at 1.5, ink-2).
-    static let hint: Font = .ceSystem(size: 12.5)
+    static var hint: Font { .ceSystem(size: 12.5) }
     /// Addresses and versions shown as values.
-    static let code: Font = .ceSystem(size: 13, design: .monospaced)
+    static var code: Font { .ceSystem(size: 13, design: .monospaced) }
     /// Paths and addresses typed in a full-size well.
-    static let codeInput: Font = .ceSystem(size: 13.5, design: .monospaced)
+    static var codeInput: Font { .ceSystem(size: 13.5, design: .monospaced) }
     #else
-    static let brand: Font = .footnote.weight(.bold)
-    static let title: Font = .title2.weight(.bold)
-    static let lead: Font = .subheadline
-    static let label: Font = .footnote.weight(.semibold)
-    static let row: Font = .subheadline.weight(.semibold)
-    static let caption: Font = .callout.weight(.semibold)
-    static let choice: Font = .subheadline.weight(.semibold)
-    static let input: Font = .subheadline
-    static let select: Font = .subheadline
-    static let value: Font = .subheadline
-    static let hint: Font = .caption
-    static let code: Font = .system(.footnote, design: .monospaced)
-    static let codeInput: Font = .system(.subheadline, design: .monospaced)
+    static var brand: Font { .footnote.weight(.bold) }
+    static var title: Font { .title2.weight(.bold) }
+    static var lead: Font { .subheadline }
+    static var label: Font { .footnote.weight(.semibold) }
+    static var row: Font { .subheadline.weight(.semibold) }
+    static var caption: Font { .callout.weight(.semibold) }
+    static var choice: Font { .subheadline.weight(.semibold) }
+    static var input: Font { .subheadline }
+    static var select: Font { .subheadline }
+    static var value: Font { .subheadline }
+    static var hint: Font { .caption }
+    static var code: Font { .system(.footnote, design: .monospaced) }
+    static var codeInput: Font { .system(.subheadline, design: .monospaced) }
     #endif
     /// Line spacing of a wrapping hint (12.5 at 1.5).
-    static let hintLeading = CELeading.spacing(12.5, 1.5)
+    static var hintLeading: CGFloat { CELeading.spacing(12.5, 1.5) }
     /// Line spacing of a choice tile's description (12.5 at 1.4).
-    static let choiceLeading = CELeading.spacing(12.5, 1.4)
+    static var choiceLeading: CGFloat { CELeading.spacing(12.5, 1.4) }
 }
 
 private enum SetupMetrics {
@@ -508,7 +508,7 @@ private struct SetupSelectLabel: View {
     var compact = false
     @Environment(\.isEnabled) private var isEnabled
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: compact ? 10 : CERadius.control, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: compact ? CERadius.r(10) : CERadius.control, style: .continuous)
         HStack(spacing: 6) {
             Text(text).font(mono ? SetupFont.code : compact ? SetupFont.select : SetupFont.input)
                 .foregroundStyle(isEnabled ? CE.ink : CE.ink3).lineLimit(1)
@@ -617,7 +617,9 @@ private struct ThickCardSurface: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: CERadius.r(30), style: .continuous)
-        if reduceTransparency {
+        if !CE.isStandard {
+            content.background { ThemedCardSurface(shape: shape, floating: true) }
+        } else if reduceTransparency {
             content.background(CE.plateRaisedSolid, in: shape).overlay { shape.strokeBorder(CE.lineStrong) }
         } else {
             content
@@ -1241,8 +1243,8 @@ struct SettingsView: View {
         .frame(width: 196)
         .frame(maxHeight: .infinity, alignment: .top)
         .background {
-            Color.black.opacity(0.24)
-                .overlay(alignment: .trailing) { Rectangle().fill(CE.line).frame(width: 1) }
+            (CE.isStandard ? Color.black.opacity(0.24) : CE.palette.sidebar)
+                .overlay(alignment: .trailing) { Rectangle().fill(CE.line).frame(width: CE.borderWidth) }
                 .ignoresSafeArea()
         }
     }
@@ -2088,7 +2090,7 @@ struct SettingsView: View {
             }
             .padding(.leading, isMac ? 18 : 14).padding(.trailing, 8).padding(.vertical, 8)
             .frame(minHeight: isMac ? 60 : 56)
-            .glassChrome(RoundedRectangle(cornerRadius: CERadius.plate, style: .continuous), tint: Color(red: 16 / 255, green: 11 / 255, blue: 38 / 255).opacity(0.86))
+            .glassChrome(RoundedRectangle(cornerRadius: CERadius.plate, style: .continuous), tint: CE.isStandard ? Color(red: 16 / 255, green: 11 / 255, blue: 38 / 255).opacity(0.86) : CE.surface.opacity(0.94))
             .frame(maxWidth: 880)
             .padding(.horizontal, isMac ? 24 : 16).padding(.top, CESpace.s).padding(.bottom, CESpace.m)
             .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -2875,6 +2877,8 @@ private struct AppLanguageGroup: View {
                     #endif
                 }
             }
+            RowDivider(inset: 0)
+            ThemeSettingRows(store: ThemeStore.shared)
         }
     }
 
@@ -2966,3 +2970,121 @@ private struct AppLanguageRelaunchNote: View {
     }
 }
 #endif
+
+// MARK: - 테마(0.2.11)
+
+/// '이 기기'의 테마와 밝기. 이 기기의 UserDefaults 에만 저장하고 서버로 보내지 않는다. 고르면 그 자리에서 바뀐다(다시 열지 않는다).
+private struct ThemeSettingRows: View {
+    let store: ThemeStore
+
+    var body: some View {
+        SettingsRow(String(localized: "테마"), hint: String(localized: "이 기기에만 저장되고 바로 바뀝니다."), stacked: true) {
+            ThemePickerGrid(store: store)
+        }
+        RowDivider(inset: 0)
+        SettingsRow(String(localized: "밝기"), hint: brightnessHint, hintBelowOnPhone: true) {
+            SetupMenu(store.brightnessEnabled ? store.brightness.title : ThemeBrightness.dark.title, compact: true, label: String(localized: "밝기")) {
+                ForEach(ThemeBrightness.allCases) { value in
+                    Toggle(value.title, isOn: menuCheck(store.brightness == value) {
+                        if store.brightness != value { store.setBrightness(value) }
+                    })
+                }
+            }
+            .disabled(!store.brightnessEnabled)
+            .frame(width: isMac ? 168 : 176)
+        }
+    }
+
+    /// The default theme is drawn for a dark backdrop only, so its brightness cannot change: say why in one line.
+    private var brightnessHint: String? {
+        guard store.brightnessEnabled else { return String(localized: "기본 테마는 어두운 화면만 있어 밝기를 바꿀 수 없습니다.") }
+        return store.brightness == .theme ? String(localized: "테마마다 정해진 밝기로 엽니다.") : nil
+    }
+}
+
+/// Five themes as small previews with their names; the chosen one has an accent ring and a tick.
+private struct ThemePickerGrid: View {
+    let store: ThemeStore
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: isMac ? 104 : 96), spacing: 10, alignment: .top)], alignment: .leading, spacing: 10) {
+            ForEach(ThemeID.allCases) { id in tile(id) }
+        }
+        .padding(.bottom, 2)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(String(localized: "테마"))
+    }
+
+    private func tile(_ id: ThemeID) -> some View {
+        let selected = store.choice == id
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(12), style: .continuous)
+        let preview = ThemeStyle.lookup(id, dark: ThemeStore.resolveDark(id, store.brightness, systemDark: store.systemDark))
+        return Button { store.select(id) } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                ThemeSwatch(style: preview).frame(height: 46)
+                HStack(spacing: 5) {
+                    Text(id.title)
+                        .font(CEFont.meta.weight(selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? CE.ink : CE.ink2)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Spacer(minLength: 0)
+                    if selected {
+                        Image(systemName: "checkmark").font(.ceSystem(size: 11, weight: .bold)).foregroundStyle(CE.accent)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .frame(minHeight: 18)
+            }
+            .padding(7)
+            .background(selected ? CE.violet.opacity(CE.isStandard || CE.style.dark ? 0.18 : 0.08) : Color.clear, in: shape)
+            .overlay { shape.strokeBorder(selected ? CE.accent : CE.line, lineWidth: selected ? 2 : CE.borderWidth) }
+            .frame(minHeight: 44)
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(id.title)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+/// A miniature of a theme in its own colours (not the theme on screen): background, sidebar strip, a card with its line,
+/// a report line, my message in the owner bubble colour and an accent dot.
+struct ThemeSwatch: View {
+    let style: ThemeStyle
+
+    var body: some View {
+        let p = style.palette
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        let card = RoundedRectangle(cornerRadius: min(5, style.cardRadius / 3), style: .continuous)
+        ZStack {
+            p.bg
+            if style.isStandard {
+                // The default theme's violet aurora, in miniature.
+                RadialGradient(colors: [Color(hex: 0x7A5BFF).opacity(0.6), .clear], center: UnitPoint(x: 0.8, y: 0.1), startRadius: 0, endRadius: 56)
+            }
+            HStack(spacing: 0) {
+                (style.isStandard ? Color.white.opacity(0.05) : p.sidebar).frame(width: 13)
+                VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Capsule().fill(p.ink).frame(width: 26, height: 3)
+                        Capsule().fill(p.ink3).frame(width: 38, height: 3)
+                    }
+                    .padding(5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(style.isStandard ? Color(red: 15 / 255, green: 11 / 255, blue: 32 / 255) : p.leadBubble, in: card)
+                    .overlay { card.strokeBorder(style.isStandard ? Color.white.opacity(0.14) : p.line, lineWidth: 1) }
+                    HStack(spacing: 4) {
+                        Circle().fill(p.accent).frame(width: 6, height: 6)
+                        Spacer(minLength: 0)
+                        Capsule().fill(p.ownerBubble).frame(width: 30, height: 9)
+                    }
+                }
+                .padding(5)
+            }
+        }
+        .clipShape(shape)
+        .overlay { shape.strokeBorder(CE.line, lineWidth: 1) }
+        .accessibilityHidden(true)
+    }
+}

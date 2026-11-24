@@ -1170,7 +1170,7 @@ private struct ComposerTargetMenu: View {
                 list
             }
         }
-        .background(Color(red: 18 / 255, green: 14 / 255, blue: 38 / 255).opacity(0.98))
+        .background(CE.isStandard ? Color(red: 18 / 255, green: 14 / 255, blue: 38 / 255).opacity(0.98) : CE.surface)
         .focusable()
         .focused($focused)
         .focusEffectDisabled()

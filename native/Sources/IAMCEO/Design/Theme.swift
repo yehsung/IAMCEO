@@ -67,6 +67,9 @@ enum CE {
     static var cardTint: Color { palette.cardTint }
     /// Border width of boxes in this theme (1; 또렷 2).
     static var borderWidth: CGFloat { style.borderWidth }
+    /// Text on a solid status fill (a count on the attention colour, a tick on the success colour) in the themes other
+    /// than the default: their status colours are dark on light themes and light on dark ones.
+    static var onStatus: Color { style.dark ? palette.bg : Color.white }
 }
 
 /// Semantic tone: color carries meaning, never decoration.

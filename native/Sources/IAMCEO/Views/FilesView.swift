@@ -1237,9 +1237,9 @@ private struct CodeLines {
 }
 
 /// web .vw-code ol: 12.5 mono at line-height 1.6.
-private let codeLeading = CELeading.spacing(12.5, 1.6)
-/// web .vw-code li::before: the line-number column's own dark strip.
-private let codeGutterFill = Color(hex: 0x0A0817)
+private var codeLeading: CGFloat { CELeading.spacing(12.5, 1.6) }
+/// web .vw-code li::before: the line-number column's own dark strip (other themes: their chip colour).
+private var codeGutterFill: Color { CE.isStandard ? Color(hex: 0x0A0817) : CE.chipBg }
 
 /// Web CodeViewer: a bar (line count · 줄바꿈 · 복사 · 받기), then the source with a fixed line-number column.
 private struct CodeBlock: View {
@@ -1541,8 +1541,8 @@ private struct TableBlock: View {
                 .accessibilityValue(sorted == nil ? "" : sorted == true ? "오름차순" : "내림차순")
             }
         }
-        .background(Color(hex: 0x1A1533))
-        .overlay(alignment: .bottom) { Rectangle().fill(CE.wash.opacity(0.14)).frame(height: 1) }
+        .background(CE.isStandard ? Color(hex: 0x1A1533) : CE.surfaceAlt)
+        .overlay(alignment: .bottom) { Rectangle().fill(CE.isStandard ? CE.wash.opacity(0.14) : CE.lineStrong).frame(height: 1) }
     }
 
     /// Header tap cycles ascending → descending → original order. Empty cells always sink.
@@ -1960,7 +1960,7 @@ private struct AttachmentView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
-                    .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: CERadius.r(6), style: .continuous))
+                    .background(CE.isStandard ? Color.black.opacity(0.25) : CE.palette.codeBg, in: RoundedRectangle(cornerRadius: CERadius.r(6), style: .continuous))
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.circle")
@@ -2492,7 +2492,7 @@ private struct PDFBlock: View {
                 PDFPreview(url: url)
                     .frame(maxWidth: .infinity)
                     .frame(height: viewportLimit(viewport, 0.95, cap: 900, floor: 360))
-                    .background(Color(hex: 0x2A2838))
+                    .background(CE.isStandard ? Color(hex: 0x2A2838) : CE.surfaceAlt)
                     .clipShape(shape)
                     .overlay { shape.strokeBorder(CE.line) }
                     .accessibilityLabel("\(attachment.displayName) 미리보기")
@@ -2958,7 +2958,7 @@ struct ChipFlow: Layout {
 private extension View {
     /// Quiet surface for attachment tiles and cards (shared with Chat and Inbox). Not glass.
     func fileInset(radius: CGFloat = CERadius.control) -> some View {
-        background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+        background(CE.isStandard ? Color.black.opacity(0.2) : CE.chipBg, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(CE.line) }
     }
 

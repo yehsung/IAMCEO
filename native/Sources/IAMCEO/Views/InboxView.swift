@@ -1725,7 +1725,7 @@ private struct GroupFrame<Header: View, Content: View>: View {
     @ViewBuilder var header: Header
     @ViewBuilder var content: Content
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: wide ? 26 : 24, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CERadius.r(wide ? 26 : 24), style: .continuous)
         VStack(alignment: .leading, spacing: 10) {
             header
             content

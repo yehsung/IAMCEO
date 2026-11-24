@@ -12,13 +12,13 @@ import UIKit
 
 private enum TeamFont {
     #if os(macOS)
-    static let fact: Font = .ceSystem(size: 14)
-    static let label: Font = .ceSystem(size: 13)
-    static let role: Font = .ceSystem(size: 13)
+    static var fact: Font { .ceSystem(size: 14) }
+    static var label: Font { .ceSystem(size: 13) }
+    static var role: Font { .ceSystem(size: 13) }
     #else
-    static let fact: Font = .subheadline
-    static let label: Font = .footnote
-    static let role: Font = .footnote
+    static var fact: Font { .subheadline }
+    static var label: Font { .footnote }
+    static var role: Font { .footnote }
     #endif
 }
 
@@ -322,8 +322,8 @@ private struct TeamFilterChip: View {
             .foregroundStyle(selected || hovering ? CE.ink : CE.ink2)
             .padding(.horizontal, isMac ? 13 : 14)
             .frame(minHeight: isMac ? 36 : 44)
-            .background(selected ? CE.violet.opacity(0.42) : Color(red: 11 / 255, green: 8 / 255, blue: 26 / 255).opacity(0.55), in: CECapsule())
-            .overlay { CECapsule().strokeBorder(selected ? CE.violet.opacity(0.9) : CE.wash.opacity(0.1)) }
+            .background(selected ? CE.violet.opacity(CE.isStandard || CE.style.dark ? 0.42 : 0.16) : CE.isStandard ? Color(red: 11 / 255, green: 8 / 255, blue: 26 / 255).opacity(0.55) : CE.surface, in: CECapsule())
+            .overlay { CECapsule().strokeBorder(selected ? CE.violet.opacity(0.9) : CE.isStandard ? CE.wash.opacity(0.1) : CE.line, lineWidth: CE.borderWidth) }
             .contentShape(CECapsule())
         }
         .buttonStyle(.plain)
@@ -2108,9 +2108,9 @@ struct NewMemberView: View {
     }
 
     #if os(macOS)
-    private static let codeFont: Font = .ceSystem(size: 14, design: .monospaced)
+    private static var codeFont: Font { .ceSystem(size: 14, design: .monospaced) }
     #else
-    private static let codeFont: Font = .system(.subheadline, design: .monospaced)
+    private static var codeFont: Font { .system(.subheadline, design: .monospaced) }
     #endif
 
     private func add() async {

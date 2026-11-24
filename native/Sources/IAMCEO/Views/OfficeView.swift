@@ -410,7 +410,7 @@ struct OfficeView: View {
         let byID = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return ZStack(alignment: .topLeading) {
             ForEach(marks(map: map)) { mark in
-                let shape = RoundedRectangle(cornerRadius: isMac ? 10 : 8, style: .continuous)
+                let shape = RoundedRectangle(cornerRadius: CERadius.r(isMac ? 10 : 8), style: .continuous)
                 shape.fill(CE.accent.opacity(mark.strong ? 0.15 : 0.10))
                     .overlay { shape.strokeBorder(CE.accent.opacity(mark.strong ? 0.5 : 0.35), lineWidth: 1) }
                     .frame(width: mark.rect.width * p, height: mark.rect.height * p)
@@ -860,7 +860,8 @@ private struct OfficeNameplate: View {
         }
         // The count capsule sits as far in from the trailing edge as from the top and bottom.
         .padding(.leading, 6).padding(.trailing, counted && isMac ? 3 : 6).padding(.vertical, 3)
-        .background(Color(hex: 0x0E0A1F).opacity(away ? 0.25 : 0.5), in: shape)
+        // Other themes: the theme's surface (a dark plate on a light card would leave its dark name text unreadable).
+        .background(CE.isStandard ? Color(hex: 0x0E0A1F).opacity(away ? 0.25 : 0.5) : CE.surface.opacity(away ? 0.7 : 0.94), in: shape)
         .overlay {
             if member == nil {
                 shape.strokeBorder(CE.wash.opacity(0.125), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
@@ -877,7 +878,7 @@ private struct OfficeNameplate: View {
     private var count: some View {
         Text(decisions > 9 ? "9+" : "\(decisions)")
             .font(.ceSystem(size: 10, weight: .bold)).monospacedDigit()
-            .foregroundStyle(Color(hex: 0x2B1708))
+            .foregroundStyle(CE.isStandard ? Color(hex: 0x2B1708) : CE.onStatus)
             .padding(.horizontal, 4)
             .frame(minWidth: 14, minHeight: 14)
             .background(CE.attention, in: CECapsule())
@@ -954,7 +955,7 @@ private struct OfficeBench: View {
                 if count > 0 {
                     Text(count > 9 ? "9+" : "\(count)")
                         .font(.ceSystem(size: 10, weight: .bold)).monospacedDigit()
-                        .foregroundStyle(Color(hex: 0x2B1708))
+                        .foregroundStyle(CE.isStandard ? Color(hex: 0x2B1708) : CE.onStatus)
                         .padding(.horizontal, 4)
                         .frame(minWidth: 14, minHeight: 14)
                         .background(CE.attention, in: CECapsule())
@@ -962,7 +963,7 @@ private struct OfficeBench: View {
             }
             .fixedSize()
             .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(Color(hex: 0x0E0A1F).opacity(0.3), in: shape)
+            .background(CE.isStandard ? Color(hex: 0x0E0A1F).opacity(0.3) : CE.surface.opacity(0.9), in: shape)
             .overlay { shape.strokeBorder(CE.wash.opacity(0.07), lineWidth: 1) }
             .frame(minHeight: isMac ? nil : 44)
             .contentShape(Rectangle())

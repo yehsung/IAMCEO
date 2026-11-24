@@ -60,7 +60,7 @@ struct HomeView: View {
     /// Web TOP_REPORTS.
     private static let topRecent = 5
     /// Web .hm-row__title 14.5 at 1.4, two lines at most.
-    private static let rowTitleLeading = CELeading.spacing(14.5, 1.4)
+    private static var rowTitleLeading: CGFloat { CELeading.spacing(14.5, 1.4) }
     /// 팀 summary: fixed order, zero counts dropped. 승인 창 앞 and 오류 are not counted here: they are in 내 차례.
     private static let summaryParts: [(status: String, label: String)] = [
         ("working", String(localized: "일하는 중")), ("waiting", String(localized: "내 답 기다림")), ("idle", String(localized: "쉬는 중")), ("asleep", String(localized: "잠듦")), ("offline", String(localized: "안 보임")),
@@ -489,8 +489,8 @@ struct HomeView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(Color(red: 12 / 255, green: 9 / 255, blue: 28 / 255).opacity(0.5), in: shape)
-        .overlay { shape.strokeBorder(CE.line) }
+        .background(CE.isStandard ? Color(red: 12 / 255, green: 9 / 255, blue: 28 / 255).opacity(0.5) : CE.surfaceAlt, in: shape)
+        .overlay { shape.strokeBorder(CE.line, lineWidth: CE.borderWidth) }
     }
 
     private var clearText: Text {
@@ -1704,7 +1704,7 @@ private struct HomeTodoCheck: View {
                     shape.fill(CE.success)
                     Image(systemName: "checkmark")
                         .font(.ceSystem(size: 11, weight: .heavy))
-                        .foregroundStyle(Color(hex: 0x0B1A14))
+                        .foregroundStyle(CE.isStandard ? Color(hex: 0x0B1A14) : CE.onStatus)
                         .transition(reduceMotion ? .opacity : .scale(scale: 0.4).combined(with: .opacity))
                 } else {
                     // Read-only (sample, offline): a quieter box, never hidden.

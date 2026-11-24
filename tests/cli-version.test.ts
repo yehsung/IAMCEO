@@ -53,8 +53,14 @@ describe("버전 글 해석", () => {
     for (const provider of CLI_PROVIDERS) for (const v of VERIFIED_CLI_VERSIONS[provider]) expect(parseCliVersion(v)).toBe(v);
     // Antigravity CLI 는 gemini 줄로 본다. 다른 CLI 의 버전 표와 섞이지 않는다.
     expect(Object.keys(VERIFIED_CLI_VERSIONS).sort()).toEqual([...SHARED_CLI_PROVIDERS].sort());
-    expect(VERIFIED_CLI_VERSIONS.gemini).toEqual(["1.5.14"]);
+    expect(VERIFIED_CLI_VERSIONS.gemini).toEqual(["1.5.14", "1.5.16"]);
     expect(isVerifiedCliVersion("gemini", "1.5.14")).toBe(true);
+    // 0.2.11 출시 전 실측으로 더한 판(tests/fixtures/cli/<cli>/<판>).
+    expect(isVerifiedCliVersion("gemini", "1.5.16")).toBe(true);
+    expect(isVerifiedCliVersion("claude", "2.1.331")).toBe(true);
+    expect(isVerifiedCliVersion("codex", "0.172.0")).toBe(true);
+    expect(parseCliVersion("codex-cli 0.172.0")).toBe("0.172.0");
+    expect(parseCliVersion("2.1.331 (Claude Code)")).toBe("2.1.331");
     expect(isVerifiedCliVersion("gemini", "0.166.0")).toBe(false);
     expect(isVerifiedCliVersion("codex", "1.5.14")).toBe(false);
   });

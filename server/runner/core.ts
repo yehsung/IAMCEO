@@ -2737,7 +2737,9 @@ export function codexDraft(screen: string): string | null {
     // indistinguishable from someone typing that exact sentence. A manual
     // control lease suspends automation while a person uses this composer.
     const below = lines.slice(i + 1).filter((line) => line.trim());
-    if (below.some((line) => !/^\s*(?:\? for shortcuts|← for agents · \? for shortcuts|\d+% context left|(?:GPT-|gpt-|o\d|codex)[^·]* · [/~]|\S+\s+\d+% context left)/i.test(line))) return null;
+    // 0.172 실측: 초안이 있으면 단축키 안내가 사라지고 마지막 줄에 오른쪽 끝의 설정 경고 표시(`⚠ 2 warnings · f2 to view`)만 남는다.
+    if (below.some((line) => !/^\s*(?:\? for shortcuts|← for agents · \? for shortcuts|\d+% context left|(?:GPT-|gpt-|o\d|codex)[^·]* · [/~]|\S+\s+\d+% context left)/i.test(line) &&
+      !/^\s*⚠ \d{1,3} warnings? · f2 to view$/.test(line))) return null;
     const draft = match[1]?.trim() || "";
     return draft === "Ask Codex to do anything" ? "" : draft;
   }

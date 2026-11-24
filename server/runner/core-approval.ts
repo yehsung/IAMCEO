@@ -36,7 +36,16 @@ export function claudeFolderTrust(screen: string, cwd: string): { prompt: Approv
   };
 }
 
-/** Observed Codex 0.166 folder menu; only an explicit owner answer sends keys. */
+/**
+ * 실측한 Codex 판의 폴더 신뢰 창: 둘째 선택지와 맨 아래 안내 줄이 짝으로 맞아야 한다.
+ * 0.166: `2. Quit` / `enter continue · esc quit`. 0.172: `2. Back to Agent Command Center` / `enter continue · esc back`
+ * (tests/fixtures/cli/codex/0.172.0/folder-trust.txt). 둘째 선택지는 어느 판이든 신뢰하지 않음(reject)이다.
+ */
+const CODEX_TRUST_MENUS: readonly { reject: string; hint: string }[] = [
+  { reject: "Quit", hint: "enter continue · esc quit" },
+  { reject: "Back to Agent Command Center", hint: "enter continue · esc back" },
+];
+/** Observed Codex 0.166·0.172 folder menus; only an explicit owner answer sends keys. */
 export function codexFolderTrust(screen: string, cwd: string): { prompt: ApprovalPrompt; selected: number } | null {
   if (screen.includes("\x1b")) return null;
   const rawLines = screen.split(/\r?\n/);
@@ -49,17 +58,18 @@ export function codexFolderTrust(screen: string, cwd: string): { prompt: Approva
   if (!matchesWorkspacePath(rawLines, heading, start, cwd, 2)) return null;
   const options = lines.flatMap((line, i) => {
     if (i <= start) return [];
-    const match = /^(›\s*)?([12])\. (Trust and continue|Quit)$/.exec(line);
+    const match = /^(›\s*)?([12])\. (Trust and continue|Quit|Back to Agent Command Center)$/.exec(line);
     return match ? [{ index: i, n: Number(match[2]), label: match[3]!, selected: !!match[1] }] : [];
   });
-  if (options.length !== 2 || options.some((o, i) => o.n !== i + 1) || options[0]!.label !== "Trust and continue" || options[1]!.label !== "Quit" ||
+  const menu = CODEX_TRUST_MENUS.find(item => item.reject === options[1]?.label);
+  if (!menu || options.length !== 2 || options.some((o, i) => o.n !== i + 1) || options[0]!.label !== "Trust and continue" ||
       options.filter(o => o.selected).length !== 1 || options[1]!.index !== options[0]!.index + 1 ||
-      lines.slice(options[1]!.index + 1).filter(Boolean).join("\n") !== "enter continue · esc quit") return null;
+      lines.slice(options[1]!.index + 1).filter(Boolean).join("\n") !== menu.hint) return null;
   const explanation = lines.slice(start, options[0]!.index).filter(Boolean).join(" ");
   if (!explanation.includes("Codex can read, edit, and run files here") || !explanation.endsWith("Your trust decision will be saved.")) return null;
   return { selected: options.findIndex(o => o.selected), prompt: {
     title: ERROR_CODES.approval_folder_trust.ko, body: `${cwd}\n${explanation}`, question: "Trust this folder?",
-    options: options.map(o => ({ n: o.n, label: o.label, reject: o.label === "Quit" })),
+    options: options.map(o => ({ n: o.n, label: o.label, reject: o.label === menu.reject })),
     fingerprint: createHash("sha256").update(screen).digest("hex").slice(0, 24),
   } };
 }

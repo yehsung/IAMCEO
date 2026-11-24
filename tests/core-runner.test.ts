@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server, type Socket } from "node:net";
-import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CoreRunner, codexDraft, ensureCoreServer, type CoreRunnerDeps, type CoreCompactState } from "../server/runner/core.ts";
@@ -412,11 +412,25 @@ describe("delivery safety and OSC7501 turns", () => {
     expect(launch.argv[0]).toBe("/fake/codex"); expect(launch.argv).not.toContain("exec"); expect(launch.argv).toContain('model_reasoning_effort="xhigh"'); expect(launch.argv).toContain('mcp_servers.iamceo.command="/bin/echo"'); expect(launch.argv).toContain('mcp_servers.iamceo.env_vars=["IAMCEO_TOKEN","IAMCEO_URL"]'); expect(launch.env.IAMCEO_TOKEN).toBe("secret"); expect(launch.argv.join(" ")).not.toContain("secret"); expect(launch.sessionId).toBeNull();
     // Codex 0.166's start-up update menu defaults to `npm install -g`; IAMCEO launches never show it.
     expect(launch.argv).toContain("check_for_update_on_startup=false");
+    // 0.172 실측: '매번 묻기'(on-request)에서 IAMCEO 연결 도구를 부를 때마다 승인 창(Allow the iamceo MCP server to run tool …)이 떴다.
+    // Claude 의 --allowedTools mcp__iamceo 와 같게 IAMCEO 도구만 묻지 않고 돌린다(0.166 실행 파일에도 같은 설정 이름이 있다).
+    for (const mode of ["default", "auto", "bypassPermissions"] as const) {
+      expect(providerLaunch(member({ cli: "codex", permissionMode: mode }), f.opts, { codexBin: "/fake/codex" }).argv).toContain('mcp_servers.iamceo.default_tools_approval_mode="approve"');
+    }
     expect(() => providerLaunch(codex, { ...f.opts, resume: true }, { codexBin: "/fake/codex" })).toThrow("unknown");
     const runner = f.runner(); await runner.start(codex, f.opts); f.setScreen("prior output\n› \n  ? for shortcuts\n"); expect(await runner.send(codex, "hello", f.opts)).toMatchObject({ ok: true });
   });
   test("Codex draft safety rejects typed/wrapped/unknown content", () => {
     expect(codexDraft("output\n› \n  ? for shortcuts")).toBe(""); expect(codexDraft("› Ask Codex to do anything\n\n  GPT-6-Astra high Fast · /private/tmp/iamceo-core-qa\n  ← for agents · ? for shortcuts")).toBe(""); expect(codexDraft("› keep my draft\n  ? for shortcuts")).toBe("keep my draft"); expect(codexDraft("› first\nsecond line\n  ? for shortcuts")).toBeNull(); expect(codexDraft("Approve? Yes/No")).toBeNull();
+  });
+  test("Codex 0.172: 초안이 있을 때 바닥줄에 남는 오른쪽 끝 경고 표시(⚠ N warnings · f2 to view)는 입력칸 아래 줄로 읽는다", () => {
+    const warn = " ".repeat(134) + "⚠ 2 warnings · f2 to view";
+    expect(codexDraft(`› keep my draft\n\n  GPT-6-Luna low fast · /private/tmp/iamceo-cli-fixture/work\n${warn}`)).toBe("keep my draft");
+    expect(codexDraft(`› keep my draft\n\n  GPT-6-Luna low fast · /private/tmp/iamceo-cli-fixture/work\n${" ".repeat(130)}⚠ 1 warning · f2 to view`)).toBe("keep my draft");
+    // 경고 표시 뒤에 다른 글이 붙거나 모르는 줄이면 여전히 알아보지 않는다.
+    expect(codexDraft(`› keep my draft\n${warn} and more`)).toBeNull();
+    expect(codexDraft(`› keep my draft\n  Press enter to confirm`)).toBeNull();
+    expect(codexDraft(readFileSync(join(import.meta.dir, "fixtures", "cli", "codex", "0.172.0", "draft.txt"), "utf8"))).toBe("hello draft one line");
   });
 });
 
@@ -1282,6 +1296,24 @@ ${selected === 0 ? "›" : " "} 1. Trust and continue
 ${selected === 1 ? "›" : " "} 2. Quit
 enter continue · esc quit
 `;
+/** 0.172 실측(tests/fixtures/cli/codex/0.172.0/folder-trust.txt): 둘째 선택지와 안내 줄이 바뀌었다. */
+const codexTrustScreen172 = (selected = 0, cwd = "/tmp") => codexTrustScreen(selected, cwd).replace("2. Quit", "2. Back to Agent Command Center").replace("enter continue · esc quit", "enter continue · esc back");
+describe("Codex 0.172 folder trust approval", () => {
+  test("둘째 선택지가 'Back to Agent Command Center'·안내 'esc back' 인 창을 읽고, 고른 줄에서 키를 센다. 0.166 과 섞인 창은 읽지 않는다", async () => {
+    const f = await fixture(), runner = f.runner(10000), m = member({ cli: "codex" });
+    const start = await runner.start(m, f.opts), terminal = f.terminals.get(start.paneId)!;
+    terminal.status = null; f.setScreen(codexTrustScreen172(0));
+    const prompt = (await runner.approval(m))!;
+    expect(prompt).toMatchObject({ question: "Trust this folder?", options: [{ n: 1, label: "Trust and continue", reject: false }, { n: 2, label: "Back to Agent Command Center", reject: true }] });
+    expect(await runner.answerApproval(m, prompt.fingerprint!, 1)).toMatchObject({ ok: true });
+    expect(f.calls.filter(c => c.method === "terminal.keys").at(-1)?.params.keys).toEqual(["enter"]);
+    for (const mixed of [codexTrustScreen(0).replace("2. Quit", "2. Back to Agent Command Center"), codexTrustScreen172(0).replace("esc back", "esc quit")]) {
+      expect(codexFolderTrust(mixed, "/tmp")).toBeNull();
+    }
+    const observed = readFileSync(join(import.meta.dir, "fixtures", "cli", "codex", "0.172.0", "folder-trust.txt"), "utf8");
+    expect(codexFolderTrust(observed, "/private/tmp/iamceo-cli-fixture/work")?.prompt.options.map(o => o.label)).toEqual(["Trust and continue", "Back to Agent Command Center"]);
+  });
+});
 describe("Codex 0.166 folder trust approval", () => {
   async function trust(selected = 0) {
     const f = await fixture(), runner = f.runner(10000), m = member({ cli: "codex" });

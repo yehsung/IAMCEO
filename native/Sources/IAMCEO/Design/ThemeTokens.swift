@@ -252,7 +252,8 @@ final class ThemeStyle: Sendable {
                               bubble: .bubble, sidebar: .glass, elevation: .shadow, statusShape: .pill)
         case .workbench:
             return ThemeStyle(id: .workbench, dark: dark, palette: dark ? .workbenchDark : .workbenchLight,
-                              headingDesign: .monospaced, cardRadius: 6, bubbleRadius: 6, controlRadius: 5,
+                              // 제목 고정폭은 뺐다: 한글은 시스템 글꼴로 떨어지는데 띄어쓰기만 고정폭 너비라 "결제  완료"처럼 벌어져 보였다(11-25 화면 확인).
+                              cardRadius: 6, bubbleRadius: 6, controlRadius: 5,
                               squareCapsules: true, bubble: .flat, sidebar: .solid, elevation: .hairline, statusShape: .bar)
         case .marshmallow:
             return ThemeStyle(id: .marshmallow, dark: dark, palette: dark ? .marshmallowDark : .marshmallowLight,

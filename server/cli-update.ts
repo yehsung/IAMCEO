@@ -399,7 +399,8 @@ export class CliUpdates {
       checkedAt: cached?.at ? new Date(cached.at).toISOString() : null,
       ...(run ? { run: { ...run, error: run.error ? { ...run.error } : null } } : {}),
       ...(reopen ? { liveSessions: reopen.live } : {}),
-      ...(reopen && reopen.pending > 0 && run?.phase === "done" ? { pendingReopen: reopen.pending } : {}),
+      // 업데이트 세대가 오른 뒤에만 0 보다 크다(서버를 다시 켜 진행 값이 없어도 남은 수는 맞다).
+      ...(reopen && reopen.pending > 0 ? { pendingReopen: reopen.pending } : {}),
     };
   }
 
@@ -598,7 +599,7 @@ export class CliUpdates {
   }
   private pendingKey(): string {
     return CLI_PROVIDERS.map(cli => {
-      try { return this.runs.get(cli)?.phase === "done" ? this.options.reopen?.(cli)?.pending ?? 0 : 0; } catch { return 0; }
+      try { return this.options.reopen?.(cli)?.pending ?? 0; } catch { return 0; }
     }).join(",");
   }
 }

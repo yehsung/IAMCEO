@@ -457,8 +457,10 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     const world = newWorld();
     const claude = brewClaude(world, "2.1.323", "2.1.332");
     world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
-    let pending = 2;
-    const { updates, monitor } = service(world, { claude: claude.bin }, { reopen: cli => (cli === "claude" ? { live: 3, pending } : { live: 0, pending: 0 }), pendingPollMs: 30 });
+    // 오케스트레이터처럼: 업데이트 세대가 오르기(onInstalled) 전에는 기다리는 팀장이 없다.
+    let pending = 0;
+    const { updates, monitor } = service(world, { claude: claude.bin }, { reopen: cli => (cli === "claude" ? { live: 3, pending } : { live: 0, pending: 0 }), pendingPollMs: 30,
+      onInstalled: () => { pending = 2; } });
     await monitor.refresh(true);
     await updates.check();
     expect(updates.info("claude")).toMatchObject({ liveSessions: 3 });

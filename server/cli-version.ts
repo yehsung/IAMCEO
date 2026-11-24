@@ -13,7 +13,7 @@ export type { CliVersionInfo } from "../shared/types.ts";
  * 새 버전을 넣을 때는 그 폴더에 실제 화면·기록을 함께 넣는다(tests/cli-fixtures.test.ts 가 둘이 맞는지 본다).
  */
 export const VERIFIED_CLI_VERSIONS: Record<CliProvider, string[]> = {
-  claude: ["2.1.316", "2.1.319", "2.1.322", "2.1.323"],
+  claude: ["2.1.316", "2.1.319", "2.1.322", "2.1.323", "2.1.331"],
   codex: ["0.166.0"],
   // Antigravity CLI(`agy`). 1.5.14 에서 명령줄·훅·상태줄·MCP 를 실측했고, 대표의 첫 설정 뒤 대화형 화면(입력칸·승인 창·폴더 신뢰 창·진행 줄)·상태줄 입력·
   // 훅 입력·OSC 7501 견본을 tests/fixtures/cli/gemini/1.5.14 에 두었다(견본 시험 tests/cli-fixtures.test.ts).

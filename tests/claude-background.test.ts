@@ -61,6 +61,23 @@ describe("화면: 턴을 끝내고 입력을 받을 수 있는 Claude", () => {
     expect(claudeQuietScreen(composerScreen("⏺ 답\n\n❯ 방금 넣은 글"))).toBeNull();
     expect(claudeQuietScreen("승인 창\n 1. Yes\n 2. No\n")).toBeNull();
   });
+  // 2.1.331 실측(tests/fixtures/cli/claude/2.1.331): esc 안내가 상태 줄 괄호에서 입력칸 아래 바닥줄로 옮겨졌고, 일을 시작한 첫 1초는 괄호도 없다.
+  // 뒤 작업을 남긴 턴 끝 줄은 `✻ Cooked for 8s · done 7:04 AM · 1 shell still running` 이다.
+  test("2.1.331: 바닥줄의 esc to interrupt 나 괄호 없는 도는 상태 줄은 일하는 중이고, 턴 끝 줄의 '· N … still running' 은 뒤 작업 이름이다", () => {
+    const v331 = join(import.meta.dir, "fixtures", "cli", "claude", "2.1.331");
+    for (const file of ["working-first.txt", "background-working.txt", "working.txt", "compacting.txt", "subagent-running.txt"]) {
+      expect([file, claudeQuietScreen(readFileSync(join(v331, file), "utf8"))]).toEqual([file, null]);
+    }
+    expect(claudeQuietScreen(readFileSync(join(v331, "background-shell.txt"), "utf8"))).toEqual({ label: "1 shell" });
+    for (const file of ["idle.txt", "idle-auto.txt", "idle-bypass.txt", "interrupted.txt"]) {
+      expect([file, claudeQuietScreen(readFileSync(join(v331, file), "utf8"))]).toEqual([file, { label: null }]);
+    }
+    const footer = (line: string) => composerScreen("⏺ 답").replace("  ? for shortcuts", line);
+    expect(claudeQuietScreen(footer("  ⏸ manual mode on · esc to interrupt · ← 2 agents"))).toBeNull();
+    expect(claudeQuietScreen(composerScreen("⏺ 답\n· Levitating…"))).toBeNull();
+    expect(claudeQuietScreen(composerScreen("⏺ 답\n✻ Brewed for 4s · done 7:02 AM"))).toEqual({ label: null });
+    expect(claudeQuietScreen(composerScreen("⏺ 답\n✻ Cooked for 8s · done 7:04 AM · 2 shells still running"))).toEqual({ label: "2 shells" });
+  });
 });
 
 describe("Claude 기록: 전달 뒤의 턴이 닫혔는가", () => {

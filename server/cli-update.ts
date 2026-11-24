@@ -197,7 +197,11 @@ export function detectCliInstall(cli: CliProvider, bin: string | null, opts: Det
   return unknown(real);
 }
 
-export interface UpdateStep { argv: string[]; env: Record<string, string>; timeoutMs: number; optional?: boolean }
+/**
+ * phase: 이 단계를 시작할 때 보일 진행. 없으면 출력으로 짐작한다(brew 의 '==> Downloading' 뒤 '==> Installing·Upgrading').
+ * npm 은 받기와 깔기를 한 명령으로 하고 끝에 한 줄('changed 2 packages in 9s')만 찍어 나눌 수 없다(11-25 실제 업데이트): 처음부터 '설치 중'.
+ */
+export interface UpdateStep { argv: string[]; env: Record<string, string>; timeoutMs: number; optional?: boolean; phase?: CliUpdatePhase }
 export interface UpdatePlan { steps: UpdateStep[]; display: string }
 
 const BASE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
@@ -228,7 +232,7 @@ export function updatePlan(install: CliInstall, to: string): UpdatePlan | null {
       const node = resolveCliExecutable("node");
       return { display: `npm install -g ${install.name}@${to}`, steps: [{
         argv: [program, "install", "-g", "--prefix", install.prefix!, "--no-fund", "--no-audit", `${install.name}@${to}`],
-        env: stepEnv(install, [...front, ...(node ? [dirname(node)] : [])]), timeoutMs: 10 * 60_000 }] };
+        env: stepEnv(install, [...front, ...(node ? [dirname(node)] : [])]), timeoutMs: 10 * 60_000, phase: "installing" }] };
     }
     case "claude_native": return { display: "claude update", steps: [{ argv: [program, "update"], env: stepEnv(install, front), timeoutMs: 10 * 60_000 }] };
     case "agy_self": return { display: "agy update", steps: [{ argv: [program, "update"], env: stepEnv(install, front), timeoutMs: 10 * 60_000 }] };
@@ -474,7 +478,7 @@ export class CliUpdates {
     const plan = updatePlan(install, info.latest);
     if (!plan) throw new CliUpdateError(409, "cli_update_unsupported");
     if (this.testMode && !plan.steps.every(step => testModeAllows(step.argv[0]!))) throw new CliUpdateError(503, "cli_update_test_mode");
-    const run: CliUpdateRun = { id: randomUUID(), cli, from: info.current, to: info.latest, phase: "downloading", startedAt: new Date(this.now()).toISOString(),
+    const run: CliUpdateRun = { id: randomUUID(), cli, from: info.current, to: info.latest, phase: plan.steps[0]?.phase ?? "downloading", startedAt: new Date(this.now()).toISOString(),
       endedAt: null, installed: null, error: null, manualCommand: install.manualCommand };
     this.runs.set(cli, run);
     const work = this.execute(run, install, plan).catch(error => {
@@ -512,6 +516,7 @@ export class CliUpdates {
     try {
       log.write(`# ${new Date(this.now()).toISOString()} ${CLI_INFO[run.cli].name} ${run.from ?? "?"} → ${run.to ?? "?"} (${install.method})\n# ${plan.display}\n`);
       for (const step of plan.steps) {
+        if (step.phase) this.setPhase(run, step.phase);
         const result = await this.runStep(step, run, log, deadline);
         if (result.kind === "ok") continue;
         if (step.optional && result.code === "cli_update_failed") { log.write(`# 앞 단계가 실패했지만 이어 갑니다\n`); continue; }

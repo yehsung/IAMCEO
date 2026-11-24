@@ -39,6 +39,7 @@ sleep 0.3
 echo "==> Downloading https://downloads.claude.ai/claude-code-releases/2.1.332/darwin-arm64/claude"
 sleep 0.3
 echo "==> Upgrading 1 outdated package:"
+sleep 0.5
 mkdir -p '${prefix}/Caskroom/claude-code@latest/2.1.332'
 cat > '${prefix}/Caskroom/claude-code@latest/2.1.332/claude' <<'NEW'
 #!/bin/sh

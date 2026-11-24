@@ -335,6 +335,8 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     await updates.settled("codex");
     expect(calls(log)).toEqual([`install -g --prefix ${prefix} --no-fund --no-audit @openai/codex@0.172.0`]);
     expect(updates.info("codex").run).toMatchObject({ phase: "done", installed: "0.172.0" });
+    // npm 은 받기와 깔기를 한 명령으로 하고 끝에 한 줄('changed 2 packages in 9s')만 찍는다(11-25 실제 업데이트). '내려받는 중'으로 9초를 두지 않고 처음부터 '설치 중'.
+    expect(world.phases).toEqual(["installing", "verifying", "done"]);
     expect(readFileSync(join(world.home, "logs", "cli-update-codex.log"), "utf8")).toContain("npm_config_yes=true");
   });
   test("Claude 네이티브는 claude update, Antigravity CLI 는 agy update", async () => {

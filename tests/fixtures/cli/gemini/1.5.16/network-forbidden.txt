@@ -1,0 +1,47 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.16
+     ▀▀▀▀▀▀       Gemini 3.8 Flash (Low)
+    ▀▀▀▀▀▀▀▀      /private/tmp/iamceo-cli-fixture/work
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.
+
+  [대표 직접] "Use your run_command tool to run exactly: touch made.txt . Do not use any other tool first. Then reply with one short sentence."
+  #b7ca0871-c61d-4f63-b0a8-cb23e5114bb4
+  #iamceo_sp7kZkQaowSoqFSlQeUyrA
+  #iamceo_b_-6AqCXn5G7-aSjh5a75vhg
+
+● Ran (cd '/private/tmp/iamceo-cli-fixture/work' && { touch made.txt }) (ctrl+o to expand)
+
+────────────────────────────────────────────────────────────
+> IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.
+
+  [시스템] 보고 보완: 실행 1e848379-6d53-479d-b8e9-2bf77da5f71d의 결과만 post로 알려 주세요. 기존 업무를 다시 실행하지 마세요. 완료·막힘 또는 질문/위임 대기
+  상태를 명시하세요.
+  #iamceo_b8mU4G4s21txsDBt3PHkyQ
+  #iamceo_b_nb1PN7ekHyjBxE2nc0_oKw
+
+● Called 2 MCP tools (iamceo/status, iamceo/post)
+● Explored 2 files (status.json, post.json)
+● Called 2 MCP tools (iamceo/status, iamceo/post) (ctrl+o to expand)
+
+  지시하신 'touch made.txt' 명령 실행이 외부에서 취소되어 중단되었습니다.
+
+────────────────────────────────────────────────────────────
+> IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.
+
+  [대표 직접] "Reply with exactly one short sentence: network test."
+  #8eda6cb9-645f-425b-8691-474b9f57985f
+  #iamceo_j1iW-B9DzpquIqHfhb9axQ
+  #iamceo_b_PNrkX9TqqGOkztrxSgVtdQ
+
+⚠ agent executor error: generating and executing: request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse":
+Forbidden
+Error ID: eeeeeeee-1111-4111-8111-000000000001-15
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 2%

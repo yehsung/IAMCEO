@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.331
+▝▜██████▀  Haiku 5.5 with low effort · Claude Ultra
+ ▝▝   ▝▝   /private/tmp/iamceo-cli-fixture/work
+
+
+❯ hello draft one line
+
+⏺ Hello, thanks for reaching out. I'll get back to you shortly with the details.
+
+✻ Cooked for 2s · done 6:58 AM
+
+❯ [시스템] effort 변경: high → low. 이어 열 세션 기록이 없어 새 세션으로 열었습니다.
+  역할: 시험. 현재 상황: . 다음: .
+  프로젝트 상황: cli version verify. board 도구로 대화·결재·작업을 확인하고 계속하세요.
+  #iamceo_pwY8XRoYutDI9KNZnQFUhw
+
+  [대표 직접] "Use the Bash tool to run exactly this command: ls -la . Then reply with one short sentence."
+  #e0a53d88-cb27-4395-a12a-58c135a6de93
+  #iamceo_GBTuP4Ng36mgoxmi_RHctQ
+  #iamceo_b_yynPnk6togX3_wdgRz3mqA
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✢ Finagling…
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 버전 확인 ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◆ Haiku │ █░░░░░░░░░ │ 7% │ 75K/1.0M │ $0.01 │ ⚠️ │ 7일: 31% (2일3시간)
+  📁 work │ 🔷 gpt-6-astra │ 5시간: 4% (4일13시간)
+  ⏸ manual mode on · esc to interrupt · ← 2 agents

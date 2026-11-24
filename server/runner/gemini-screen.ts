@@ -42,6 +42,8 @@ const SUBAGENT_ROWS_MAX = 16;
  * 진행 줄: 점자 돌림 글자 하나 + 두 칸 + 글(1.5.14 실측). 일하는 중 `⣻  Generating...`, 도구 뒤 `⡿  Running command...`·`⢿  Editing files...`,
  * 서브에이전트 `⣟  Delegating...`, 재시도 `⣽  Model unavailable (attempt 3/9), retrying in 9s...`, 압축 `⣷  Compacting conversation… (0s · esc to cancel)`.
  * `esc to cancel` 은 압축 줄에만 있다(일하는 중·재시도 줄에는 esc 안내가 없다).
+ * 1.5.16 실측(tests/fixtures/cli/gemini/1.5.16): 도구 진행 줄 끝에 지난 시간이 붙고(`Running command... 2s`, `Editing files... 11s`, `Running command... 1m 1s`),
+ * 서브에이전트가 부모에게 답한 뒤 부모의 진행 줄은 `Working...` 다. 재시도 줄에는 시간이 붙지 않는다(GEMINI_RETRY 그대로). 진행 줄의 글로 판정하는 곳은 재시도뿐이다.
  */
 export const GEMINI_PROGRESS = /^[⠀-⣿]\s+(\S.*)$/;
 /** 재시도 진행 줄의 글(1.5.14 실측: API 연결을 끊으면 9번까지 2~9초 간격으로 다시 하고, 약 133초 뒤 턴을 오류로 끝낸다). */

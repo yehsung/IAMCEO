@@ -1,0 +1,31 @@
+{"type":"file-history-snapshot","messageId":"m","snapshot":{},"isSnapshotUpdate":false}
+{"type":"last-prompt","lastPrompt":"(가짜 글)","leafUuid":"f007c0b4-5099-4af7-b12c-926828a7d75f","sessionId":"session"}
+{"type":"custom-title","customTitle":"버전 확인","sessionId":"session"}
+{"type":"agent-name","agentName":"버전 확인","sessionId":"session"}
+{"type":"mode","mode":"normal","sessionId":"session"}
+{"type":"permission-mode","permissionMode":"default","sessionId":"session"}
+{"type":"session-owner","accountUuid":"a","organizationUuid":"o","sessionId":"session"}
+{"type":"atis-latch","atis":"","sessionId":"session"}
+{"type":"derived-from","sessionId":"session","v":1,"sessions":["session"]}
+{"type":"data-flow-records","sessionId":"session","v":1,"records":[]}
+{"parentUuid":null,"logicalParentUuid":"f007c0b4-5099-4af7-b12c-926828a7d75f","isSidechain":false,"type":"system","subtype":"compact_boundary","content":"Conversation compacted","level":"info","compactMetadata":{"trigger":"manual","preTokens":77528,"postTokens":18615,"cumulativeDroppedTokens":58913,"durationMs":8020,"preservedSegment":{"headUuid":"c86fc4b0-f9ed-436a-98d0-3aa4a333d13e","anchorUuid":"aab8511b-eca6-409a-ac9e-5fd3ce98d154","tailUuid":"f007c0b4-5099-4af7-b12c-926828a7d75f"},"preservedMessages":{"anchorUuid":"aab8511b-eca6-409a-ac9e-5fd3ce98d154","uuids":["c86fc4b0-f9ed-436a-98d0-3aa4a333d13e","f369b1b5-f6f1-4080-9619-9bf58601d373","f007c0b4-5099-4af7-b12c-926828a7d75f"],"allUuids":["c86fc4b0-f9ed-436a-98d0-3aa4a333d13e","ca2dd37a-fdd6-4186-ab5a-f3db21290ad7","f369b1b5-f6f1-4080-9619-9bf58601d373","f007c0b4-5099-4af7-b12c-926828a7d75f"]},"preCompactOrganizations":["817da2b7-df60-44ec-a6fc-97e65659addd"],"preCompactOrganizationsCoverStart":true},"uuid":"2d8c5df5-8ced-4d68-b359-b9f59e2fd1fa","timestamp":"2026-11-24T22:03:06.700Z","userType":"external","entrypoint":"cli","cwd":"/private/tmp/iamceo-cli-fixture/work","sessionId":"session","version":"2.1.331","gitBranch":"HEAD","slug":"vast-napping-toucan-of-session","dataFlowOn":true}
+{"type":"data-flow-records","sessionId":"session","v":1,"records":[]}
+{"parentUuid":"2d8c5df5-8ced-4d68-b359-b9f59e2fd1fa","isSidechain":false,"promptId":"ca9a3517-dab5-4c49-8927-04392b2126f6","type":"user","message":{"role":"user","content":"(가짜 글)"},"isVisibleInTranscriptOnly":true,"isCompactSummary":true,"uuid":"aab8511b-eca6-409a-ac9e-5fd3ce98d154","timestamp":"2026-11-24T22:03:06.594Z","turnPosition":{"promptIndex":4,"turnIndex":4},"rowSource":"local","session_id":"session","userType":"external","entrypoint":"cli","cwd":"/private/tmp/iamceo-cli-fixture/work","sessionId":"session","version":"2.1.331","gitBranch":"HEAD","slug":"vast-napping-toucan-of-session","dataFlowOn":true}
+{"parentUuid":"aab8511b-eca6-409a-ac9e-5fd3ce98d154","isSidechain":false,"promptId":"ca9a3517-dab5-4c49-8927-04392b2126f6","type":"user","message":{"role":"user","content":"(가짜 글)"},"isMeta":true,"rowSource":"harness","uuid":"aa6b816e-be99-48fe-821a-afe81e9d04eb","timestamp":"2026-11-24T22:02:58.577Z","session_id":"session","userType":"external","entrypoint":"cli","cwd":"/private/tmp/iamceo-cli-fixture/work","sessionId":"session","version":"2.1.331","gitBranch":"HEAD","slug":"vast-napping-toucan-of-session","dataFlowOn":true}
+{"parentUuid":"aa6b816e-be99-48fe-821a-afe81e9d04eb","isSidechain":false,"promptId":"ca9a3517-dab5-4c49-8927-04392b2126f6","type":"user","message":{"role":"user","content":"(가짜 글)"},"uuid":"35f61bc5-e681-4dc4-b1e8-46206f52cc10","timestamp":"2026-11-24T22:02:58.577Z","rowSource":"local","session_id":"session","userType":"external","entrypoint":"cli","cwd":"/private/tmp/iamceo-cli-fixture/work","sessionId":"session","version":"2.1.331","gitBranch":"HEAD","slug":"vast-napping-toucan-of-session","dataFlowOn":true}
+{"parentUuid":"35f61bc5-e681-4dc4-b1e8-46206f52cc10","isSidechain":false,"promptId":"ca9a3517-dab5-4c49-8927-04392b2126f6","type":"user","message":{"role":"user","content":"(가짜 글)"},"rowSource":"local","repeatsCompactSummary":true,"uuid":"0f0ee622-57b6-4aec-9cac-0a9bbcb41e35","timestamp":"2026-11-24T22:03:06.799Z","session_id":"session","userType":"external","entrypoint":"cli","cwd":"/private/tmp/iamceo-cli-fixture/work","sessionId":"session","version":"2.1.331","gitBranch":"HEAD","slug":"vast-napping-toucan-of-session","dataFlowOn":true}
+{"type":"attachment","sessionId":"session","cwd":"/private/tmp/iamceo-cli-fixture/work","attachment":{"type":"deferred_tools_delta"}}
+{"type":"attachment","sessionId":"session","cwd":"/private/tmp/iamceo-cli-fixture/work","attachment":{"type":"agent_listing_delta"}}
+{"type":"attachment","sessionId":"session","cwd":"/private/tmp/iamceo-cli-fixture/work","attachment":{"type":"skill_listing"}}
+{"type":"attachment","sessionId":"session","cwd":"/private/tmp/iamceo-cli-fixture/work","attachment":{"type":"mcp_instructions_delta"}}
+{"type":"attachment","sessionId":"session","cwd":"/private/tmp/iamceo-cli-fixture/work","attachment":{"type":"environment"}}
+{"type":"attachment","sessionId":"session","cwd":"/private/tmp/iamceo-cli-fixture/work","attachment":{"type":"model"}}
+{"type":"attachment","sessionId":"session","cwd":"/private/tmp/iamceo-cli-fixture/work","attachment":{"type":"hook_success"}}
+{"type":"last-prompt","lastPrompt":"(가짜 글)","leafUuid":"98873be7-55a3-4ba9-89ae-8466a03098d1","sessionId":"session"}
+{"type":"custom-title","customTitle":"버전 확인","sessionId":"session"}
+{"type":"agent-name","agentName":"버전 확인","sessionId":"session"}
+{"type":"mode","mode":"normal","sessionId":"session"}
+{"type":"permission-mode","permissionMode":"default","sessionId":"session"}
+{"type":"session-owner","accountUuid":"a","organizationUuid":"o","sessionId":"session"}
+{"type":"atis-latch","atis":"","sessionId":"session"}
+{"type":"file-history-snapshot","messageId":"m","snapshot":{},"isSnapshotUpdate":false}

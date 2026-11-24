@@ -13,6 +13,13 @@ Only changes that matter to users, by version. The full history is in `git log`.
 - 설정 › 알림의 'AI 도구 새 판 알림'(기본 켬)을 끄면 iPhone 알림·Mac 알림·앱 위쪽 띠를 내지 않습니다. 이 서버에 붙은 모든 기기에 같이 적용되고, 실행 환경의 '새 판' 표시와 업데이트 단추는 그대로 있습니다.
 - **새 판은 대화를 끊지 않고 적용됩니다.** 업데이트가 끝나면 그 CLI로 떠 있는 총괄·팀장은 쉬는 때에(일하는 중이면 그 턴이 끝난 뒤) 같은 대화로 다시 열려 새 판을 씁니다. 새 세션을 만들지 않고, 잠든 팀장은 깨울 때 새 판으로 뜹니다. 그동안 실행 환경에 '적용 중: N명 남음'이 보입니다. IAMCEO 밖(터미널)에서 올린 판은 팀장이 다음에 새로 뜰 때부터 씁니다.
 - 이전 앱은 새 판 띠와 단추를 보이지 않지만 점검표의 '새 판 X'는 보입니다. iPhone 알림은 알림 중계를 이 판으로 다시 배포한 뒤부터 중계를 거쳐 갑니다(이 Mac의 알림 키로 보내는 설치는 바로 갑니다).
+- **새 CLI 판을 확인했습니다: Claude Code 2.1.331, Codex 0.172.0, Antigravity CLI 1.5.16.** 이 Mac 에 깔린 새 판을 격리 시험 서버로 실제로 띄워 입력칸·초안·일하는 중·승인·압축·턴 끝·중단·서브에이전트 화면과 훅·상태줄·대화 기록을 받아 견본으로 남겼고, 점검표(설정 → AI 모델 → 실행 환경)의 'CLI 버전'이 이 판들에서 경고를 내지 않습니다.
+- **Claude Code 2.1.331: 막 일을 시작한 팀장을 쉬는 중으로 잘못 보던 1초를 고쳤습니다.** 2.1.331 은 일하는 동안의 'esc to interrupt' 안내를 입력칸 아래 줄로 옮겼고, 일을 시작한 첫 1초에는 상태 줄에 시간이 없습니다. 뒤 작업(백그라운드 셸 등)이 끝나 Claude 가 스스로 일을 다시 시작한 순간을 '뒤 작업만 남은 쉬는 팀장'으로 읽을 수 있었습니다. 뒤 셸을 남긴 턴은 그 셸 이름('1 shell')까지 읽습니다.
+- **Codex 0.172.0: 세 가지를 고쳤습니다.**
+  - 권한이 '매번 묻기'면 Codex 팀장이 IAMCEO 에 보고할 때마다(진행 상황·보고 글) 터미널에 'Allow the iamceo MCP server …?' 승인 창이 떠 멈췄습니다. 이제 IAMCEO 도구만은 묻지 않고 씁니다(Claude 팀장과 같습니다). 명령 실행과 다른 도구의 승인은 그대로입니다.
+  - 새 프로젝트에서 '이 폴더를 신뢰합니다'라고 답했는데도 Codex 팀장이 폴더 신뢰 확인 창에서 '정확히 읽지 못했습니다'로 멈췄습니다(0.172 가 창의 둘째 선택지를 'Back to Agent Command Center' 로 바꿨습니다). 이제 그 창을 읽고 이어 갑니다.
+  - 입력칸에 쓰다 만 글이 있을 때 입력칸을 알아보지 못했습니다(바닥줄에 Codex 설정 경고 표시만 남는 경우). 이제 초안으로 읽습니다.
+- **Codex 0.172.0 에서 달라진 점(고치지 않음):** 팀장이 백그라운드 터미널(미리보기 서버 등)을 남기고 턴을 끝내면 곧바로 '쉬는 중'으로 보입니다(0.166 은 그 동안 '일하는 중'). 그래서 그런 팀장을 재우거나 보관할 때 '뒤 작업이 남았다'는 거절이 나오지 않습니다.
 
 ### 0.2.10 — 2026-11-23
 
@@ -212,6 +219,13 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - Turning off "New AI tool versions" in Settings › Notifications (on by default) stops the iPhone notification, the Mac notification and the strip at the top of the app. It applies to every device on this server; the new-version note and the Update button in Runtime stay.
 - **A new version is applied without cutting the conversation.** After the update, leads and staff running on that CLI reopen the same conversation when idle (after the current turn if they're working) and use the new version. No new session is made; a sleeping member starts on the new version when woken. Runtime shows "Applying: N left" meanwhile. A version you install outside IAMCEO (in Terminal) is used from the member's next fresh start.
 - Older apps don't show the strip or the button but do show "new version X" in the check list. iPhone notifications through the relay start once the relay is redeployed with this version (installs that send with this Mac's own key get them right away).
+- **New CLI versions verified: Claude Code 2.1.331, Codex 0.172.0, Antigravity CLI 1.5.16.** The new versions installed on this Mac were started for real on an isolated test server. Their composer, drafts, working, approval, compaction, turn-end, interrupt and subagent screens, and their hooks, status lines and conversation logs were captured as fixtures, and the "CLI version" check (Settings › AI models › Runtime) no longer warns on them.
+- **Claude Code 2.1.331: fixed one second in which a member that had just started working looked idle.** 2.1.331 moved its "esc to interrupt" hint to the line below the composer, and for the first second of work the status line has no timer. The moment Claude restarted work on its own after a background task (such as a background shell) finished could be read as "idle, only a background task left". A turn that leaves a background shell now also names it ("1 shell").
+- **Codex 0.172.0: three fixes.**
+  - With the permission mode set to "ask every time", a Codex member stopped at an "Allow the iamceo MCP server …?" prompt in its terminal every time it reported to IAMCEO (status, posts). IAMCEO's own tools now run without asking (as for Claude members). Approval for commands and other tools is unchanged.
+  - A Codex member stopped at the folder-trust dialog with "could not read it exactly" even when you had said you trust the folder when creating the project (0.172 renamed the dialog's second choice to "Back to Agent Command Center"). The dialog is now read and the member goes on.
+  - The composer was not recognized while it held an unsent draft (when only Codex's config-warning indicator stays on the bottom line). It is now read as a draft.
+- **Changed in Codex 0.172.0 (not fixed):** a member that ends its turn leaving a background terminal (a preview server and the like) now shows as idle right away (0.166 showed it as working meanwhile). So putting such a member to sleep or archiving its project is no longer refused with "a background task is still running".
 
 ### 0.2.10 — 2026-11-23
 

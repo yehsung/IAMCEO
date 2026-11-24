@@ -13,11 +13,13 @@ export type { CliVersionInfo } from "../shared/types.ts";
  * 새 버전을 넣을 때는 그 폴더에 실제 화면·기록을 함께 넣는다(tests/cli-fixtures.test.ts 가 둘이 맞는지 본다).
  */
 export const VERIFIED_CLI_VERSIONS: Record<CliProvider, string[]> = {
-  claude: ["2.1.316", "2.1.319", "2.1.322", "2.1.323"],
-  codex: ["0.166.0"],
+  claude: ["2.1.316", "2.1.319", "2.1.322", "2.1.323", "2.1.331"],
+  // 0.172.0(0.2.11 출시 전 실측): 폴더 신뢰 창의 둘째 선택지·안내 줄, 초안이 있을 때의 경고 표시 줄, IAMCEO 연결 도구 승인 창이 바뀌어 판독·인자를 고쳤다.
+  codex: ["0.166.0", "0.172.0"],
   // Antigravity CLI(`agy`). 1.5.14 에서 명령줄·훅·상태줄·MCP 를 실측했고, 대표의 첫 설정 뒤 대화형 화면(입력칸·승인 창·폴더 신뢰 창·진행 줄)·상태줄 입력·
   // 훅 입력·OSC 7501 견본을 tests/fixtures/cli/gemini/1.5.14 에 두었다(견본 시험 tests/cli-fixtures.test.ts).
-  gemini: ["1.5.14"],
+  // 1.5.16(0.2.11 출시 전 실측): 격리 서버로 같은 화면·상태줄·훅·압축 기록을 다시 받았고 0.2.10 판독 그대로 맞았다(진행 줄에 지난 시간이 붙는 것만 다르다).
+  gemini: ["1.5.14", "1.5.16"],
 };
 
 /** 버전을 읽는 CLI 전부(shared 의 CLI_PROVIDERS 와 같다). gemini 줄은 agy 가 없으면 installed=false 로 실린다. */

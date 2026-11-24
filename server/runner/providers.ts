@@ -183,6 +183,10 @@ export function providerLaunch(member: RunnerMember, opts: StartOpts, bins: Prov
   const bridge = config.mcpServers?.iamceo;
   if (!bridge?.command || !Array.isArray(bridge.args) || bridge.args.some((arg) => typeof arg !== "string")) throw new CoreError("config", "IAMCEO MCP bridge must use a stdio command and args");
   args.push("-c", `mcp_servers.iamceo.command=${toml(bridge.command)}`, "-c", `mcp_servers.iamceo.args=[${bridge.args.map(toml).join(",")}]`);
+  // Codex 0.172 실측: '매번 묻기'(on-request)에서 IAMCEO 연결 도구(status·post …)를 부를 때마다 'Allow the iamceo MCP server to run tool …?' 창이 떠
+  // 보고 한 줄마다 팀장이 멈췄다. Claude 의 --allowedTools mcp__iamceo 와 같게 IAMCEO 도구만 묻지 않고 돌린다(다른 MCP 서버·명령 승인은 그대로).
+  // 이 설정 이름과 값(approve)은 0.166 실행 파일에도 있다.
+  args.push("-c", `mcp_servers.iamceo.default_tools_approval_mode=${toml("approve")}`);
   const bridgeEnvironment = Object.entries(bridge.env || {});
   for (const [key, value] of bridgeEnvironment) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== "string") throw new CoreError("config", `Invalid MCP environment value: ${key}`);

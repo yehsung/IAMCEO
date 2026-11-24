@@ -1,0 +1,447 @@
+{
+  "provider": "gemini",
+  "version": "1.5.16",
+  "source": "2026-11-25 07:10~07:23 실측(agy 1.5.16, 스스로 업데이트됨). 격리 IAMCEO 서버 둘(wave13-verify = 0.2.10 8155283, 빈 DB, 격리 herdr-core 0.1.18 160x50, Gemini 3.8 Flash · effort low)의 GET /api/members/:id/screen 과 같은 core 의 terminal.read·terminal.get status. 첫 서버는 권한 '매번 묻기'로 명령·파일 카드·압축·중단·서브에이전트를 돌린 뒤 auto·묻지 않기 첫 화면을 보았고, 둘째 서버는 도구 승인 훅을 끄고(IAMCEO_TOOL_PERMISSION=0) 시험 CONNECT 프록시(HTTPS_PROXY)를 거쳐 agy 자기 승인 창과 연결 장애(재시도·403)를 보았다. 상태줄·훅 입력 원본은 시험 홈의 상태줄·훅 스크립트 사본에 입력을 옆 파일로 남기는 줄을 더해 받았다(제품 코드는 그대로). 바꾼 것: 작업 폴더 → /private/tmp/iamceo-cli-fixture/work, 주입 폴더 → /private/tmp/iamceo-cli-fixture/inject, 시험 홈 → /private/tmp/iamceo-cli-fixture/home, 홈 → /Users/user, 계정 메일 → user@example.com, 대화 id → 가짜 UUID(aaaaaaaa-…). screen 의 osc 는 그 화면 때의 herdr-core terminal.get status(msg 는 풀린 글).",
+  "fixtures": [
+    {
+      "file": "idle-default.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "권한 '매번 묻기'(agentMode \"\")로 띄운 첫 화면. 1.5.16 첫 실행의 안내 상자 `┃ Gemini 4 Carbon now available! … ┃ esc to dismiss` 가 입력칸 위에 붙었다(아무 키도 보내지 않았다. 다음 실행에도 다시 보였다). 입력 줄은 `>` 하나.",
+      "expect": {
+        "draft": "",
+        "progress": null,
+        "retry": null,
+        "folderTrust": false,
+        "folderTrustFromScreen": false,
+        "approval": null,
+        "mcpPanel": {
+          "open": false,
+          "ready": false
+        },
+        "setupBlocked": false,
+        "turnToStop": false
+      }
+    },
+    {
+      "file": "idle-auto.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "'위험할 때만 묻기'(agentMode auto)로 다시 연(--conversation) 첫 화면. 자리표시 글 `Auto mode: edits & safe commands auto-approved (shift+tab to cycle)` 는 1.5.14 와 같다. 상태줄 기록 cycleMode auto.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "idle-bypass.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "'묻지 않기'(--dangerously-skip-permissions)로 다시 연 첫 화면. auto 와 같은 자리표시 글이다.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "draft-oneline.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "한 줄 초안(키로 침).",
+      "expect": {
+        "draft": "hello draft one line"
+      }
+    },
+    {
+      "file": "draft-cleared.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "백스페이스로 지운 뒤(안내 상자가 있어 Esc 는 보내지 않았다).",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "mcp-panel.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "서버가 첫 전달 앞에 넣은 맨 `/mcp` 의 MCP 관리 창(`✓ iamceo`). 1.5.14 와 같은 모양이고 서버가 Esc 로 닫은 뒤 전달을 넣었다. 이때 안내 상자는 사라졌다.",
+      "expect": {
+        "draft": null,
+        "approval": null,
+        "folderTrust": false,
+        "mcpPanel": {
+          "open": true,
+          "ready": true
+        }
+      }
+    },
+    {
+      "file": "working-first.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "전달을 넣은 직후 `⣯  Generating...`.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Generating...",
+        "retry": null
+      }
+    },
+    {
+      "file": "hook-wait.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "'매번 묻기'에서 run_command 의 PreToolUse 훅이 결재함 카드의 답을 기다리는 동안. 1.5.16 은 진행 줄 끝에 지난 시간을 붙인다(`⣾  Running command... 2s`, 1.5.14 는 `Running command...`). agy 자기 승인 창은 뜨지 않는다. 서버는 막힘 permission 과 열린 카드(명령 실행: mkdir -p sub .).",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Running command... 2s",
+        "approval": null,
+        "folderTrust": false,
+        "mcpPanel": {
+          "open": false,
+          "ready": false
+        }
+      }
+    },
+    {
+      "file": "hook-wait-minute.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "같은 기다림이 1분을 넘으면 `Running command... 1m 1s`.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Running command... 1m 1s"
+      }
+    },
+    {
+      "file": "hook-wait-write.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "write_file 의 카드(파일 쓰기: …/hello.txt)를 기다리는 동안: `● Edited 1 file (hello.txt)` 가 먼저 보이지만 파일은 카드를 허용한 뒤에 생겼다. 진행 줄 `Editing files... 11s`.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Editing files... 11s",
+        "approval": null
+      }
+    },
+    {
+      "file": "done-reply.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "done",
+        "msg": "요청하신 명령 `mkdir -p sub .`을 성공적으로 실행했습니다."
+      },
+      "note": "카드를 허용한 뒤 턴이 정상으로 끝난 화면. OSC done(msg 는 답 첫 줄), Stop 훅 NO_TOOL_CALL.",
+      "expect": {
+        "draft": "",
+        "turnToStop": false
+      }
+    },
+    {
+      "file": "compacting.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "서버가 넣은 /compact: `⣽  Compacting conversation… (2s · esc to cancel)`(1.5.14 와 같다).",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Compacting conversation… (2s · esc to cancel)",
+        "retry": null
+      }
+    },
+    {
+      "file": "compacted.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "done",
+        "msg": "Task complete"
+      },
+      "note": "압축 끝: `── Conversation compacted ──` + `13 steps summarized · context 17.4k → ~21.3k (617 summary) · took 8s`. Stop 훅 TERMINAL_CUSTOM_HOOK, 서버 압축 succeeded.",
+      "expect": {
+        "draft": ""
+      }
+    },
+    {
+      "file": "interrupted.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "idle"
+      },
+      "note": "일하는 중 서버 '중단'(Esc) → `⎿  Interrupted · What should Antigravity CLI do instead?`, OSC 는 done 없이 idle, Stop 훅 없음(1.5.14 와 같다). 서버는 결과 보고가 없어 '보고 보완' 한 턴을 곧바로 넣었다.",
+      "expect": {
+        "draft": "",
+        "turnToStop": false
+      }
+    },
+    {
+      "file": "subagent-running.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "invoke_subagent 로 띄운 서브에이전트가 도는 동안 입력칸 아래 가로줄 사이에 `● Agent(self: Ping Responder) · Gemini 3.8 Flash  Working · 2s`.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Delegating..."
+      }
+    },
+    {
+      "file": "subagent-working.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "서브에이전트 줄이 `Messaged Parent Agent · 4s` 로 바뀐 뒤 부모의 진행 줄은 1.5.16 에서 `Working...` 이다(1.5.14 는 `Delegating...` 만 보았다).",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Working..."
+      }
+    },
+    {
+      "file": "approval-command.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "blocked",
+        "kind": "permission",
+        "msg": "Approve Bash: cd '/private/tmp/iamceo-cli-fixture/work' && { touch made.txt }"
+      },
+      "note": "도구 승인 훅을 끈 격리 서버(IAMCEO_TOOL_PERMISSION=0)에서 뜬 agy 자기 승인 창. 모양은 1.5.14 와 같다(제목 Command, 4지, 안내 줄). 명령은 IAMCEO 도구 훅이 작업 폴더로 감싼 글이다. 서버 '중단'(Esc)으로 거절하자 턴이 끝났다.",
+      "expect": {
+        "draft": null,
+        "turnToStop": true,
+        "approval": {
+          "title": "Command",
+          "question": "Run this command?",
+          "options": [
+            "Yes, run command",
+            "Yes, and always allow in this conversation for commands that start with 'touch'",
+            "Yes, and always allow for commands that start with 'touch' (Persist to settings.json)",
+            "No, cancel"
+          ],
+          "selected": 0,
+          "hint": "↑/↓ Navigate · tab Amend · ctrl+g edit/expand command"
+        },
+        "folderTrust": false,
+        "folderTrustFromScreen": false,
+        "setupBlocked": false,
+        "trustDialogLike": false,
+        "mcpPanel": {
+          "open": false,
+          "ready": false
+        }
+      }
+    },
+    {
+      "file": "network-retry.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "working"
+      },
+      "note": "API 연결을 끊었을 때(시험 CONNECT 프록시가 연결을 끊음) `⣾  Model unavailable (attempt 4/9), retrying in 18s...`. 재시도 줄에는 지난 시간이 붙지 않는다(1.5.14 와 같은 글). 연결을 되돌리자 다음 시도에서 답했다.",
+      "expect": {
+        "draft": "",
+        "turnToStop": true,
+        "progress": "Model unavailable (attempt 4/9), retrying in 18s...",
+        "retry": {
+          "attempt": 4,
+          "max": 9,
+          "seconds": 18
+        }
+      }
+    },
+    {
+      "file": "network-forbidden.txt",
+      "kind": "screen",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "osc": {
+        "state": "error",
+        "msg": "agent executor error: generating and executing: request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": Forbidden"
+      },
+      "note": "프록시가 CONNECT 를 403 으로 거절하면 재시도 없이 곧바로 `⚠ agent executor error: … Forbidden` + `Error ID`. OSC error, Stop 훅 ERROR(failed). 서버는 network_outage 로 보았다.",
+      "expect": {
+        "draft": "",
+        "turnToStop": false
+      }
+    },
+    {
+      "file": "statusline-before.json",
+      "kind": "statusline",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "첫 글 전 상태줄 입력. 키는 1.5.14 와 같다(subagents 는 없으면 빠짐). 한도 묶음이 넷이다: 1.5.14 의 gemini-argon-wtu-weekly 가 없어졌다(같은 날 안내 상자: Carbon·Argon 이 Gemini 한도에 포함). email 은 user@example.com 으로 바꿈.",
+      "expect": {
+        "conversationId": null,
+        "cycleMode": "default",
+        "agentState": "idle",
+        "transcriptPath": null,
+        "subagents": 0,
+        "costUsd": null,
+        "quotaBuckets": [
+          "3p-5h",
+          "3p-weekly",
+          "gemini-5h",
+          "gemini-weekly"
+        ],
+        "quotaFamilies": {
+          "3p-5h": "third_party",
+          "3p-weekly": "third_party",
+          "gemini-5h": "gemini",
+          "gemini-weekly": "gemini"
+        }
+      }
+    },
+    {
+      "file": "statusline-after.json",
+      "kind": "statusline",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "첫 턴 뒤: conversation_id=session_id, transcript_path 는 여전히 ~/.gemini/antigravity/brain/… 를 가리킨다(실제 파일은 antigravity-cli/brain/…).",
+      "expect": {
+        "conversationId": "aaaaaaaa-1111-4111-8111-000000000001",
+        "transcriptPath": null,
+        "cycleMode": "default",
+        "agentState": "idle",
+        "subagents": 0,
+        "subagentsUnknown": 0,
+        "costUsd": null,
+        "emailKept": false
+      }
+    },
+    {
+      "file": "statusline-approval.json",
+      "kind": "statusline",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "agy 자기 승인 창이 떠 있는 동안: agent_state tool_use, tool_confirmation_pending true.",
+      "expect": {
+        "agentState": "tool_use",
+        "cycleMode": "default"
+      }
+    },
+    {
+      "file": "statusline-subagents.jsonl",
+      "kind": "statusline",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "서브에이전트 running(부모 working) → completed(부모 idle). 항목 모양 {name, role, model, status} 는 1.5.14 와 같다.",
+      "expect": {
+        "subagents": [
+          1,
+          0
+        ],
+        "subagentsUnknown": [
+          0,
+          0
+        ],
+        "agentState": [
+          "working",
+          "idle"
+        ]
+      }
+    },
+    {
+      "file": "hooks.jsonl",
+      "kind": "log",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "agy 가 훅 명령에 준 입력 원본({event, input}). 두 격리 실행을 이어 붙였다: 첫 실행(대화 …001: 명령·파일 카드 턴, /compact, 중단된 턴(Stop 없음), 보고 보완, 서브에이전트 …002)과 둘째 실행(대화 …003: 자기 승인 창 거절(Stop 없음), 보고 보완, 프록시 403 으로 끝난 턴의 Stop ERROR). 사건·키는 1.5.14 와 같다. 넣은 글(lastUserInput)은 표지만 남기고 가짜로 바꿨다.",
+      "expect": {
+        "stopReasons": [
+          "NO_TOOL_CALL",
+          "TERMINAL_CUSTOM_HOOK",
+          "ERROR"
+        ],
+        "conversations": 3,
+        "parentTurnStop": {
+          "reason": "NO_TOOL_CALL",
+          "fullyIdle": true,
+          "conversationId": "aaaaaaaa-1111-4111-8111-000000000001"
+        },
+        "unknownConversationTurnStop": {
+          "reason": "NO_TOOL_CALL",
+          "fullyIdle": true,
+          "conversationId": "aaaaaaaa-1111-4111-8111-000000000001"
+        },
+        "errorStopKind": "network",
+        "compactEnd": true
+      }
+    },
+    {
+      "file": "transcript-compact.jsonl",
+      "kind": "log",
+      "origin": "observed",
+      "cwd": "/private/tmp/iamceo-cli-fixture/work",
+      "note": "~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl 의 압축 앞뒤 네 줄(PLANNER_RESPONSE → USER_INPUT /compact → SYSTEM CHECKPOINT → 다음 사용자 글). 1.5.14 와 같은 모양.",
+      "expect": {
+        "compactOutcome": "succeeded",
+        "promptTokens": {
+          "compacted": true
+        },
+        "hasModelResponse": true
+      }
+    }
+  ]
+}

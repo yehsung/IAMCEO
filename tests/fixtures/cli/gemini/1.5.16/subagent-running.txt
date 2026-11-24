@@ -1,0 +1,50 @@
+  Despite high-speed presses, manual typesetting remained a slow bottleneck. In 1886, Ottmar Mergenthaler introduced the Linotype machine. An operator sat at
+  a keyboard; pressing a key dropped a brass matrix of that letter from a magazine into a line. Once a full line of text was assembled, molten metal was
+  injected, casting a solid line of type ("line-o'-type") in seconds. Thomas Edison hailed the Linotype as "the Eighth Wonder of the World," dramatically
+  reducing the time and cost required to produce daily newspapers and books.
+  ──────
+  Part V: Offset Lithography, Digital Print, and the Modern Era
+
+  In the 20th century, the dominance of relief metal type began to wane.
+
+  • Offset Lithography: Developed in the early 1900s, offset printing utilizes the chemical antagonism between oil and water. An inked image on a flat
+  aluminum or plastic plate transfers ("offsets") onto a rubber cylinder, which then rolls the ink onto paper. Offset lithography enabled brilliant color
+  reproduction (CMYK), high speeds, and low per-unit costs, becoming the global commercial standard for books, packaging, and commercial materials.
+  • Phototypesetting and Digital Composition: By the 1960s and 1970s, physical type was replaced by computer-driven optical systems and laser imaging. The
+  advent of desktop publishing in the 1980s (championed by the Apple Macintosh, Adobe PostScript, and PageMaker) put professional typography, page layout,
+  and prepress production into the hands of individual graphic designers.
+  • Digital Printing: Modern electrophotographic (laser) and high-speed inkjet presses eliminated the need for physical printing plates entirely, enabling
+  on-demand book printing, personalized variable-data output, and zero-setup short runs.
+  ──────
+  Conclusion: From Movable Type to the Digital Bit
+
+  The history of the printing press is the epic trajectory of human knowledge breaking free from the constraints of geography, mortality, and power. From the
+  early ink-rubbed woodblocks of Tang Dynasty China and the pioneering cast bronze type of Goryeo Korea, to Gutenberg’s ingenious mechanical synthesis in
+  Mainz and the industrial steam-powered giants of the 19th century, each technological leap expanded the democratization of thought.
+
+  The printing press created the modern world. It established the mechanisms of empirical science, standardized national languages, fostered critical public
+  consciousness, and transformed education from a privilege of monastic cloisters into a universal right.
+
+  As humanity navigates the digital age—characterized by instantaneous global networks, algorithmic publishing, and artificial intelligence—the fundamental
+  questions first raised by Gutenberg's press remain intensely relevant: Who controls the channels of information? How do we verify truth against falsehood?
+  How do we preserve our collective intellectual heritage for generations to come? The medium may have shifted from cast metal to digital bits, but our
+  contemporary information society is built upon the very foundations laid by the press.
+
+────────────────────────────────────────────────────────────
+> IAMCEO execution preference: Work sequentially for this task; do not spawn subagents.
+
+  [대표 직접] "For this one test the CEO explicitly allows one subagent: use your invoke_subagent tool once to start a subagent whose only task is to reply
+  with the single word pong (no tools). Wait for it, then reply with one short sentence including its answer."
+  #d3b28737-01d3-4cfb-a5aa-9670cb11cd9b
+  #iamceo_EdG-6_lR0qi0xTRqKZy5Ng
+  #iamceo_b_Q1UarNAZSzX4e-NyslpLvw
+
+● Called 3 MCP tools (iamceo/status ×2, iamceo/post)
+● Spawned 1 subagent (ctrl+o to expand)
+⣾  Delegating...
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ● Agent(self: Ping Responder) · Gemini 3.8 Flash  Working · 2s
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+IAMCEO · Gemini 3.8 Flash (Low) · ctx 2%

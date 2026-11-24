@@ -6,9 +6,10 @@ import type { PushEnvironment, PushEventKind, PushProviderStatus } from "../../s
 import type { PushEventTarget, PushKind, PushPayload } from "./contracts.ts";
 import type { APNsConfig, APNsCredential } from "./config.ts";
 import type { TextLang } from "../../shared/server-text.ts";
+import { CLI_INFO, type CliProvider } from "../../shared/types.ts";
 
 export const APNS_ORIGINS = Object.freeze({ sandbox: "https://api.sandbox.push.apple.com:443", production: "https://api.push.apple.com:443" });
-export const APNS_TTL_MS = Object.freeze({ decision: 3_600_000, approval_wait: 900_000, error: 900_000, report_complete: 3_600_000, todo_created: 3_600_000, report_blocked: 900_000, test: 300_000, tailnet_off: 900_000 });
+export const APNS_TTL_MS = Object.freeze({ decision: 3_600_000, approval_wait: 900_000, error: 900_000, report_complete: 3_600_000, todo_created: 3_600_000, report_blocked: 900_000, test: 300_000, tailnet_off: 900_000, cli_update: 6 * 3_600_000 });
 
 export interface APNsNotification {
   environment: PushEnvironment;
@@ -102,12 +103,22 @@ export const PUSH_BODIES: Record<TextLang, Record<PushEventKind | "report_more",
     report_complete: "완료 보고가 도착했습니다.", todo_created: "대표 할 일이 생겼습니다.", report_blocked: "막힘 보고를 확인해 주세요.",
     test: "iPhone 알림 연결을 확인합니다.", report_more: "추가 완료 보고가 도착했습니다.",
     // 0.2.7(D4-3)
-    tailnet_off: "서버 Mac의 Tailscale이 꺼져 있어 iPhone에서 연결할 수 없습니다. Mac에서 Tailscale을 켜 주세요." },
+    tailnet_off: "서버 Mac의 Tailscale이 꺼져 있어 iPhone에서 연결할 수 없습니다. Mac에서 Tailscale을 켜 주세요.",
+    // 0.2.11: 실제 글은 CLI_UPDATE_BODIES(이름·판). 이 줄은 그 틀을 못 쓸 때만의 대신 글이다(target 검사가 통과하면 쓰이지 않는다).
+    cli_update: "AI 도구 새 판이 나왔습니다." },
   en: { decision: "There is a new decision.", approval_wait: "Your confirmation is needed to continue.", error: "Please check a problem with a run.",
     report_complete: "A completion report arrived.", todo_created: "There is a new to-do for you.", report_blocked: "Please check a blocked report.",
     test: "Checking iPhone notifications.", report_more: "More completion reports arrived.",
-    tailnet_off: "Tailscale is off on your server Mac, so this iPhone can't connect. Turn Tailscale on on the Mac." },
+    tailnet_off: "Tailscale is off on your server Mac, so this iPhone can't connect. Turn Tailscale on on the Mac.",
+    cli_update: "A new version of an AI tool is available." },
 };
+/** 0.2.11 cli_update: CLI 이름과 판만 넣는다(target 의 cli·version 은 아래에서 검사한 값이다). */
+export const CLI_UPDATE_BODIES: Record<TextLang, (name: string, version: string) => string> = {
+  ko: (name, version) => `${name} ${version} 업데이트가 있습니다.`,
+  en: (name, version) => `${name} ${version} update is available.`,
+};
+const CLI_UPDATE_NAMES: Record<CliProvider, string> = { claude: CLI_INFO.claude.name, codex: CLI_INFO.codex.name, gemini: CLI_INFO.gemini.name };
+const CLI_UPDATE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/;
 
 /** Reconstruct allowlisted fields; extra properties from persisted objects never escape. */
 export function buildAPNsPayload(notification: APNsNotification): PushPayload {
@@ -137,10 +148,22 @@ export function buildAPNsPayload(notification: APNsNotification): PushPayload {
       if (hint.screen !== "home") throw new Error("invalid_payload");
       target = { screen: "home" };
       break;
+    case "cli_update": {
+      // 0.2.11: 정확히 {screen:"home", cli, version}. 판 같지 않은 글자(글 꾸밈·긴 값)는 알림 글에 넣지 않는다.
+      const raw = hint as Record<string, unknown>;
+      const keys = Object.keys(raw).sort().join(",");
+      if (hint.screen !== "home" || keys !== "cli,screen,version" || typeof raw.cli !== "string" || !Object.hasOwn(CLI_UPDATE_NAMES, raw.cli)
+          || typeof raw.version !== "string" || raw.version.length > 40 || !CLI_UPDATE_VERSION.test(raw.version)) throw new Error("invalid_payload");
+      target = { screen: "home", cli: raw.cli as CliProvider, version: raw.version };
+      break;
+    }
     default: throw new Error("invalid_payload");
   }
-  const bodies = PUSH_BODIES[notification.lang === "en" ? "en" : "ko"];
-  return { aps: { alert: { title: "IAMCEO", body: notification.kind === "report_complete" && notification.reportSummary ? bodies.report_more : bodies[notification.kind] }, sound: "default", "thread-id": `iamceo:${notification.serverId}` },
+  const lang = notification.lang === "en" ? "en" : "ko";
+  const bodies = PUSH_BODIES[lang];
+  const body = notification.kind === "report_complete" && notification.reportSummary ? bodies.report_more
+    : notification.kind === "cli_update" && "cli" in target ? CLI_UPDATE_BODIES[lang](CLI_UPDATE_NAMES[target.cli], target.version) : bodies[notification.kind];
+  return { aps: { alert: { title: "IAMCEO", body }, sound: "default", "thread-id": `iamceo:${notification.serverId}` },
     iamceo: { v: 1, serverId: notification.serverId, eventId: notification.eventId, kind: notification.kind, target } };
 }
 

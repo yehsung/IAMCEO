@@ -1,16 +1,18 @@
 // APNs 전용 계약. Settings/Bootstrap/WsEvent 및 v1 응답을 확장하지 않는다.
+import type { CliProvider } from "./types.ts";
 export const PUSH_KINDS = ["decision", "approval_wait", "error", "report_complete", "todo_created", "report_blocked"] as const;
 /** 자유 답변 ask도 decision 사건 하나이며 질문 메시지는 별도 사건을 만들지 않는다. */
 export type PushKind = (typeof PUSH_KINDS)[number];
 /**
  * 알림 사건의 종류. 기기 설정 칸(PushKind)에 더해, 설정 칸이 없는 것: test(연결 확인)와
  * tailnet_off(0.2.7 D4-3: 서버 Mac 의 Tailscale 이 꺼져 iPhone 에서 연결할 수 없다. '실행 문제(error)' 설정을 따른다).
+ * cli_update(0.2.11: 서버 Mac 의 AI 도구에 새 판이 나왔다. 판마다 한 번. 종류별 설정 칸 없이 기기의 알림 켜기만 따른다).
  * 출시 앱은 모르는 종류의 알림을 눌러도 화면을 옮기지 않을 뿐 배너는 그대로 보인다(문구는 서버·중계가 만든다).
  */
-export type PushEventKind = PushKind | "test" | "tailnet_off";
-/** 이 종류의 알림을 보낼지 정하는 기기 설정 칸. test 는 늘 보낸다(null). */
+export type PushEventKind = PushKind | "test" | "tailnet_off" | "cli_update";
+/** 이 종류의 알림을 보낼지 정하는 기기 설정 칸. test·cli_update 는 늘 보낸다(null). */
 export function pushPreferenceOf(kind: PushEventKind): PushKind | null {
-  return kind === "test" ? null : kind === "tailnet_off" ? "error" : kind;
+  return kind === "test" || kind === "cli_update" ? null : kind === "tailnet_off" ? "error" : kind;
 }
 export type PushPreferences = Record<PushKind, boolean>;
 /** 종류 기본값과 전체 opt-in은 별개다. 새 기기의 enabled는 false다. */
@@ -78,7 +80,8 @@ export type PushTarget =
   | { screen: "inbox"; projectId: string; decisionId: string }
   | { screen: "team"; projectId: string; memberId: string }
   | { screen: "chat"; projectId: string; memberId: string | null; messageId: string; groupId?: string };
-export type PushEventTarget = PushTarget | { screen: "home" };
+/** cli_update(0.2.11)의 target 은 첫 화면에 CLI 와 판을 더한 세 열쇠다(알림 글을 그 값으로 만든다). 출시 앱은 이 종류를 모른다. */
+export type PushEventTarget = PushTarget | { screen: "home" } | { screen: "home"; cli: CliProvider; version: string };
 export interface PushReportGroupReference {
   id: string;
   projectId: string;

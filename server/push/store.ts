@@ -263,6 +263,8 @@ export class PushStore implements PushReportGroupStore {
     if (value.kind === "test") return value.target.screen === "home";
     // D4-3: Tailscale 이 다시 켜지면 아직 나가지 않은 알림을 cancelSource 로 거둔다. 그 전까지는 유효하다.
     if (value.kind === "tailnet_off") return value.target.screen === "home";
+    // 0.2.11: 새 판 알림. 그 판이 깔리면(앱의 원클릭 업데이트) 아직 나가지 않은 알림을 cancelSource 로 거둔다.
+    if (value.kind === "cli_update") return value.target.screen === "home" && "cli" in value.target;
     if (!this.projectActive(value.projectId)) return false;
     if (value.kind === "decision") {
       if (value.target.screen !== "inbox") return false;

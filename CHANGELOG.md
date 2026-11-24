@@ -7,6 +7,16 @@ Only changes that matter to users, by version. The full history is in `git log`.
 
 ## 한국어
 
+### 0.2.11 — 출시 전
+
+- **새 CLI 판을 확인했습니다: Claude Code 2.1.331, Codex 0.172.0, Antigravity CLI 1.5.16.** 이 Mac 에 깔린 새 판을 격리 시험 서버로 실제로 띄워 입력칸·초안·일하는 중·승인·압축·턴 끝·중단·서브에이전트 화면과 훅·상태줄·대화 기록을 받아 견본으로 남겼고, 점검표(설정 → AI 모델 → 실행 환경)의 'CLI 버전'이 이 판들에서 경고를 내지 않습니다.
+- **Claude Code 2.1.331: 막 일을 시작한 팀장을 쉬는 중으로 잘못 보던 1초를 고쳤습니다.** 2.1.331 은 일하는 동안의 'esc to interrupt' 안내를 입력칸 아래 줄로 옮겼고, 일을 시작한 첫 1초에는 상태 줄에 시간이 없습니다. 뒤 작업(백그라운드 셸 등)이 끝나 Claude 가 스스로 일을 다시 시작한 순간을 '뒤 작업만 남은 쉬는 팀장'으로 읽을 수 있었습니다. 뒤 셸을 남긴 턴은 그 셸 이름('1 shell')까지 읽습니다.
+- **Codex 0.172.0: 세 가지를 고쳤습니다.**
+  - 권한이 '매번 묻기'면 Codex 팀장이 IAMCEO 에 보고할 때마다(진행 상황·보고 글) 터미널에 'Allow the iamceo MCP server …?' 승인 창이 떠 멈췄습니다. 이제 IAMCEO 도구만은 묻지 않고 씁니다(Claude 팀장과 같습니다). 명령 실행과 다른 도구의 승인은 그대로입니다.
+  - 새 프로젝트에서 '이 폴더를 신뢰합니다'라고 답했는데도 Codex 팀장이 폴더 신뢰 확인 창에서 '정확히 읽지 못했습니다'로 멈췄습니다(0.172 가 창의 둘째 선택지를 'Back to Agent Command Center' 로 바꿨습니다). 이제 그 창을 읽고 이어 갑니다.
+  - 입력칸에 쓰다 만 글이 있을 때 입력칸을 알아보지 못했습니다(바닥줄에 Codex 설정 경고 표시만 남는 경우). 이제 초안으로 읽습니다.
+- **Codex 0.172.0 에서 달라진 점(고치지 않음):** 팀장이 백그라운드 터미널(미리보기 서버 등)을 남기고 턴을 끝내면 곧바로 '쉬는 중'으로 보입니다(0.166 은 그 동안 '일하는 중'). 그래서 그런 팀장을 재우거나 보관할 때 '뒤 작업이 남았다'는 거절이 나오지 않습니다.
+
 ### 0.2.10 — 2026-11-23
 
 - **Gemini를 쓸 수 있습니다.** 총괄과 팀장을 Google의 Antigravity CLI(`agy`)로 띄웁니다. Claude Code·Codex처럼 내 계정 로그인으로 돕니다. 새 팀장·팀장 실행 설정·새 프로젝트에서 CLI를 Gemini로 고르거나, 총괄에게 Gemini로 띄워 달라고 하면 됩니다. 모델은 Antigravity CLI가 알려 주는 목록 그대로입니다(요금제에 든 Claude·GPT-OSS 모델도 함께 보입니다). 역할 지침, IAMCEO 도구 연결, 사건 기록 훅은 그 세션에만 넣고, `~/.gemini`의 설정과 프로젝트 폴더에는 아무것도 쓰지 않습니다. Antigravity CLI는 도구 연결을 첫 입력 때에야 띄우므로, IAMCEO가 팀장을 띄우거나 다시 연 뒤 첫 지시 앞에 `/mcp`로 연결을 먼저 띄웁니다(팀장 터미널에 MCP 관리 창이 잠깐 열렸다 닫힙니다). 옛 Gemini CLI(`gemini` 명령)는 지원하지 않습니다.
@@ -198,6 +208,16 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
 - 첫 공개. 내 Mac에서 서버를 켜고 브라우저로 Claude Code 세션 여럿을 총괄과 팀으로 부립니다. 홈·결재함·팀·대화·자료 다섯 화면. Claude Code 전용, AGPL-3.0-only.
 
 ## English
+
+### 0.2.11 — unreleased
+
+- **New CLI versions verified: Claude Code 2.1.331, Codex 0.172.0, Antigravity CLI 1.5.16.** The new versions installed on this Mac were started for real on an isolated test server. Their composer, drafts, working, approval, compaction, turn-end, interrupt and subagent screens, and their hooks, status lines and conversation logs were captured as fixtures, and the "CLI version" check (Settings › AI models › Runtime) no longer warns on them.
+- **Claude Code 2.1.331: fixed one second in which a member that had just started working looked idle.** 2.1.331 moved its "esc to interrupt" hint to the line below the composer, and for the first second of work the status line has no timer. The moment Claude restarted work on its own after a background task (such as a background shell) finished could be read as "idle, only a background task left". A turn that leaves a background shell now also names it ("1 shell").
+- **Codex 0.172.0: three fixes.**
+  - With the permission mode set to "ask every time", a Codex member stopped at an "Allow the iamceo MCP server …?" prompt in its terminal every time it reported to IAMCEO (status, posts). IAMCEO's own tools now run without asking (as for Claude members). Approval for commands and other tools is unchanged.
+  - A Codex member stopped at the folder-trust dialog with "could not read it exactly" even when you had said you trust the folder when creating the project (0.172 renamed the dialog's second choice to "Back to Agent Command Center"). The dialog is now read and the member goes on.
+  - The composer was not recognized while it held an unsent draft (when only Codex's config-warning indicator stays on the bottom line). It is now read as a draft.
+- **Changed in Codex 0.172.0 (not fixed):** a member that ends its turn leaving a background terminal (a preview server and the like) now shows as idle right away (0.166 showed it as working meanwhile). So putting such a member to sleep or archiving its project is no longer refused with "a background task is still running".
 
 ### 0.2.10 — 2026-11-23
 

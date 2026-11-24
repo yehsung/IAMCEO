@@ -476,6 +476,18 @@ describe("원클릭 업데이트(가짜 명령)", () => {
 });
 
 /** 한 번 쓰고 버리는 run 사본이 서비스 안의 값을 바꾸지 못한다. */
+test("사용자 홈 폴더가 없어도 명령을 돌린다(있는 폴더에서)", async () => {
+  const world = newWorld();
+  const claude = brewClaude(world, "2.1.323", "2.1.332");
+  world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
+  const { updates, monitor } = service(world, { claude: claude.bin }, { userHome: join(world.root, "no-such-home") });
+  await monitor.refresh(true);
+  await updates.check();
+  updates.update("claude");
+  await updates.settled("claude");
+  expect(updates.info("claude").run).toMatchObject({ phase: "done", installed: "2.1.332" });
+});
+
 test("돌려준 진행 값은 사본이다", async () => {
   const world = newWorld();
   const claude = brewClaude(world, "2.1.323", "2.1.332");

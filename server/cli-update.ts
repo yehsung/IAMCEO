@@ -544,7 +544,9 @@ export class CliUpdates {
     log.write(`\n$ ${step.argv.map(arg => (/^[\w@./:=+-]+$/.test(arg) ? arg : JSON.stringify(arg))).join(" ")}\n`);
     let child: ReturnType<typeof Bun.spawn>;
     try {
-      child = Bun.spawn(step.argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: step.env, cwd: this.options.userHome ?? process.env.HOME ?? homedir() });
+      // 일하는 폴더는 있는 폴더여야 한다(없으면 실행이 곧바로 실패한다). 사용자 홈이 없으면 임시 폴더.
+      const cwd = [this.options.userHome, process.env.HOME, homedir(), tmpdir()].find(dir => { try { return !!dir && statSync(dir).isDirectory(); } catch { return false; } }) ?? "/";
+      child = Bun.spawn(step.argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: step.env, cwd });
     } catch (error) {
       log.write(`# 실행하지 못했습니다: ${(error as Error).message}\n`);
       return { kind: "failed", code: "cli_update_spawn_failed" };

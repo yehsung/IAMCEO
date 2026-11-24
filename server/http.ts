@@ -113,6 +113,23 @@ export function announceCliUpdate(ctx: Pick<ServerContext, "store" | "push" | "o
   } catch (error) { console.warn("[cli-update] iPhone 알림을 남기지 못했습니다:", (error as Error).message); }
 }
 
+/**
+ * 0.2.11: 서버가 쥐는 CLI 업데이트 서비스(startServer 가 시험 환경이 아닐 때 만든다). 진행이 바뀌면 앱이 스냅샷을 다시 읽게 하고(projects 사건),
+ * 새 판은 announceCliUpdate 로 알리고, 깔리면 cliUpdateInstalled 로 적용한다. extra 는 시험이 읽기·사용자 홈을 넣는 자리다.
+ */
+export function serverCliUpdates(ctx: ServerContext, versions: CliVersionSource, extra: Partial<ConstructorParameters<typeof CliUpdates>[0]> = {}): CliUpdates {
+  const { config, store } = ctx;
+  // bun test(NODE_ENV=test)를 격리 환경 없이 돌렸을 때 이 Mac 의 진짜 agy 로 풀리지 않게(CliVersionMonitor 와 같은 기준).
+  const geminiBin = process.env.NODE_ENV === "test" ? null : config.geminiBin;
+  return new CliUpdates({ home: config.home, versions, state: store, claudeHome: config.claudeHome,
+    bins: () => ({ claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin }),
+    onChange: () => store.touchSnapshot(),
+    onNotice: info => announceCliUpdate(ctx, info),
+    onInstalled: (cli, version) => cliUpdateInstalled(ctx, cli, version),
+    reopen: cli => ctx.orch.cliUpdateStatus?.(cli) ?? null,
+    ...extra });
+}
+
 /** 0.2.11: 대표가 누른 업데이트로 새 판이 깔렸다. 떠 있는 팀장에게 새 판을 적용하고(쉬는 때에 같은 대화로 다시 연다), 그 판의 아직 안 나간 알림을 거둔다. */
 export async function cliUpdateInstalled(ctx: Pick<ServerContext, "push" | "orch">, cli: CliProvider, version: string): Promise<void> {
   try { ctx.push?.store.cancelSource(`cli-update:${cli}:${version}`); } catch { /* 이미 나갔거나 사건이 없다 */ }
@@ -1726,13 +1743,7 @@ export async function startServer(ctx: ServerContext): Promise<RunningServer> {
   // 0.2.11: 새 판 확인(서버가 뜬 뒤 조금 있다 한 번, 그 뒤 6시간마다)과 대표가 누르는 원클릭 업데이트. 진행이 바뀌면 앱이 스냅샷을 다시 읽게 한다.
   let ownUpdates: CliUpdates | null = null;
   if (!ctx.cliUpdates && process.env.IAMCEO_TEST !== "1" && cliVersions) {
-    const geminiBin = process.env.NODE_ENV === "test" ? null : config.geminiBin;
-    ownUpdates = new CliUpdates({ home: config.home, versions: cliVersions, state: store, claudeHome: config.claudeHome,
-      bins: () => ({ claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin }),
-      onChange: () => store.touchSnapshot(),
-      onNotice: info => announceCliUpdate(ctx, info),
-      onInstalled: (cli, version) => cliUpdateInstalled(ctx, cli, version),
-      reopen: cli => ctx.orch.cliUpdateStatus?.(cli) ?? null });
+    ownUpdates = serverCliUpdates(ctx, cliVersions);
     ctx.cliUpdates = ownUpdates;
     ownUpdates.start();
   }

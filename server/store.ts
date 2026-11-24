@@ -174,6 +174,11 @@ export interface AppliedConfig {
    * 다르면 쉴 때 같은 대화를 다시 연다(Orchestrator.onGeminiMode).
    */
   geminiMode?: "auto-fallback";
+  /**
+   * 0.2.11: 이 세션을 띄울 때의 CLI 업데이트 세대(orchestrator 의 cli_update_epochs). 앱에서 그 CLI 를 새 판으로 올린 적이 없으면 없다(0).
+   * 세대가 다르면 쉴 때 같은 대화를 새 판으로 다시 연다(Orchestrator.cliUpdated).
+   */
+  cliUpdate?: number;
 }
 
 export interface NewDecision {

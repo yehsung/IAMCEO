@@ -5,6 +5,7 @@ import type {
   AnswerReq,
   ApprovalPrompt,
   CliAccountCli,
+  CliProvider,
   CreateProjectReq,
   CreateMemberReq,
   RuntimeInfo,
@@ -81,6 +82,10 @@ export interface OrchestratorApi {
    * 0.2.10 부터 Gemini(Antigravity CLI)도 받는다(계정 세대가 CLI 마다 따로다). setupBlocked 는 Gemini 만: 로그인·첫 설정 화면에서 멈춰 그대로 둔 팀장 수.
    */
   cliLoggedIn?(cli: CliAccountCli, after: string | null, before: string | null): Promise<{ changed: boolean | null; reopenedNow: number; atNextTurn: number; setupBlocked?: number }>;
+  /** 0.2.11: 앱에서 대표가 CLI 를 새 판으로 올렸다(server/cli-update.ts). 떠 있는 총괄·팀장은 쉬는 때에 같은 대화로 다시 열려 새 판을 쓴다(Orchestrator.cliUpdated). */
+  cliUpdated?(cli: CliProvider): Promise<{ atNextTurn: number }>;
+  /** 0.2.11: 그 CLI 로 떠 있는 총괄·팀장 수와 새 판으로 다시 열기를 기다리는 수. */
+  cliUpdateStatus?(cli: CliProvider): { live: number; pending: number };
   /** 실행 엔진(herdr-core) 상태. 아직 모르거나 엔진이 없으면 null. */
   engineStatus?(): import("../shared/types.ts").EngineStatus | null;
   /** 운영 안내(예: Tailscale 꺼짐)를 Mac 알림으로 띄운다. 결재 알림 설정과 무관하다. 실제로 띄웠으면 true. */

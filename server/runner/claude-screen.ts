@@ -97,6 +97,11 @@ const BACKGROUND_BAR = /^\s*\S\s+(\S.*?)\s+[▰▱]{3,}\s*$/;
 const STILL_RUNNING = /·\s+(\d+ [^·]+?) still running\s*$/;
 /** 도는 상태 줄의 글이 말줄임으로 끝난다(2.1.331 실측: 일을 시작한 첫 1초 "✢ Finagling…", 괄호 없음). */
 const SPINNING = /(?:…|\.\.\.)\s*$/;
+/**
+ * 들여 쓰지 않은(0열) 상태 줄. 2.1.331 의 두 새 규칙(괄호 없는 말줄임, still running 꼬리)은 이 줄에만 건다.
+ * 답 본문은 ⏺ 아래로 들여 쓰여 있어 "  · 시험은 뒤에서 도는 중…" 같은 글머리 줄이 SPINNER_HEAD 에 걸려도 상태 줄이 아니다(11-25 검토).
+ */
+const STATUS_LINE = /^[·✢✳✶✻✽]\s+\S/;
 /** 입력칸 위를 이만큼(빈 줄 제외) 본다. 할 일 목록 같은 칸이 상태 줄과 입력칸 사이에 끼어도 상태 줄까지 닿는다. */
 const QUIET_LOOKBACK = 14;
 
@@ -131,8 +136,11 @@ export function claudeQuietScreen(screen: string): { label: string | null } | nu
     const wait = /^[·✢✳✶✻✽]\s+Waiting for (\d+ .+?) to finish\b/.exec(joined);
     if (wait) { label ??= wait[1]!.replace(/\s+/g, " "); continue; }
     // 도는 상태 줄(Thinking… (12s …, 첫 1초의 괄호 없는 Finagling…)이다. 끝난 턴의 줄(Worked for 3m · Cogitated for 13s …)은 그대로 둔다.
-    if (/…\s*\(|\.\.\.\s*\(/.test(joined) || SPINNING.test(joined)) return null;
-    const left = STILL_RUNNING.exec(joined);
+    if (/…\s*\(|\.\.\.\s*\(/.test(joined)) return null;
+    // 괄호 없는 말줄임은 그 줄 하나만 본다: 짧아서 접히지 않고, 이어 붙이면 아래 할 일 목록 줄의 "…" 까지 상태 줄로 읽는다.
+    if (!STATUS_LINE.test(line)) continue;
+    if (SPINNING.test(line)) return null;
+    const left = STILL_RUNNING.exec(line.trimEnd()) ?? STILL_RUNNING.exec(joined);
     if (left) label ??= left[1]!.replace(/\s+/g, " ");
   }
   if (label === null) {

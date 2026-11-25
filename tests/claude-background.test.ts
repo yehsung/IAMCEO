@@ -78,6 +78,19 @@ describe("화면: 턴을 끝내고 입력을 받을 수 있는 Claude", () => {
     expect(claudeQuietScreen(composerScreen("⏺ 답\n✻ Brewed for 4s · done 7:02 AM"))).toEqual({ label: null });
     expect(claudeQuietScreen(composerScreen("⏺ 답\n✻ Cooked for 8s · done 7:04 AM · 2 shells still running"))).toEqual({ label: "2 shells" });
   });
+
+  // 11-25 검토: 괄호 없는 말줄임 규칙이 답 본문의 들여 쓴 글머리 줄과 상태 줄 아래 할 일 줄까지 '도는 상태 줄'로 읽어,
+  // 뒤 작업을 남기고 끝난 턴이 뒤 작업이 끝날 때까지 일하는 중에 머물렀다(0.2.10 은 쉬는 중으로 읽음).
+  test("2.1.331: 답 본문의 '· …' 글머리 줄이나 상태 줄 아래 '…' 로 끝나는 줄은 도는 상태 줄이 아니다", () => {
+    const shell = readFileSync(join(import.meta.dir, "fixtures", "cli", "claude", "2.1.331", "background-shell.txt"), "utf8");
+    const bullets = shell.replace("\n\n✻ Cooked for 8s", "\n  · 시험은 뒤에서 도는 중…\n  · 빌드도 기다리는 중...\n  · 끝나면 알립니다…\n\n✻ Cooked for 8s");
+    expect(bullets).not.toBe(shell);
+    expect(claudeQuietScreen(bullets)).toEqual({ label: "1 shell" });
+    expect(claudeQuietScreen(composerScreen("⏺ 답\n  · 테스트는 뒤에서 도는 중…\n✻ Brewed for 4s · done 7:02 AM"))).toEqual({ label: null });
+    expect(claudeQuietScreen(composerScreen("⏺ 답\n✻ Brewed for 4s · done 7:02 AM\n  ◻ 배포 확인…"))).toEqual({ label: null });
+    expect(claudeQuietScreen(composerScreen("⏺ 답\n✻ Cooked for 8s · done 7:04 AM · 1 shell still running\n  ◻ 배포 확인"))).toEqual({ label: "1 shell" });
+    expect(claudeQuietScreen(composerScreen("⏺ 답\n✢ Finagling…"))).toBeNull();
+  });
 });
 
 describe("Claude 기록: 전달 뒤의 턴이 닫혔는가", () => {

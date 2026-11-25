@@ -20,7 +20,7 @@ Only changes that matter to users, by version. The full history is in `git log`.
   - 권한이 '매번 묻기'면 Codex 팀장이 IAMCEO 에 보고할 때마다(진행 상황·보고 글) 터미널에 'Allow the iamceo MCP server …?' 승인 창이 떠 멈췄습니다. 이제 IAMCEO 도구만은 묻지 않고 씁니다(Claude 팀장과 같습니다). 명령 실행과 다른 도구의 승인은 그대로입니다.
   - 새 프로젝트에서 '이 폴더를 신뢰합니다'라고 답했는데도 Codex 팀장이 폴더 신뢰 확인 창에서 '정확히 읽지 못했습니다'로 멈췄습니다(0.172 가 창의 둘째 선택지를 'Back to Agent Command Center' 로 바꿨습니다). 이제 그 창을 읽고 이어 갑니다.
   - 입력칸에 쓰다 만 글이 있을 때 입력칸을 알아보지 못했습니다(바닥줄에 Codex 설정 경고 표시만 남는 경우). 이제 초안으로 읽습니다.
-- **Codex 0.172.0 에서 달라진 점(고치지 않음):** 팀장이 백그라운드 터미널(미리보기 서버 등)을 남기고 턴을 끝내면 곧바로 '쉬는 중'으로 보입니다(0.166 은 그 동안 '일하는 중'). 그래서 그런 팀장을 재우거나 보관할 때 '뒤 작업이 남았다'는 거절이 나오지 않습니다.
+- **Codex 0.172.0 의 백그라운드 터미널도 지킵니다:** 0.172 는 팀장이 백그라운드 터미널(미리보기 서버 등)을 남기고 턴을 끝내면 곧바로 '쉬는 중'으로 보입니다(0.166 은 그 동안 '일하는 중'). 이제 화면의 'N background terminal(s) running' 표시를 읽어, 그 프로그램이 도는 동안 그 팀장을 재우거나 프로젝트를 보관하거나 CLI 를 바꾸면 0.166 때처럼 그 까닭으로 거절합니다. 새 판 적용을 위한 '같은 대화로 다시 열기'도 그 프로그램이 끝난 뒤로 미룹니다. 일은 그대로 받습니다.
 
 ### 0.2.10 — 2026-11-23
 
@@ -227,7 +227,7 @@ iPhone 앱은 2026-11-11에 App Store에 나왔습니다.
   - With the permission mode set to "ask every time", a Codex member stopped at an "Allow the iamceo MCP server …?" prompt in its terminal every time it reported to IAMCEO (status, posts). IAMCEO's own tools now run without asking (as for Claude members). Approval for commands and other tools is unchanged.
   - A Codex member stopped at the folder-trust dialog with "could not read it exactly" even when you had said you trust the folder when creating the project (0.172 renamed the dialog's second choice to "Back to Agent Command Center"). The dialog is now read and the member goes on.
   - The composer was not recognized while it held an unsent draft (when only Codex's config-warning indicator stays on the bottom line). It is now read as a draft.
-- **Changed in Codex 0.172.0 (not fixed):** a member that ends its turn leaving a background terminal (a preview server and the like) now shows as idle right away (0.166 showed it as working meanwhile). So putting such a member to sleep or archiving its project is no longer refused with "a background task is still running".
+- **Background terminals left by Codex 0.172.0 are protected too:** with 0.172, a member that ends its turn leaving a background terminal (a preview server and the like) shows as idle right away (0.166 showed it as working meanwhile). The server now reads the "N background terminal(s) running" line on its screen, and while that program runs, putting the member to sleep, archiving its project or switching its CLI is refused with that reason, as with 0.166. Reopening the same conversation to apply a new CLI version also waits until that program ends. The member still takes new work.
 
 ### 0.2.10 — 2026-11-23
 

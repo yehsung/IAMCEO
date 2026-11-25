@@ -2412,7 +2412,7 @@ export class Orchestrator implements OrchestratorApi {
     // 멈출 때 하던 실행은 세대를 바꾸기 전에 찾는다(바꾼 뒤에는 새 세대의 기록만 보인다).
     const loginRunId = loginStopped ? this.loginStopRun(member) : null;
     const handling = rt.closing || rt.starting || (!fromPump && rt.pumping) || rt.reopening || !!rt.turn || member.status === "working" || (member.status === "blocked" && !usage && !loginStopped);
-    if (!handling && this.isBusy(member) && this.lingering(member) !== null) throw new ApiError(409, ERROR_CODES.cli_switch_background_program.ko, "cli_switch_busy", "cli_switch_background_program");
+    if (!handling && (this.isBusy(member) && this.lingering(member) !== null || this.codexIdleLingering(member) !== null)) throw new ApiError(409, ERROR_CODES.cli_switch_background_program.ko, "cli_switch_busy", "cli_switch_background_program");
     if (!handling && this.claudeLingering(member)) throw new ApiError(409, ERROR_CODES.cli_switch_background_task.ko, "cli_switch_busy", "cli_switch_background_task");
     if (handling || this.isBusy(member)) {
       throw new ApiError(409, "일하거나 세션을 처리하는 중입니다. 턴이 끝난 뒤 CLI를 바꾸세요", "cli_switch_busy");
@@ -2914,10 +2914,11 @@ export class Orchestrator implements OrchestratorApi {
       const rt = this.runtime(member.id);
       if (rt.starting || rt.reopening || rt.pumping || rt.closing || this.configWrites.has(member.id) || this.terminal.terminalMutations.has(member.id)) throw new ApiError(409, `${member.name}의 세션을 처리하는 중입니다`, "session_busy");
     }
-    const busyNow = (m: Member) => m.status === "working" || m.status === "blocked" || (m.origin !== "manual" && (this.isBusy(m) || this.claudeLingering(m)));
-    // 정말 일하는 팀장을 먼저 알린다. 백그라운드 프로그램·뒤 작업만 남은 팀장(쉬는 중으로 보인다)은 그 까닭을 따로 알린다(핫픽스 B·C).
-    const busy = members.find((m) => busyNow(m) && this.lingering(m) === null && !this.claudeLingering(m)) ?? members.find(busyNow);
-    if (busy && this.lingering(busy) !== null) throw new ApiError(409, `${josa(busy.name, "이")} 턴은 끝냈지만 Codex가 띄운 백그라운드 프로그램이 아직 돌고 있어 보관할 수 없습니다. 터미널에서 /stop 으로 닫은 뒤 보관하세요`, "archive_member_working", "archive_background_program");
+    const busyNow = (m: Member) => m.status === "working" || m.status === "blocked" || (m.origin !== "manual" && (this.isBusy(m) || this.claudeLingering(m) || this.codexIdleLingering(m) !== null));
+    // 정말 일하는 팀장을 먼저 알린다. 백그라운드 프로그램·뒤 작업만 남은 팀장(쉬는 중으로 보인다)은 그 까닭을 따로 알린다(핫픽스 B·C, 0.2.11 Codex 0.172).
+    const programs = (m: Member) => this.lingering(m) ?? this.codexIdleLingering(m);
+    const busy = members.find((m) => busyNow(m) && programs(m) === null && !this.claudeLingering(m)) ?? members.find(busyNow);
+    if (busy && programs(busy) !== null) throw new ApiError(409, `${josa(busy.name, "이")} 턴은 끝냈지만 Codex가 띄운 백그라운드 프로그램이 아직 돌고 있어 보관할 수 없습니다. 터미널에서 /stop 으로 닫은 뒤 보관하세요`, "archive_member_working", "archive_background_program");
     if (busy && this.claudeLingering(busy)) throw new ApiError(409, `${josa(busy.name, "이")} 턴은 끝냈지만 Claude가 띄운 뒤 작업이 아직 돌고 있어 보관할 수 없습니다. 그 작업이 끝난 뒤 보관하세요`, "archive_member_working", "archive_background_task");
     if (busy) throw new ApiError(409, `${josa(busy.name, "이")} 일하는 중이라 보관할 수 없습니다`, "archive_member_working");
     const open = this.store.listDecisions(project.id).filter((d) => d.status === "open").length;
@@ -3082,7 +3083,7 @@ export class Orchestrator implements OrchestratorApi {
       // 0.2.7 배포 전 확인(real-cli P4): 멈출 턴이 없는(쉬는) CLI 에는 키를 보내지 않았다. 그 턴은 이미 끝났으니 중단된 턴으로 적지 않는다.
       if (e instanceof CoreError && e.kind === "no_turn") {
         if (turn && rt.turn === turn && !already) turn.interrupted = false;
-        const programs = runner instanceof CoreRunner ? runner.backgroundTerminals(memberId) : null;
+        const programs = runner instanceof CoreRunner ? runner.backgroundTerminals(memberId) ?? runner.codexIdleBackground(memberId) : null;
         if (programs) throw new ApiError(409, ERROR_CODES.interrupt_background_program.ko, "interrupt_no_turn", "interrupt_background_program");
         throw new ApiError(409, ERROR_CODES.interrupt_no_turn.ko, "interrupt_no_turn");
       }
@@ -3823,7 +3824,7 @@ export class Orchestrator implements OrchestratorApi {
       if (this.deliveryRecovery.fenced(memberId)) throw new ApiError(409, "전달 결과가 확인되지 않은 입력이 있어 잠재울 수 없습니다. 전달 확인을 먼저 끝내세요", "sleep_delivery_unknown");
       if (this.coreCompactFenced(member)) throw new ApiError(409, "문맥 압축을 처리하고 있어 잠재울 수 없습니다. 압축 결과를 확인해 주세요", "sleep_compacting");
       // 백그라운드 프로그램만 남은 팀장은 쉬는 중으로 보여 '일하는 중'이 맞지 않는다. 코드는 그대로(출시된 앱의 '그래도 잠재우기'), 까닭을 reason 으로 싣는다.
-      if (this.isBusy(member) && this.lingering(member) !== null) throw new ApiError(409, ERROR_CODES.sleep_background_program.ko, "member_working", "sleep_background_program");
+      if (this.isBusy(member) && this.lingering(member) !== null || this.codexIdleLingering(member) !== null) throw new ApiError(409, ERROR_CODES.sleep_background_program.ko, "member_working", "sleep_background_program");
       if (this.claudeLingering(member)) throw new ApiError(409, ERROR_CODES.sleep_background_task.ko, "member_working", "sleep_background_task");
       if (this.isBusy(member)) throw new ApiError(409, `${josa(member.name, "은")} 일하는 중입니다`, "member_working");
       // 미확정 종료가 열려 있는 동안 전달 펌프는 멈춘다. 그 사이 온 입력으로 복구까지 거부하면 서로 영영 물린다.
@@ -4659,9 +4660,11 @@ export class Orchestrator implements OrchestratorApi {
     }
 
     // 뒤 작업만 남은 Claude(핫픽스 C)는 전달은 받지만, 다시 열거나(설정 적용) 압축하면 그 작업이 죽거나 끝을 확인할 수 없다. 그 작업이 끝난 뒤로 미룬다.
+    // 0.2.11: 백그라운드 터미널이 남은 Codex 0.172(쉬는 중)도 다시 열면 그 프로그램이 죽는다. 설정 적용(새 판 적용 포함)만 미룬다(압축은 프로세스를 끝내지 않는다).
     const lingering = this.claudeLingering(member);
+    const reopenHeld = lingering || this.codexIdleLingering(member) !== null;
     // 쉬는 동안 바뀐 설정을 먼저 맞춘다. 일을 넣고 나면 턴이 끝날 때까지 못 맞춘다.
-    if (runner.applyConfig && this.configPending(member) && !lingering) {
+    if (runner.applyConfig && this.configPending(member) && !reopenHeld) {
       rt.pumpStage = "sync_config";
       this.judged(memberId, "session_busy");
       if (!(await this.syncConfig(member, rt))) return this.judged(memberId, rt.holdUntil > Date.now() ? "retry_wait" : "config_failed");
@@ -5536,6 +5539,17 @@ export class Orchestrator implements OrchestratorApi {
     return runner instanceof CoreRunner && runner.claudeBackground(member.id);
   }
 
+  /**
+   * 0.2.11(Codex 0.172.0): 쉬는 중이고 화면에 Codex 의 백그라운드 터미널이 남은 팀장이면 그 수, 아니면 null(CoreRunner.codexIdleBackground).
+   * 0.172 는 그 터미널을 남긴 턴 끝을 done 으로 알려 lingering(0.166 의 working)에 걸리지 않는다. 전달은 받지만(isBusy false) 잠재우기·보관·
+   * CLI 바꾸기는 0.166 과 같은 까닭(…_background_program)으로 거절하고, 설정 적용(다시 열기)은 그 프로그램이 끝난 뒤로 미룬다.
+   */
+  private codexIdleLingering(member: Member): number | null {
+    if (member.origin === "manual" || member.status === "working" || member.status === "blocked" || this.coreCompactFenced(member) || this.runtime(member.id).turn !== null) return null;
+    const runner = this.runners.get(this.backendOf(member));
+    return runner instanceof CoreRunner ? runner.codexIdleBackground(member.id) : null;
+  }
+
   /** Count persisted executions before admitting new work, including unknown/received turns. */
   private activeAutomaticTurns(): number {
     const ids = new Set<string>();
@@ -6252,7 +6266,7 @@ export class Orchestrator implements OrchestratorApi {
     if (!conductor) return;
     const candidates = awake
       // 백그라운드 프로그램만 남은 팀장은 쉬는 중으로 보여도 잠재우기가 거절된다(sleep_background_program). 후보로 권하지 않는다.
-      .filter((m) => (m.status === "idle" || m.status === "waiting") && m.queuedCount === 0 && this.store.listOpenDecisionsByMember(m.id).length === 0 && this.lingering(m) === null && !this.claudeLingering(m))
+      .filter((m) => (m.status === "idle" || m.status === "waiting") && m.queuedCount === 0 && this.store.listOpenDecisionsByMember(m.id).length === 0 && this.lingering(m) === null && !this.claudeLingering(m) && this.codexIdleLingering(m) === null)
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
       .map((m) => m.name);
     const list = candidates.length ? `잠재울 후보(오래된 순): ${candidates.join(", ")}` : "지금 잠재울 수 있는 직원이 없습니다";

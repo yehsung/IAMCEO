@@ -361,6 +361,8 @@ export class CoreRunner implements FullRunner {
   private readonly codexWatch = new WeakMap<Track, CodexBackgroundWatch>();
   /** Claude 가 자기 근거로 끝낸 턴의 관측(track 마다, claudeQuiet). */
   private readonly claudeWatch = new WeakMap<Track, ClaudeWatch>();
+  /** 0.2.11: 쉬는 중(core idle·done)인데 화면에 Codex 의 백그라운드 터미널이 남아 있다는 관측(track 마다, observeCodexIdleBackground). */
+  private readonly codexIdleWatch = new WeakMap<Track, { turn: number; state: string; terminals: number }>();
   /** 서브에이전트 수의 관측(track 마다). 새 track(다시 띄운 CLI)은 처음부터 다시 잰다. */
   private readonly subagentWatch = new WeakMap<Track, SubagentWatch>();
   /** Antigravity CLI 의 대화 id 를 훅 기록에서 찾는 기억(track 마다). 새 track(다시 띄운 CLI)은 처음부터 다시 본다. */
@@ -540,6 +542,15 @@ export class CoreRunner implements FullRunner {
   /** 뒤 작업만 남은 Claude(claudeQuiet background)인가. 끝내거나 다시 열면 그 작업이 죽는다. */
   private claudeLingers(track: Track, terminal: CoreTerminal = track.terminal): boolean {
     return this.claudeQuietOn(track, terminal)?.kind === "background";
+  }
+  /**
+   * 0.2.11(Codex 0.172.0 실측): 쉬는 중(core idle·done)인데 화면의 빈 입력칸 바로 위에 'N background terminal(s) running' 이 남은 Codex 면 그 수.
+   * 그 track 의 지금 터미널이고 관측 때와 같은 core 상태·turn 번호여야 한다(넣은 일로 working 이 되면 곧바로 아니다).
+   */
+  private codexIdleTerminals(track: Track, terminal: CoreTerminal = track.terminal): number | null {
+    const seen = this.codexIdleWatch.get(track);
+    if (!seen || track.terminal !== terminal || terminal.state !== "live" || terminal.status?.state !== seen.state || (terminal.turn ?? 0) !== seen.turn) return null;
+    return seen.terminals;
   }
   /**
    * core 에게는 working 이지만 Claude 자기 근거로 턴이 끝나 입력을 받는 Claude 인가: 뒤 작업만 남았거나(background), 로그인 밖의 API 오류로
@@ -746,6 +757,7 @@ export class CoreRunner implements FullRunner {
     if (!initial) this.observeSubagents(track, terminal);
     // 11-16: Codex 가 남긴 백그라운드 터미널로 core 가 working 을 알려도, 화면과 Codex 자기 기록이 그 턴의 끝을 보이면 끝난 턴이다.
     const background = this.codexBackground(track, terminal, screen, initial);
+    this.observeCodexIdleBackground(track, terminal, screen);
     // 11-16: Claude 가 뒤 작업을 남기고(또는 로그인 오류로) 턴을 끝냈는데 core 가 working 을 알린다. 화면과 Claude 자기 기록(또는 훅)이 함께 그 끝을 보이면 끝난 턴이다.
     const claude = background ? null : this.claudeQuiet(track, terminal, screen, initial);
     // A CLI that has run turns, cleared its status report and shows its normal composer has finished its turn.
@@ -1264,6 +1276,14 @@ export class CoreRunner implements FullRunner {
     return !!track && this.claudeLingers(track) && !this.turnBusy(track);
   }
   /**
+   * 0.2.11: 쉬는 중(Codex 0.172 는 core 가 done 을 알린다)이고 화면에 Codex 의 백그라운드 터미널이 남은 팀장이면 그 수, 아니면 null
+   * (observeCodexIdleBackground). 입력은 받지만(isBusy false) 잠재우기·보관·CLI 바꾸기·설정 적용은 그 프로그램을 죽이므로 하지 않는다.
+   */
+  codexIdleBackground(memberId: string): number | null {
+    const track = this.tracks.get(memberId);
+    return track && !this.turnBusy(track) ? this.codexIdleTerminals(track) : null;
+  }
+  /**
    * 0.2.7(D2-5): 이 팀장의 지금 세션 기록이 마지막으로 쓰인 때(파일 mtime, ISO). CLI 가 일하며 기록에 줄을 더하면 오른다.
    * 업무의 '마지막 진전'(실행 기록 lastProgressAt)을 앞당기는 데만 쓴다(턴 끝·입력 판정에는 쓰지 않는다). 상태 사건·건강 확인마다 불리므로
    * 이미 아는 경로만 본다: Claude 는 작업 폴더의 기록 경로, Codex 는 이미 찾아 둔 rollout. 폴더를 훑지 않는다. 모르면 null.
@@ -1476,6 +1496,27 @@ export class CoreRunner implements FullRunner {
     if (verdict.outcome === "unknown" && !["scan_pending", "partial_log"].includes(verdict.code)) this.noteCodexBackground(track, watch, terminal, terminals, verdict.code);
     else watch.unverified = null;
     return watch.state = null;
+  }
+  /**
+   * 0.2.11(Codex 0.172.0 실측, 견본 tests/fixtures/cli/codex/0.172.0/background-idle.txt): 0.172 는 백그라운드 터미널(예: 미리보기 서버)을 남기고
+   * 턴을 끝내면 core 에 working 이 아니라 done 을 알린다(0.166 은 working, codexBackground). 턴 끝·전달은 평소대로다(core 의 turn 번호가 오른다).
+   * 다만 끝내거나 다시 열면 그 프로그램이 죽으므로, 화면이 그 모양인 동안을 적어 두어 잠재우기·보관·CLI 바꾸기는 거절하고 설정 적용(다시 열기)은
+   * 미룬다(codexIdleBackground). 화면만 본다: 다른 모양(진행 줄, 초안, 그 줄 없음)이면 곧바로 지운다. 입력 직전의 관측(화면을 읽지 않음)은 앞 관측을 잇는다.
+   */
+  private observeCodexIdleBackground(track: Track, terminal: CoreTerminal, screen: string | null): void {
+    const state = terminal.status?.state ?? "";
+    if (providerFor(track.member) !== "codex" || terminal.state !== "live" || !["idle", "done"].includes(state) || !!track.compact && !["failed", "succeeded"].includes(track.compact.phase)) {
+      this.codexIdleWatch.delete(track);
+      return;
+    }
+    if (screen === null) {
+      const seen = this.codexIdleWatch.get(track);
+      if (seen && (seen.turn !== (terminal.turn ?? 0) || seen.state !== state)) this.codexIdleWatch.delete(track);
+      return;
+    }
+    const terminals = codexBackgroundTerminals(screen);
+    if (terminals === null) this.codexIdleWatch.delete(track);
+    else this.codexIdleWatch.set(track, { turn: terminal.turn ?? 0, state, terminals });
   }
   /** 지금 업무(이 세대에서 입력이 들어간 마지막 실행)의 턴이 Codex 기록에서 끝났는가. 같은 세대·같은 터미널·같은 세션의 기록만 본다. */
   private codexTurnEnd(track: Track, watch: CodexBackgroundWatch): { outcome: "ended" | "running" | "unknown"; code: string; runEnded: boolean } {
@@ -2178,15 +2219,15 @@ export class CoreRunner implements FullRunner {
     const track = this.tracks.get(member.id);
     if (!track) return { ok: false, reason: "gone", retryable: false };
     if (this.manualLease(member.id)) return { ok: false, reason: "input_busy", retryable: true, detail: "Manual terminal control is active" };
-    // 뒤 작업만 남은 Claude 를 다시 열면 그 작업이 끝난다. 그 작업이 끝난 뒤에 맞춘다.
-    if (this.isBusy(member.id) || this.claudeLingers(track) || this.sending.has(member.id) || this.configuring.has(member.id)) return { ok: false, reason: "busy", retryable: true };
+    // 뒤 작업만 남은 Claude·백그라운드 터미널이 남은 Codex 를 다시 열면 그 작업이 끝난다. 그 작업이 끝난 뒤에 맞춘다.
+    if (this.isBusy(member.id) || this.claudeLingers(track) || this.codexIdleTerminals(track) !== null || this.sending.has(member.id) || this.configuring.has(member.id)) return { ok: false, reason: "busy", retryable: true };
     const sessionId = track.sessionId || member.sessionId;
     if (!sessionId) return unsupported(providerFor(member) === "gemini" ? "Antigravity conversation id is unknown; explicitly start a fresh session" : "Native Codex session id is unknown; use the CLI /model menu or explicitly start a fresh session");
     const release = this.reserve(member.id);
     this.configuring.add(member.id);
     try {
       const terminal = await this.refresh(track);
-      if (this.claudeLingers(track, terminal)) return { ok: false, reason: "busy", retryable: true };
+      if (this.claudeLingers(track, terminal) || this.codexIdleTerminals(track, terminal) !== null) return { ok: false, reason: "busy", retryable: true };
       if (!["idle", "done"].includes(this.stateOf(track, terminal) || "")) return { ok: false, reason: "blocked", retryable: true };
       const screen = await this.screen(member);
       const draft = composerDraft(providerFor(member), screen);
@@ -2322,6 +2363,8 @@ export class CoreRunner implements FullRunner {
   private quietForStop(track: Track | undefined, terminal: CoreTerminal): boolean {
     // 뒤 작업만 남은 Claude 는 입력은 받지만 끝내면 그 작업이 죽는다(쉬는 중으로 보여도). 강제(whileWorking)로만 끝낸다.
     if (track && this.claudeLingers(track, terminal)) return false;
+    // 0.2.11: 백그라운드 터미널이 남은 Codex 0.172(쉬는 중으로 보인다)도 같다.
+    if (track && this.codexIdleTerminals(track, terminal) !== null) return false;
     const state = this.stateOf(track, terminal);
     if (["idle", "done"].includes(state || "")) return true;
     // 0.2.8: 로그인(계정) 오류로 턴을 끝낸 Claude(claudeQuiet 의 login). core 는 working 을 알리지만(11-16 실측: 99분) Claude 는 기록으로 턴을 끝내고

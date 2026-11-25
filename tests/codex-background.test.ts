@@ -360,3 +360,81 @@ describe("백그라운드 터미널만 남은 Codex 팀장", () => {
     expect(t.member(m.id).status).toBe("waiting");
   }, 30_000);
 });
+
+// 0.2.11(Codex 0.172.0 실측, 견본 tests/fixtures/cli/codex/0.172.0): 백그라운드 터미널을 남기고 턴을 끝내면 core 가 working 이 아니라 done 을 알린다.
+// 턴 끝·전달은 평소대로다. 화면이 그 모양인 동안 잠재우기·보관·CLI 바꾸기는 0.166 과 같은 까닭으로 거절하고, 새 판 적용(같은 대화로 다시 열기)은
+// 그 프로그램이 끝난 뒤로 미룬다(다시 열면 그 프로그램이 죽는다).
+describe("Codex 0.172: 백그라운드 터미널을 남기고 끝난 턴(core 는 done)", () => {
+  const FIXTURES_172 = join(import.meta.dir, "fixtures", "cli", "codex", "0.172.0");
+  const BACKGROUND_172 = readFileSync(join(FIXTURES_172, "background-idle.txt"), "utf8");
+  const IDLE_172 = readFileSync(join(FIXTURES_172, "idle.txt"), "utf8");
+  /** 일을 넣고, 그 턴이 백그라운드 터미널을 남긴 채 done 으로 끝나게 한다(0.172 의 모양). */
+  async function endedWithBackground(t: CoreEnv): Promise<{ m: Member; sessionId: string }> {
+    const { m, prompt } = await codexAtWork(t);
+    await t.orch.recordPost(t.member(m.id), { kind: "완료", title: "미리보기 보고" });
+    // 기록의 턴은 열어 둔다: 0.166 의 길(working 인 채 기록으로 끝을 읽기)이 먼저 닫지 않게. 0.172 는 core 의 done 이 턴 끝이다.
+    const sessionId = writeRollout(t, m, prompt, { complete: false }).id;
+    await t.waitFor("세션 연결", () => t.member(m.id).sessionId === sessionId);
+    t.core.release(m.id);
+    t.core.setScreen(m.id, BACKGROUND_172);
+    const run = await t.waitFor("업무 닫힘", () => { const r = lastRun(t, m.id); return r?.phase === "ended" ? r : null; });
+    expect(run.result).toBe("success");
+    expect(run.reason).not.toBe("codex_background_terminal");
+    await t.waitFor("쉬는 중 + 백그라운드 표시", () => t.member(m.id).status === "idle" && t.runner.codexIdleBackground(m.id) === 1);
+    // 0.166 의 길(core working)이 아니다: 입력은 받는다.
+    expect(t.runner.isBusy(m.id)).toBe(false);
+    expect(t.runner.backgroundTerminals(m.id)).toBeNull();
+    return { m: t.member(m.id), sessionId };
+  }
+
+  test("잠재우기·보관·CLI 바꾸기·중단은 백그라운드 프로그램 까닭으로 거절하고 잠재울 후보로 권하지 않는다. 그래도 잠재우기는 된다", async () => {
+    const t = await setup();
+    const lead = await t.orch.ensureConductor(t.project.id);
+    const { m } = await endedWithBackground(t);
+    await t.idle(lead.id);
+    const sleep = await t.api("POST", `/api/members/${m.id}/sleep`);
+    expect(sleep.status).toBe(409);
+    expect(await sleep.json()).toEqual({ error: ERROR_CODES.sleep_background_program.ko, code: "member_working", reason: "sleep_background_program" });
+    expect(await rejection(t.orch.patchProject(t.project.id, { archived: true }))).toMatchObject({ status: 409, code: "archive_member_working", reason: "archive_background_program" });
+    expect(t.store.requireProject(t.project.id).archived).toBe(false);
+    expect(await rejection(t.orch.patchMemberConfig(m.id, { cli: "claude" }))).toMatchObject({ status: 409, code: "cli_switch_busy", reason: "cli_switch_background_program" });
+    expect(t.member(m.id).cli).toBe("codex");
+    const stop = await t.api("POST", `/api/members/${m.id}/interrupt`);
+    expect(stop.status).toBe(409);
+    expect(await stop.json()).toEqual({ error: ERROR_CODES.interrupt_background_program.ko, code: "interrupt_no_turn", reason: "interrupt_background_program" });
+    t.store.patchSettings({ maxAwakeWorkers: 0 });
+    (t.orch as unknown as { checkAwakeLimit(projectId: string): void }).checkAwakeLimit(t.project.id);
+    expect(t.store.listPending(lead.id).filter(d => d.text.includes("상한")).at(-1)!.text).toContain("지금 잠재울 수 있는 직원이 없습니다");
+    await t.orch.sleepMember(m.id, { force: true });
+    expect(t.member(m.id).status).toBe("asleep");
+  }, 30_000);
+
+  test("전달은 그대로 넣는다. 새 판 적용(다시 열기)은 그 프로그램이 끝나 화면에서 그 줄이 사라진 뒤 같은 대화로 한다", async () => {
+    const t = await setup();
+    const { m, sessionId } = await endedWithBackground(t);
+    const runs = t.runs(m.id).length;
+    await t.orch.cliUpdated("codex");
+    await Bun.sleep(700);
+    expect(t.runs(m.id)).toHaveLength(runs);
+    expect(t.orch.cliUpdateStatus("codex").pending).toBe(1);
+    // 그 사이 온 일은 곧바로 들어간다(쉬는 중이다). 넣은 턴이 도는 동안은 백그라운드 표시를 지운다.
+    t.core.setDirectives("@fake:hold");
+    await t.orch.assign(t.project.id, m.handle, { text: "다음 일" });
+    await t.waitFor("다음 전달", () => t.core.turns(m.id).length === 2);
+    await t.waitFor("일하는 중", () => t.member(m.id).status === "working" && t.core.held(m.id));
+    expect(t.runner.codexIdleBackground(m.id)).toBeNull();
+    t.core.setDirectives("");
+    // 그 턴도 프로그램을 남긴 채 끝났다: 아직 다시 열지 않는다.
+    t.core.release(m.id);
+    await t.waitFor("다시 쉬는 중", () => t.member(m.id).status === "idle" && t.runner.codexIdleBackground(m.id) === 1);
+    await Bun.sleep(700);
+    expect(t.runs(m.id)).toHaveLength(runs);
+    // 프로그램이 끝났다(입력칸 위의 줄이 사라졌다). 같은 대화로 다시 연다.
+    t.core.setScreen(m.id, IDLE_172);
+    await t.waitFor("다시 열림", () => t.runs(m.id).length === runs + 1, 20_000);
+    const reopened = t.runs(m.id).at(-1)!;
+    expect(reopened.argv).toContain("resume");
+    expect(reopened.argv).toContain(sessionId);
+    await t.waitFor("모두 새 판으로", () => t.orch.cliUpdateStatus("codex").pending === 0, 20_000);
+  }, 40_000);
+});

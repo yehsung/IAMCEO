@@ -365,9 +365,10 @@ export async function releaseMac(options: ReleaseOptions): Promise<void> {
     run([process.execPath, "run", "build:native"]);
     if (!dry) {
       if (read(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", join(app, "Contents", "Info.plist")], source) !== pkg.version) throw new Error("Built app version differs from release version");
-      run(["lipo", "-verify_arch", "arm64", join(app, "Contents", "MacOS", "IAMCEO")]);
-      run(["lipo", "-verify_arch", "arm64", daemon]);
-      run(["lipo", "-verify_arch", "arm64", join(core, "Contents", "MacOS", "herdr-core")]);
+      // 0.2.11: lipo 는 '<파일> -verify_arch <종류>' 순서만 받는다(문서의 순서. 지금 Xcode 의 lipo 는 옵션 먼저를 거절한다).
+      run(["lipo", join(app, "Contents", "MacOS", "IAMCEO"), "-verify_arch", "arm64"]);
+      run(["lipo", daemon, "-verify_arch", "arm64"]);
+      run(["lipo", join(core, "Contents", "MacOS", "herdr-core"), "-verify_arch", "arm64"]);
     }
     // Before signing: ad-hoc builds can fail Gatekeeper until notarized; report that result.
     run(["codesign", "--verify", "--deep", "--strict", app]);

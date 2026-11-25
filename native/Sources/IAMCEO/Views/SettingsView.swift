@@ -1409,7 +1409,13 @@ struct SettingsView: View {
         .task(id: "\(SettingsNavigation.shared.revision):\(highlightRuntime)") {
             guard highlightRuntime, item == .ai else { return }
             await Task.yield()
-            if !Task.isCancelled { scroll.scrollTo("runtime", anchor: .top) }
+            // The groups above (accounts) load after the screen opens and push the checklist down: scroll again as they arrive
+            // (11-25 smoke: one scroll landed below the new-version rows).
+            for wait in [0, 250, 350, 600] {
+                if wait > 0 { try? await Task.sleep(for: .milliseconds(wait)) }
+                guard !Task.isCancelled, highlightRuntime else { return }
+                scroll.scrollTo("runtime", anchor: .top)
+            }
         }
         #if os(iOS)
         .scrollDismissesKeyboard(.interactively)

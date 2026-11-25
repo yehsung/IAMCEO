@@ -1453,15 +1453,15 @@ private struct TableBlock: View {
         guard widths == nil || widthsTheme != theme.key, !table.header.isEmpty else { return }
         let header = table.header, numeric = table.numeric
         let sample = Array(table.rows.prefix(1500))
-        // Measured in the fonts the cells draw with (.ceSystem: the theme's Mac scale and body design).
+        // Measured in the fonts the cells draw with (.ceSystem: the theme's Mac scale and body design) and the theme's letter spacing.
         let cellSize = tableCellSize * theme.fixedFontScale, headSize = tableHeadSize * theme.fixedFontScale
-        let rounded = theme.bodyDesign == .rounded
+        let rounded = theme.bodyDesign == .rounded, tracking = theme.tracking ?? 0
         let measured: [CGFloat]
         if sample.count * header.count <= 4000 {
-            measured = measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize, rounded: rounded)
+            measured = measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize, rounded: rounded, tracking: tracking)
         } else {
             measured = await Task.detached(priority: .userInitiated) {
-                measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize, rounded: rounded)
+                measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize, rounded: rounded, tracking: tracking)
             }.value
             guard !Task.isCancelled else { return }
         }
@@ -1608,7 +1608,7 @@ private typealias PlatformFont = UIFont
 
 /// Column widths like the web's auto table layout: the widest line of each column (text columns capped at 420,
 /// numbers never wrap) or its header with the sort slot, whichever is wider. Pure, so it can run off the main thread.
-private func measureTableColumns(header: [String], rows: [[String]], numeric: [Bool], cellSize: CGFloat, headSize: CGFloat, rounded: Bool = false) -> [CGFloat] {
+private func measureTableColumns(header: [String], rows: [[String]], numeric: [Bool], cellSize: CGFloat, headSize: CGFloat, rounded: Bool = false, tracking: CGFloat = 0) -> [CGFloat] {
     func design(_ font: PlatformFont) -> PlatformFont {
         guard rounded, let descriptor = font.fontDescriptor.withDesign(.rounded) else { return font }
         #if os(macOS)
@@ -1623,7 +1623,8 @@ private func measureTableColumns(header: [String], rows: [[String]], numeric: [B
     func width(_ value: String, _ font: PlatformFont) -> CGFloat {
         var widest: CGFloat = 0
         for line in value.split(whereSeparator: \.isNewline) {
-            widest = max(widest, (String(line) as NSString).size(withAttributes: [.font: font]).width)
+            let attributes: [NSAttributedString.Key: Any] = tracking == 0 ? [.font: font] : [.font: font, .kern: tracking]
+            widest = max(widest, (String(line) as NSString).size(withAttributes: attributes).width)
         }
         return widest.rounded(.up) + 2
     }

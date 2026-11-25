@@ -169,7 +169,10 @@ struct TerminalView: View {
     private var sleepingTerminal: some View {
         VStack(spacing: 16) {
             if waking {
-                ProgressView("깨우는 중…")
+                // An explicit label colour: the dark colour scheme below does not override the theme's text colour inherited from the root.
+                // The default theme keeps 0.2.10's system label and spinner.
+                ProgressView { Text("깨우는 중…").foregroundStyle(CE.isStandard ? AnyShapeStyle(.primary) : AnyShapeStyle(TerminalColors.ink)) }
+                    .tint(CE.isStandard ? nil : TerminalColors.ink2)
                 Text("터미널이 준비되면 이어서 연결합니다").font(CEFont.note).foregroundStyle(TerminalColors.ink2)
             } else {
                 Text(wakeNotice ?? String(localized: "터미널을 준비하고 있습니다")).font(CEFont.note).foregroundStyle(TerminalColors.ink2)

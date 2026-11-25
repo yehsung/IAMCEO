@@ -2,7 +2,7 @@
 // 서비스는 가짜를 넣는다(진짜 CLI·네트워크를 쓰지 않는다). 시험 환경(IAMCEO_TEST)의 서버는 스스로 서비스를 만들지 않는다.
 import { afterEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bus } from "../server/bus.ts";
@@ -45,7 +45,12 @@ async function boot(extra: Partial<ServerContext> = {}) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "iamceo-cli-update-http-")));
   const env = { IAMCEO_HOME: home, IAMCEO_PORT: "0" };
   updateConfigFile({ accessCode: "code" }, env);
-  const config: Config = { ...loadConfig(env), hosts: ["127.0.0.1"] };
+  // 점검표의 '설치됨'은 서버가 설정의 실행 파일을 PATH 에서 찾아 정한다(terminal-control runtimeInfo). 이 Mac 의 실제 claude·codex 에 기대지 않게
+  // 가짜 실행 파일을 둔다(CI Mac 에는 codex 가 없어 0.2.11 태그의 CI 에서 '설치하지 않았습니다'로 떨어졌다).
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  for (const name of ["claude", "codex"]) { writeFileSync(join(bin, name), "#!/bin/sh\nexit 0\n"); chmodSync(join(bin, name), 0o755); }
+  const config: Config = { ...loadConfig(env), hosts: ["127.0.0.1"], claudeBin: join(bin, "claude"), codexBin: join(bin, "codex") };
   const bus = new Bus(), store = new Store(openDb(config.dbPath), bus);
   const notes: [string, string][] = [];
   const orch = new Orchestrator({ config, store, runners: new Map(), notifier: (title, body) => { notes.push([title, body]); } });

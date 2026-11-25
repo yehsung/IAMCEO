@@ -59,7 +59,8 @@ echo "claude-code@latest was successfully upgraded!"`);
   const device = push.registerDevice(randomUUID(), { expectedRevision: null, platform: "ios", bundleId: DEFAULT_PUSH_BUNDLE_ID, environment: "sandbox", deviceToken: "ab", authorization: "authorized" });
   push.patchDevice(device.id, { expectedRevision: device.revision, enabled: true });
   const orch = new Orchestrator({ config, store, runners: new Map(), notifier: () => {} });
-  const versions = new CliVersionMonitor({ claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin: null, recheckMs: 0 });
+  // 판 읽기 제한을 넉넉히(바쁜 Mac 에서 방금 만든 가짜 스크립트의 첫 실행이 서버 기본 3초를 넘길 수 있다). 판은 읽힐 때까지 기다린다.
+  const versions = new CliVersionMonitor({ claudeBin: config.claudeBin, codexBin: config.codexBin, geminiBin: null, recheckMs: 0, timeoutMs: 30_000 });
   const ctx: ServerContext = { config, store, bus, orch, detectHosts: () => [], cliVersions: versions, push: { store: push, providers } };
   const fetched: string[] = [];
   const updates = serverCliUpdates(ctx, versions, {
@@ -77,7 +78,9 @@ echo "claude-code@latest was successfully upgraded!"`);
   cleanups.push(bus.subscribe(event => { events.push(event as WsEvent); }));
 
   // 1. 새 판 확인: 스냅샷에 실리고, 판마다 한 번 iPhone 푸시 사건이 생긴다.
-  await versions.refresh(true);
+  for (const end = Date.now() + 30_000; (await versions.refresh(true)).find(info => info.provider === "claude")?.version !== "2.1.331"; await Bun.sleep(50)) {
+    if (Date.now() > end) throw new Error("Claude 판을 읽지 못함");
+  }
   await call("/api/cli-updates?refresh=1");
   expect(fetched).toEqual(["https://formulae.brew.sh/api/cask/claude-code@latest.json"]);
   const before = (await call<SyncSnapshot>("/api/sync")).body.bootstrap.cliUpdates!;
@@ -94,7 +97,7 @@ echo "claude-code@latest was successfully upgraded!"`);
   expect(again.body.code).toBe("cli_update_running");
   const seen = new Set<string>();
   let info: CliUpdateInfo;
-  for (const end = Date.now() + 15_000; ; await Bun.sleep(50)) {
+  for (const end = Date.now() + 45_000; ; await Bun.sleep(50)) {
     info = (await call<SyncSnapshot>("/api/sync")).body.bootstrap.cliUpdates![0]!;
     if (info.run) seen.add(info.run.phase);
     if (info.run?.phase === "done" || info.run?.phase === "failed" || Date.now() > end) break;
@@ -113,4 +116,4 @@ echo "claude-code@latest was successfully upgraded!"`);
   // 같은 판은 다시 알리지 않는다.
   await call("/api/cli-updates?refresh=1");
   expect(push.listEvents().filter(e => e.kind === "cli_update")).toHaveLength(1);
-}, 30_000);
+}, 90_000);

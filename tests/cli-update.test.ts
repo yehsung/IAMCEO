@@ -2,11 +2,11 @@
 // - 설치 방식은 서버가 쓰는 실행 파일의 실제 경로로 가리고, 그 방식에 맞는 공개 주소에서 최신 판을 읽는다(시험은 주소별 답을 주입한다).
 // - 업데이트는 가짜 brew·npm·claude·agy 로만 돌린다(임시 폴더에 만든 셸 스크립트). 이 Mac 의 진짜 CLI 는 부르지 않는다.
 // - 시험 모드(IAMCEO_TEST)의 서비스는 네트워크를 쓰지 않고, 임시 폴더 밖의 실행 파일로는 업데이트 명령을 돌리지 않는다.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { CliVersionMonitor } from "../server/cli-version.ts";
+import { CliVersionMonitor, isVerifiedCliVersion } from "../server/cli-version.ts";
 import {
   CLI_UPDATE_FORCE_MIN_MS, CLI_UPDATE_NOTICES_KEY, CliUpdateError, CliUpdates, compareCliVersions, detectCliInstall, parseLatestVersion, testModeAllows, updatePlan,
   type CliUpdatesOptions,
@@ -14,6 +14,9 @@ import {
 import type { CliProvider, CliUpdateInfo, CliUpdatePhase, CliUpdateRun } from "../shared/types.ts";
 import { rejection } from "./fixtures/settle.ts";
 
+// 기다림은 모두 조건 기다림이다(판이 읽힐 때까지·업데이트가 끝날 때까지, 각각 상한이 있다). 바쁜 Mac 에서 가짜 스크립트의 첫 실행이 몇 초 걸려도
+// 시험 하나의 기본 제한(5초)에 걸리지 않게 넉넉히 둔다.
+setDefaultTimeout(60_000);
 const cleanups: (() => Promise<unknown> | unknown)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
@@ -156,8 +159,23 @@ describe("설치 방식 가리기(실행 파일의 실제 경로)", () => {
 
 // ---- 서비스 ----
 interface World { root: string; home: string; urls: Map<string, string | null>; fetched: string[]; notices: CliUpdateInfo[]; installed: [CliProvider, string][]; changes: number; phases: CliUpdatePhase[] }
-function service(world: World, bins: { claude?: string | null; codex?: string | null; gemini?: string | null }, extra: Partial<CliUpdatesOptions> = {}) {
-  const monitor = new CliVersionMonitor({ claudeBin: bins.claude ?? join(world.root, "no-claude"), codexBin: bins.codex ?? join(world.root, "no-codex"), geminiBin: bins.gemini ?? null, recheckMs: 0 });
+/**
+ * 판 읽기(--version) 제한. 서버 기본값(3초)으로 두면 방금 만든 가짜 스크립트의 첫 실행이 바쁜 Mac 에서 3초를 넘겨 판을 모른다(통합본 check.sh all 에서
+ * 3,0xx ms 로 떨어진 시험들). 시험은 넉넉히 두고, 판이 실제로 읽힐 때까지 기다린다(readUntil).
+ */
+const VERSION_READ_MS = 30_000;
+/** 그 CLI 의 판이 읽힐 때까지 다시 읽는다(조건 기다림). */
+async function readUntil(monitor: { refresh(force?: boolean): Promise<{ provider: string; version: string | null }[]> }, cli: CliProvider, version: string, ms = VERSION_READ_MS): Promise<void> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const seen = (await monitor.refresh(true)).find(info => info.provider === cli)?.version ?? null;
+    if (seen === version) return;
+    if (Date.now() > end) throw new Error(`판을 읽지 못함: ${cli} ${version} (읽은 값 ${seen})`);
+    await Bun.sleep(50);
+  }
+}
+function service(world: World, bins: { claude?: string | null; codex?: string | null; gemini?: string | null }, extra: Partial<CliUpdatesOptions> = {}, versionTimeoutMs = VERSION_READ_MS) {
+  const monitor = new CliVersionMonitor({ claudeBin: bins.claude ?? join(world.root, "no-claude"), codexBin: bins.codex ?? join(world.root, "no-codex"), geminiBin: bins.gemini ?? null, recheckMs: 0, timeoutMs: versionTimeoutMs });
   let clock = Date.parse("2026-11-25T00:00:00.000Z");
   const state = extra.state ?? memoryState();
   const updates = new CliUpdates({
@@ -218,11 +236,12 @@ describe("새 판 확인(공개 주소)", () => {
     const claude = brewClaude(world, "2.1.323", "2.1.332");
     world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
     const { updates, monitor, advance } = service(world, { claude: claude.bin });
-    await monitor.refresh(true);
+    await readUntil(monitor, "claude", "2.1.323");
     await updates.check();
     expect(world.fetched).toEqual([CASK_CLAUDE]);
     const [info] = updates.list();
-    expect(info).toMatchObject({ cli: "claude", current: "2.1.323", latest: "2.1.332", available: true, latestVerified: false, method: "brew_cask", oneClick: true,
+    // latestVerified 는 확인된 판 목록(VERIFIED_CLI_VERSIONS)을 그대로 따른다(목록은 견본이 늘면 바뀐다: 0.2.11 에 Codex 0.172.0 이 들었다).
+    expect(info).toMatchObject({ cli: "claude", current: "2.1.323", latest: "2.1.332", available: true, latestVerified: isVerifiedCliVersion("claude", "2.1.332"), method: "brew_cask", oneClick: true,
       manualCommand: "brew upgrade --cask claude-code@latest", source: "Homebrew cask claude-code@latest" });
     expect(info!.checkedAt).toBe("2026-11-25T00:00:00.000Z");
     // 6시간 안에는 다시 읽지 않는다.
@@ -233,14 +252,14 @@ describe("새 판 확인(공개 주소)", () => {
     world.urls.set(CASK_CLAUDE, caskBody("2.1.323"));
     await updates.check();
     expect(world.fetched).toHaveLength(2);
-    expect(updates.list()[0]).toMatchObject({ latest: "2.1.323", available: false, latestVerified: true });
+    expect(updates.list()[0]).toMatchObject({ latest: "2.1.323", available: false, latestVerified: isVerifiedCliVersion("claude", "2.1.323") });
   });
   test("읽기에 실패해도 서버에 영향이 없고 마지막으로 읽은 값을 쓴다. 30분 뒤에 다시 읽는다", async () => {
     const world = newWorld();
     const claude = brewClaude(world, "2.1.323", "2.1.332");
     world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
     const { updates, monitor, advance } = service(world, { claude: claude.bin });
-    await monitor.refresh(true);
+    await readUntil(monitor, "claude", "2.1.323");
     await updates.check();
     advance(6 * 3600_000 + 1);
     world.urls.set(CASK_CLAUDE, null);
@@ -262,8 +281,8 @@ describe("새 판 확인(공개 주소)", () => {
     let used = 0;
     globalThis.fetch = (async () => { used++; throw new Error("no network in tests"); }) as unknown as typeof fetch;
     try {
-      const monitor = new CliVersionMonitor({ claudeBin: claude.bin, codexBin: join(world.root, "no"), geminiBin: null });
-      await monitor.refresh(true);
+      const monitor = new CliVersionMonitor({ claudeBin: claude.bin, codexBin: join(world.root, "no"), geminiBin: null, timeoutMs: VERSION_READ_MS });
+      await readUntil(monitor, "claude", "2.1.323");
       const updates = new CliUpdates({ home: world.home, versions: monitor, state: memoryState(), bins: () => ({ claudeBin: claude.bin, codexBin: join(world.root, "no"), geminiBin: null }) });
       cleanups.push(() => updates.stop());
       await updates.check(true);
@@ -276,13 +295,13 @@ describe("새 판 확인(공개 주소)", () => {
     const claude = brewClaude(world, "2.1.323", "2.1.332");
     world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
     const first = service(world, { claude: claude.bin });
-    await first.monitor.refresh(true);
+    await readUntil(first.monitor, "claude", "2.1.323");
     await first.updates.check();
     await first.updates.check(true);
     expect(world.notices.map(n => [n.cli, n.latest])).toEqual([["claude", "2.1.332"]]);
     expect(first.state.loadApiRecovery<Record<string, string>>(CLI_UPDATE_NOTICES_KEY)).toEqual({ claude: "2.1.332" });
     const again = service(world, { claude: claude.bin }, { state: first.state });
-    await again.monitor.refresh(true);
+    await readUntil(again.monitor, "claude", "2.1.323");
     await again.updates.check(true);
     expect(world.notices).toHaveLength(1);
     world.urls.set(CASK_CLAUDE, caskBody("2.1.333"));
@@ -301,7 +320,7 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     const claude = brewClaude(world, "2.1.323", "2.1.332");
     world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
     const { updates, monitor } = service(world, { claude: claude.bin });
-    await monitor.refresh(true);
+    await readUntil(monitor, "claude", "2.1.323");
     await updates.check();
     const run = updates.update("claude", "2.1.332");
     expect(run).toMatchObject({ cli: "claude", from: "2.1.323", to: "2.1.332", phase: "downloading", endedAt: null, error: null, installed: null });
@@ -328,9 +347,9 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     script(join(prefix, "bin/npm"), `echo "$*" >> '${log}'\necho "npm_config_yes=$npm_config_yes"\necho "added 2 packages, changed 1 package in 3s"\nprintf '%s' "\${7#@openai/codex@}" > '${versionFile}'\nexit 0`);
     world.urls.set(NPM_CODEX, npmBody("0.172.0"));
     const { updates, monitor } = service(world, { codex: join(prefix, "bin/codex") });
-    await monitor.refresh(true);
+    await readUntil(monitor, "codex", "0.166.0");
     await updates.check();
-    expect(updates.info("codex")).toMatchObject({ current: "0.166.0", latest: "0.172.0", available: true, latestVerified: false, method: "npm_global", oneClick: true });
+    expect(updates.info("codex")).toMatchObject({ current: "0.166.0", latest: "0.172.0", available: true, latestVerified: isVerifiedCliVersion("codex", "0.172.0"), method: "npm_global", oneClick: true });
     updates.update("codex");
     await updates.settled("codex");
     expect(calls(log)).toEqual([`install -g --prefix ${prefix} --no-fund --no-audit @openai/codex@0.172.0`]);
@@ -355,7 +374,7 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     process.env.SSH_CLIENT = "10.0.0.1 22 22";
     try {
       const { updates, monitor } = service(world, { claude: join(home, ".local/bin/claude"), gemini: agy }, { userHome: home });
-      await monitor.refresh(true);
+      await readUntil(monitor, "claude", "2.1.323"); await readUntil(monitor, "gemini", "1.5.16");
       await updates.check();
       expect(updates.info("claude")).toMatchObject({ method: "claude_native", latest: "2.1.332", available: true });
       expect(updates.info("gemini")).toMatchObject({ method: "agy_self", current: "1.5.16", latest: "1.5.17", available: true });
@@ -375,7 +394,7 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     const claude = brewClaude(world, "2.1.323", "2.1.332", `echo "Error: Download failed on Cask 'claude-code@latest'" >&2; exit 1`);
     world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
     const { updates, monitor } = service(world, { claude: claude.bin });
-    await monitor.refresh(true);
+    await readUntil(monitor, "claude", "2.1.323");
     await updates.check();
     updates.update("claude");
     await updates.settled("claude");
@@ -389,7 +408,7 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     const claude = brewClaude(world, "2.1.323", "2.1.332", `echo "Warning: Not upgrading claude-code@latest, the latest version is already installed"; exit 0`);
     world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
     const { updates, monitor } = service(world, { claude: claude.bin });
-    await monitor.refresh(true);
+    await readUntil(monitor, "claude", "2.1.323");
     await updates.check();
     updates.update("claude");
     await updates.settled("claude");
@@ -401,12 +420,13 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     const claude = brewClaude(world, "2.1.323", "2.1.332", `if read answer; then echo "read:$answer"; else echo "stdin closed"; fi; printf 'Password:'; sleep 30; exit 0`);
     world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
     const { updates, monitor } = service(world, { claude: claude.bin });
-    await monitor.refresh(true);
+    await readUntil(monitor, "claude", "2.1.323");
     await updates.check();
     const started = Date.now();
     updates.update("claude");
     await updates.settled("claude");
-    expect(Date.now() - started).toBeLessThan(8_000);
+    // 'sleep 30' 을 기다리지 않았다(바쁜 Mac 에서도 넉넉한 상한).
+    expect(Date.now() - started).toBeLessThan(20_000);
     expect(updates.info("claude").run).toMatchObject({ phase: "failed", error: { code: "cli_update_needs_input" } });
     expect(readFileSync(join(world.home, "logs", "cli-update-claude.log"), "utf8")).toContain("stdin closed");
   });
@@ -415,7 +435,7 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     const claude = brewClaude(world, "2.1.323", "2.1.332", `echo "==> Downloading"; sleep 30; exit 0`);
     world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
     const { updates, monitor } = service(world, { claude: claude.bin }, { runTimeoutMs: 400 });
-    await monitor.refresh(true);
+    await readUntil(monitor, "claude", "2.1.323");
     await updates.check();
     updates.update("claude");
     await updates.settled("claude");
@@ -463,7 +483,7 @@ describe("원클릭 업데이트(가짜 명령)", () => {
     let pending = 0;
     const { updates, monitor } = service(world, { claude: claude.bin }, { reopen: cli => (cli === "claude" ? { live: 3, pending } : { live: 0, pending: 0 }), pendingPollMs: 30,
       onInstalled: () => { pending = 2; } });
-    await monitor.refresh(true);
+    await readUntil(monitor, "claude", "2.1.323");
     await updates.check();
     expect(updates.info("claude")).toMatchObject({ liveSessions: 3 });
     expect("pendingReopen" in updates.info("claude")).toBe(false);
@@ -478,12 +498,37 @@ describe("원클릭 업데이트(가짜 명령)", () => {
 });
 
 /** 한 번 쓰고 버리는 run 사본이 서비스 안의 값을 바꾸지 못한다. */
+test("업데이트 뒤 판 읽기가 몇 번 늦어도(새 실행 파일의 첫 실행) 기다렸다가 끝으로 둔다", async () => {
+  const world = newWorld();
+  const prefix = join(world.root, "homebrew"), count = join(world.root, "new.count");
+  // 새 판은 처음 네 번의 --version 이 판 읽기 제한(0.3초)보다 늦다. 11-25 실제 Codex 업데이트에서는 판을 다시 읽는 데 2.6초가 걸렸다(서버 제한 3초).
+  const claude = brewClaude(world, "2.1.323", "2.1.332", `mkdir -p '${prefix}/Caskroom/claude-code@latest/2.1.332'
+    cat > '${prefix}/Caskroom/claude-code@latest/2.1.332/claude' <<'NEW'
+#!/bin/sh
+echo x >> '${count}'
+[ "$(wc -l < '${count}')" -le 4 ] && sleep 2
+[ "$1" = "--version" ] && echo "2.1.332 (Claude Code)" && exit 0
+exit 9
+NEW
+    chmod +x '${prefix}/Caskroom/claude-code@latest/2.1.332/claude'
+    ln -sfn '${prefix}/Caskroom/claude-code@latest/2.1.332/claude' '${prefix}/bin/claude'
+    echo "claude-code@latest was successfully upgraded!"; exit 0`);
+  world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
+  const { updates, monitor } = service(world, { claude: claude.bin }, {}, 300);
+  await readUntil(monitor, "claude", "2.1.323");
+  await updates.check();
+  updates.update("claude");
+  await updates.settled("claude");
+  expect(updates.info("claude").run).toMatchObject({ phase: "done", installed: "2.1.332", error: null });
+  expect(readFileSync(count, "utf8").trim().split("\n").length).toBeGreaterThanOrEqual(5);
+}, 60_000);
+
 test("사용자 홈 폴더가 없어도 명령을 돌린다(있는 폴더에서)", async () => {
   const world = newWorld();
   const claude = brewClaude(world, "2.1.323", "2.1.332");
   world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
   const { updates, monitor } = service(world, { claude: claude.bin }, { userHome: join(world.root, "no-such-home") });
-  await monitor.refresh(true);
+  await readUntil(monitor, "claude", "2.1.323");
   await updates.check();
   updates.update("claude");
   await updates.settled("claude");
@@ -495,7 +540,7 @@ test("돌려준 진행 값은 사본이다", async () => {
   const claude = brewClaude(world, "2.1.323", "2.1.332");
   world.urls.set(CASK_CLAUDE, caskBody("2.1.332"));
   const { updates, monitor } = service(world, { claude: claude.bin });
-  await monitor.refresh(true);
+  await readUntil(monitor, "claude", "2.1.323");
   await updates.check();
   const run: CliUpdateRun = updates.update("claude");
   run.phase = "failed";

@@ -31,6 +31,8 @@ export const CLI_UPDATE_FIRST_CHECK_MS = 90_000;
 export const CLI_UPDATE_FETCH_TIMEOUT_MS = 10_000;
 /** 앱의 '다시 확인'(refresh=1)이 같은 출처를 다시 읽는 최소 간격. */
 export const CLI_UPDATE_FORCE_MIN_MS = 60_000;
+/** 업데이트 뒤 판을 다시 읽는 최대 시간(새 실행 파일의 첫 실행이 늦을 때). */
+export const CLI_UPDATE_REREAD_MS = 60_000;
 /** 업데이트 한 번의 전체 시간 제한. */
 export const CLI_UPDATE_RUN_TIMEOUT_MS = 15 * 60_000;
 /** 알린 판(CLI 마다 마지막으로 알린 최신 판). api_recovery_state 의 열쇠. */
@@ -313,6 +315,8 @@ export interface CliUpdatesOptions {
   runTimeoutMs?: number;
   killGraceMs?: number;
   pendingPollMs?: number;
+  /** 업데이트 뒤 판을 다시 읽는 최대 시간. 기본 CLI_UPDATE_REREAD_MS. */
+  rereadMs?: number;
 }
 
 interface Latest { version: string | null; at: number; failedAt: number | null }
@@ -534,15 +538,21 @@ export class CliUpdates {
     } finally { log.close(); }
   }
 
-  /** 업데이트 뒤 판을 다시 읽는다. 앞서 돌던 읽기가 옛 값을 돌려줄 수 있어 한 번 더 읽는다. */
+  /**
+   * 업데이트 뒤 판을 다시 읽는다. 새로 깐 실행 파일의 첫 실행은 macOS 의 검사로 늦을 수 있다(11-25 실제 Codex 업데이트에서 다시 읽기에 2.6초,
+   * 판 읽기 제한은 3초): 판을 못 읽으면(null) CLI_UPDATE_REREAD_MS 까지 다시 읽는다. 옛 판이 읽히면 앞서 돌던 읽기의 값일 수 있어
+   * 두 번 이어 옛 판일 때 '그대로'로 본다. 시계는 실제 시간이다(시험이 넣는 now 는 멈춰 있을 수 있다).
+   */
   private async reread(run: CliUpdateRun): Promise<string | null> {
-    let version: string | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    const until = Date.now() + (this.options.rereadMs ?? CLI_UPDATE_REREAD_MS);
+    let version: string | null = null, same = 0;
+    for (;;) {
       try { version = (await this.options.versions.refresh(true)).find(info => info.provider === run.cli)?.version ?? null; } catch { version = null; }
       if (version && (!run.from || compareCliVersions(version, run.from) > 0)) return version;
-      await Bun.sleep(300);
+      same = version ? same + 1 : 0;
+      if (same >= 2 || Date.now() >= until) return version;
+      await Bun.sleep(500);
     }
-    return version;
   }
 
   private async runStep(step: UpdateStep, run: CliUpdateRun, log: UpdateLog, deadline: number): Promise<StepResult> {

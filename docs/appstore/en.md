@@ -73,12 +73,11 @@ AI agent,coding agent,AI team,developer,remote,approval,inbox,CLI,terminal,autom
 
 ## whatsNew
 
-What's New in 0.2.10 (up to 4,000 characters). Fixes made on the server need a Mac server on 0.2.10 or later, so each item says so.
+What's New in 0.2.11 (up to 4,000 characters). Fixes made on the server need a Mac server on 0.2.11 or later, so each item says so.
 
 ```text
-• You can now use Gemini. The lead and staff can run on Google's Antigravity CLI, with approval cards in your Inbox, compaction, resuming after usage limits and signing in from your phone, just like Claude Code and Codex staff. Requires the Antigravity CLI and the IAMCEO server 0.2.10 or later on your Mac.
-• Long-running projects open lighter. Finished to-dos and finished work arrive as only the recent ones first, and "Show earlier finished" loads the rest. Requires Mac server 0.2.10 or later.
-• The Files tab no longer fills up with a separate copy of every version; earlier versions fold under "Earlier versions", and a deck's original (PPTX or PDF) opens from "Original" under the preview. Requires Mac server 0.2.10 or later.
-• When the server can't be reached, iPhone still shows the recent state it saw last.
-• Gemini joins Claude Code and Codex in the AI tool picker.
+• You can choose a theme. In Settings › General › This device, pick one of five themes (Default, Frosted Glass, Workbench, Marshmallow, High Contrast) and a brightness; it changes right away and is saved on this iPhone only. Default looks the same as before.
+• When a new version of an AI tool on your Mac (Claude Code, Codex, Antigravity CLI) comes out, a strip at the top of the app and an iPhone notification tell you, and one tap updates it. Running staff reopen the same conversation when idle to use the new version. Requires Mac server 0.2.11 or later.
+• You can turn off "New AI tool versions" notifications in Settings › Notifications. Requires Mac server 0.2.11 or later.
+• Staff status and approval prompts are read correctly on the new Claude Code 2.1.331, Codex 0.172.0 and Antigravity CLI 1.5.16. Requires Mac server 0.2.11 or later.
 ```

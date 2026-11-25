@@ -1073,7 +1073,7 @@ function apiRoutes(ctx: ServerContext, urls: () => string[], pairing: Pairing, m
           protocol: 2, requestedProjectId, projectStatus,
           bootstrap: { apiOutage: store.apiOutage(), version: VERSION, settings: store.getSettings(), projects: store.projectSummaries(), herdr: HERDR_UNUSED,
             home: config.home, urls: urls(), cli: orch.cliCommand?.() ?? "iamceo", rankOverrides, ...engineField(orch), ...tailnetField(), ...versionFields,
-            ...cliVersionsField(ctx), ...cliUpdatesField(ctx), ...cliUpdatesField(ctx) },
+            ...cliVersionsField(ctx), ...cliUpdatesField(ctx) },
           // lite 면 자료 본문을 DB 에서 읽지도 않는다(아래 liteFile 이 빈 본문 칸을 뺀다). window 는 0.2.10 창 묶음.
           state: projectStatus === "ok" ? { ...store.projectState(requestedProjectId!, { lite, window }), ...snapshotNotices(requestedProjectId!) } : null,
           revisions: projectStatus === "ok" ? store.syncRevisions(requestedProjectId!) : { settings: store.settingsRevision(), members: {}, todos: {} },

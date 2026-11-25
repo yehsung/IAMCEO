@@ -1404,6 +1404,8 @@ private struct TableBlock: View {
     @State private var sortedRows: [[String]]?
     /// Column widths measured from the header and the first rows.
     @State private var widths: [CGFloat]?
+    /// The theme the widths were measured in (theme fonts differ in size and design, so a switch measures again).
+    @State private var widthsTheme: String?
     @State private var boxWidth: CGFloat = 0
     /// Taller than its cap: the box scrolls vertically too and the header row stays pinned.
     @State private var tall = false
@@ -1428,7 +1430,7 @@ private struct TableBlock: View {
                 ViewerNote(text: String(localized: "표를 정리하는 중입니다"), loading: true)
             }
         }
-        .task(id: text.utf8.count) { await prepare() }
+        .task(id: "\(text.utf8.count)|\(CE.style.key)") { await prepare() }
     }
 
     /// 이보다 큰 표는 메인 스레드 밖에서 읽는다(1MB 표는 수백 ms가 걸린다).
@@ -1447,17 +1449,24 @@ private struct TableBlock: View {
         }
         parsed = table
         tall = table.rows.count > 40
-        guard widths == nil, !table.header.isEmpty else { return }
+        let theme = CE.style
+        guard widths == nil || widthsTheme != theme.key, !table.header.isEmpty else { return }
         let header = table.header, numeric = table.numeric
         let sample = Array(table.rows.prefix(1500))
-        let cellSize = tableCellSize, headSize = tableHeadSize
+        // Measured in the fonts the cells draw with (.ceSystem: the theme's Mac scale and body design).
+        let cellSize = tableCellSize * theme.fixedFontScale, headSize = tableHeadSize * theme.fixedFontScale
+        let rounded = theme.bodyDesign == .rounded
+        let measured: [CGFloat]
         if sample.count * header.count <= 4000 {
-            widths = measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize)
+            measured = measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize, rounded: rounded)
         } else {
-            widths = await Task.detached(priority: .userInitiated) {
-                measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize)
+            measured = await Task.detached(priority: .userInitiated) {
+                measureTableColumns(header: header, rows: sample, numeric: numeric, cellSize: cellSize, headSize: headSize, rounded: rounded)
             }.value
+            guard !Task.isCancelled else { return }
         }
+        widths = measured
+        widthsTheme = theme.key
     }
 
     private func summary(_ table: ParsedTable) -> String {
@@ -1599,10 +1608,18 @@ private typealias PlatformFont = UIFont
 
 /// Column widths like the web's auto table layout: the widest line of each column (text columns capped at 420,
 /// numbers never wrap) or its header with the sort slot, whichever is wider. Pure, so it can run off the main thread.
-private func measureTableColumns(header: [String], rows: [[String]], numeric: [Bool], cellSize: CGFloat, headSize: CGFloat) -> [CGFloat] {
-    let textFont = PlatformFont.systemFont(ofSize: cellSize)
-    let digitFont = PlatformFont.monospacedDigitSystemFont(ofSize: cellSize, weight: .regular)
-    let headFont = PlatformFont.systemFont(ofSize: headSize, weight: .semibold)
+private func measureTableColumns(header: [String], rows: [[String]], numeric: [Bool], cellSize: CGFloat, headSize: CGFloat, rounded: Bool = false) -> [CGFloat] {
+    func design(_ font: PlatformFont) -> PlatformFont {
+        guard rounded, let descriptor = font.fontDescriptor.withDesign(.rounded) else { return font }
+        #if os(macOS)
+        return NSFont(descriptor: descriptor, size: font.pointSize) ?? font
+        #else
+        return UIFont(descriptor: descriptor, size: font.pointSize)
+        #endif
+    }
+    let textFont = design(PlatformFont.systemFont(ofSize: cellSize))
+    let digitFont = design(PlatformFont.monospacedDigitSystemFont(ofSize: cellSize, weight: .regular))
+    let headFont = design(PlatformFont.systemFont(ofSize: headSize, weight: .semibold))
     func width(_ value: String, _ font: PlatformFont) -> CGFloat {
         var widest: CGFloat = 0
         for line in value.split(whereSeparator: \.isNewline) {

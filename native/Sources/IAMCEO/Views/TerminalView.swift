@@ -170,15 +170,17 @@ struct TerminalView: View {
         VStack(spacing: 16) {
             if waking {
                 ProgressView("깨우는 중…")
-                Text("터미널이 준비되면 이어서 연결합니다").font(CEFont.note).foregroundStyle(CE.ink2)
+                Text("터미널이 준비되면 이어서 연결합니다").font(CEFont.note).foregroundStyle(TerminalColors.ink2)
             } else {
-                Text(wakeNotice ?? String(localized: "터미널을 준비하고 있습니다")).font(CEFont.note).foregroundStyle(CE.ink2)
+                Text(wakeNotice ?? String(localized: "터미널을 준비하고 있습니다")).font(CEFont.note).foregroundStyle(TerminalColors.ink2)
                     .multilineTextAlignment(.center)
                 Button("다시 시도") { Task { await wake() } }
                     .ceProminentButton().disabled(!store.canWrite || session.ending)
             }
         }
         .padding(.horizontal, 24).frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Drawn on the terminal surface, which stays dark in every theme: dark text and the spinner's label would vanish on it in a light theme.
+        .environment(\.colorScheme, .dark)
     }
 
     private func wake() async {

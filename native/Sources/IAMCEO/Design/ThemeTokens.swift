@@ -431,5 +431,7 @@ extension View {
 enum TerminalColors {
     static let background = Color(red: 11 / 255, green: 9 / 255, blue: 24 / 255)
     static let ink = Color(hex: 0xF5F2FF)
+    /// Secondary text on the terminal surface (the default theme's ink2, so 0.2.10 looks the same).
+    static let ink2 = Color(hex: 0xC2BBDF)
     static let caret = Color(hex: 0xB9A8FF)
 }
